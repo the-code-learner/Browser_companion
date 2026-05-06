@@ -49,6 +49,10 @@
         throw new Error("Target element could not be resolved.");
       }
 
+      if (action.type === "click_element") {
+        element.scrollIntoView({ block: "center", inline: "nearest" });
+      }
+
       verifyElement(element, action.target);
 
       if (action.type === "scroll_to_element") {
@@ -84,6 +88,8 @@
       }
 
       if (action.type === "click_element") {
+        element.scrollIntoView({ block: "center", inline: "nearest" });
+        verifyElement(element, action.target);
         element.click();
         return success(action, true, `Clicked ${getName(element)}.`);
       }
@@ -209,20 +215,65 @@
   }
 
   function resolveElement(target = {}) {
-    for (const selector of target.selector_candidates || []) {
-      const element = document.querySelector(selector);
-      if (element) return element;
+    if (target.agent_id) {
+      const element = document.querySelector(`[data-browser-companion-id='${cssEscape(target.agent_id)}']`);
+      if (element) {
+        return element;
+      }
     }
 
-    const candidates = Array.from(document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[contenteditable='true']"));
+    const selectorMatches = [];
+    for (const selector of target.selector_candidates || []) {
+      selectorMatches.push(...document.querySelectorAll(selector));
+    }
+
+    const candidates = [
+      ...selectorMatches,
+      ...document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[role='link'],[contenteditable='true']")
+    ];
     const wantedRole = String(target.role || "").toLowerCase();
     const wantedName = normalize(target.name);
+    const uniqueCandidates = Array.from(new Set(candidates));
 
-    return candidates.find((element) => {
-      const role = inferRole(element);
-      const name = normalize(getName(element));
-      return (!wantedRole || role === wantedRole) && (!wantedName || name.includes(wantedName) || wantedName.includes(name));
-    });
+    return uniqueCandidates
+      .map((element) => ({
+        element,
+        score: scoreElement(element, wantedRole, wantedName)
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.element || null;
+  }
+
+  function scoreElement(element, wantedRole, wantedName) {
+    const visible = isVisible(element);
+    const role = inferRole(element);
+    const name = normalize(getName(element));
+    const href = normalize(element.href || "");
+    let score = 0;
+
+    if (wantedRole && role !== wantedRole) {
+      return 0;
+    }
+
+    if (!wantedName) {
+      score += 10;
+    } else if (name === wantedName) {
+      score += 100;
+    } else if (name.includes(wantedName)) {
+      score += 70;
+    } else if (wantedName.includes(name) && name.length > 2) {
+      score += 45;
+    } else if (href.includes(wantedName.replace(/\s+/g, "-"))) {
+      score += 65;
+    } else {
+      return 0;
+    }
+
+    if (visible) score += 40;
+    if (isInViewport(element)) score += 20;
+    if (element.matches("a[href]")) score += 10;
+
+    return score;
   }
 
   function verifyElement(element, target = {}) {
@@ -335,6 +386,11 @@
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
     return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
+
+  function isInViewport(element) {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
   }
 
   function cssEscape(value) {

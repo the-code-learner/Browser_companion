@@ -43,7 +43,7 @@
       .filter(isVisible)
       .slice(0, 80)
       .map((element, index) => ({
-        agent_id: `link_${index + 1}`,
+        agent_id: ensureAgentId(element, "link", index),
         role: "link",
         name: getAccessibleName(element),
         href: element.href,
@@ -69,7 +69,7 @@
       .filter(isVisible)
       .slice(0, 80)
       .map((element, index) => ({
-        agent_id: `button_${index + 1}`,
+        agent_id: ensureAgentId(element, "button", index),
         role: "button",
         name: getAccessibleName(element),
         type: element.getAttribute("type") || element.tagName.toLowerCase(),
@@ -97,7 +97,7 @@
       .filter(isVisible)
       .slice(0, 160)
       .map((element, index) => ({
-        agent_id: `el_${index + 1}`,
+        agent_id: ensureAgentId(element, "el", index),
         tag: element.tagName.toLowerCase(),
         role: inferRole(element),
         name: getAccessibleName(element),
@@ -111,7 +111,7 @@
       agent_id: agentId,
       title: inferSectionTitle(container),
       fields: fields.filter(isVisible).slice(0, 120).map((field, index) => ({
-        agent_id: `${agentId}_field_${index + 1}`,
+        agent_id: ensureAgentId(field, `${agentId}_field`, index),
         tag: field.tagName.toLowerCase(),
         type: field.getAttribute("type") || field.getAttribute("role") || field.tagName.toLowerCase(),
         role: inferRole(field),
@@ -210,12 +210,23 @@
     const selectors = [];
 
     if (element.id) selectors.push(`#${cssEscape(element.id)}`);
+    if (element.dataset.browserCompanionId) {
+      selectors.push(`[data-browser-companion-id='${cssEscape(element.dataset.browserCompanionId)}']`);
+    }
     if (element.name) selectors.push(`${element.tagName.toLowerCase()}[name='${cssEscape(element.name)}']`);
     if (element.getAttribute("aria-label")) {
       selectors.push(`${element.tagName.toLowerCase()}[aria-label='${cssEscape(element.getAttribute("aria-label"))}']`);
     }
 
     return selectors.slice(0, 3);
+  }
+
+  function ensureAgentId(element, prefix, index) {
+    if (!element.dataset.browserCompanionId) {
+      element.dataset.browserCompanionId = `${prefix}_${index + 1}`;
+    }
+
+    return element.dataset.browserCompanionId;
   }
 
   function getBox(element) {
