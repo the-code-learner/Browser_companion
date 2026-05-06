@@ -778,9 +778,7 @@ async function executeActionPlan(plan) {
 
   state.messages.push({
     role: "assistant",
-    text: results.every((result) => result.status === "success")
-      ? "The browser actions were completed."
-      : "Some browser actions could not be completed. Check the activity log for details.",
+    text: getExecutionSummary(results),
     createdAt: Date.now()
   });
   await refreshPageAfterAction();
@@ -1175,18 +1173,73 @@ function summarizeObservation(observation) {
 }
 
 function summarizeHttpArtifact(artifact) {
-  const preview = String(artifact.bodyPreview || "").slice(0, 1200);
+  const preview = formatHttpBodyPreview(artifact);
   const headerLines = Object.entries(artifact.headers || {})
     .filter(([key]) => ["content-type", "server", "location", "cache-control", "x-robots-tag"].includes(key.toLowerCase()))
     .map(([key, value]) => `${key}: ${value}`)
     .join("\n");
+  const isError = Number(artifact.statusCode) >= 400;
 
-  return [
-    `HTTP ${artifact.statusCode} ${artifact.finalUrl || artifact.url}`,
+  const lines = [
+    `${isError ? "HTTP request failed" : "HTTP response"}: ${artifact.statusCode} ${artifact.finalUrl || artifact.url}`,
     artifact.contentType ? `Content-Type: ${artifact.contentType}` : "",
     headerLines ? `Headers:\n${headerLines}` : "",
     preview ? `Body preview:\n${preview}` : ""
-  ].filter(Boolean).join("\n\n");
+  ].filter(Boolean);
+
+  if (isError && !preview) {
+    lines.push("The server returned an error response, so no useful page text was available.");
+  }
+
+  return lines.join("\n\n");
+}
+
+function formatHttpBodyPreview(artifact) {
+  const body = String(artifact.bodyPreview || "").trim();
+  const contentType = String(artifact.contentType || "").toLowerCase();
+
+  if (!body) {
+    return "";
+  }
+
+  if (Number(artifact.statusCode) >= 400 && /<html|<!doctype html/i.test(body)) {
+    return "";
+  }
+
+  if (contentType.includes("html") || /<html|<!doctype html|<body/i.test(body)) {
+    return stripHtml(body).slice(0, 1200);
+  }
+
+  return body.slice(0, 1200);
+}
+
+function stripHtml(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getExecutionSummary(results) {
+  const total = results.length;
+  const failures = results.filter((result) => result.status !== "success");
+
+  if (total === 0) {
+    return "No browser actions were returned.";
+  }
+
+  if (failures.length > 0) {
+    const failedCount = failures.length;
+    return `${total - failedCount} of ${total} action${total === 1 ? "" : "s"} completed. ${failedCount} need${failedCount === 1 ? "s" : ""} attention; see the expandable action details above.`;
+  }
+
+  return "The browser actions were completed.";
 }
 
 function summarizeSearchArtifact(artifact) {

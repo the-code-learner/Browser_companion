@@ -190,7 +190,7 @@ async function runHttpRequest(payload = {}) {
 
     return {
       type: "http_response",
-      status: "success",
+      status: response.ok ? "success" : "http_error",
       url,
       finalUrl: response.url,
       statusCode: response.status,
