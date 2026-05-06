@@ -236,7 +236,7 @@ function renderMessage(message) {
   return `
     <article class="message ${message.role}">
       <span>${message.role === "user" ? "You" : "Companion"}</span>
-      <p>${escapeHtml(message.text)}</p>
+      <div class="message-body">${renderRichText(message.text)}</div>
     </article>
   `;
 }
@@ -257,6 +257,70 @@ function renderActionNote(note) {
       <summary>${escapeHtml(note.summary)}</summary>
       <ul>${details}</ul>
     </details>
+  `;
+}
+
+function renderRichText(text) {
+  const raw = String(text || "");
+  const parts = raw.split(/```mermaid\s*([\s\S]*?)```/i);
+  let html = "";
+
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index % 2 === 1) {
+      html += renderMermaidBlock(parts[index]);
+    } else {
+      html += renderMarkdown(parts[index]);
+    }
+  }
+
+  return html || "<p></p>";
+}
+
+function renderMarkdown(text) {
+  const blocks = String(text || "").split(/\n{2,}/);
+
+  return blocks.map((block) => {
+    const trimmed = block.trim();
+    if (!trimmed) return "";
+
+    if (/^```/.test(trimmed)) {
+      return `<pre><code>${escapeHtml(trimmed.replace(/^```[a-z]*\n?/i, "").replace(/```$/i, ""))}</code></pre>`;
+    }
+
+    if (/^#{1,3}\s+/.test(trimmed)) {
+      const level = Math.min(trimmed.match(/^#+/)?.[0].length || 2, 3);
+      return `<h${level + 2}>${renderInlineMarkdown(trimmed.replace(/^#{1,3}\s+/, ""))}</h${level + 2}>`;
+    }
+
+    if (/^[-*]\s+/m.test(trimmed)) {
+      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^[-*]\s+/, ""))}</li>`).join("");
+      return `<ul>${items}</ul>`;
+    }
+
+    if (/^\d+\.\s+/m.test(trimmed)) {
+      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ""))}</li>`).join("");
+      return `<ol>${items}</ol>`;
+    }
+
+    return `<p>${renderInlineMarkdown(trimmed).replace(/\n/g, "<br>")}</p>`;
+  }).join("");
+}
+
+function renderInlineMarkdown(text) {
+  return escapeHtml(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+}
+
+function renderMermaidBlock(source) {
+  const diagram = encodeURIComponent(source.trim());
+  return `
+    <figure class="mermaid-block">
+      <img alt="Mermaid diagram" src="https://mermaid.ink/svg/${diagram}">
+      <figcaption>Mermaid diagram</figcaption>
+    </figure>
   `;
 }
 

@@ -19,6 +19,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Background reading of search-result pages through `http_request` GET for verification and detail
 - Research behavior encourages reading additional sources or refining the search when the first source is weak
 - Post-tool synthesis turns search and HTTP results into an answer instead of dumping raw results in chat
+- Markdown rendering in chat, including Mermaid diagram blocks
 - Enter sends the chat message; Shift+Enter inserts a new line
 - Assistant responses follow the user's language unless the user asks otherwise
 - Side panel selector for the Codex model used by agent requests
