@@ -40,6 +40,10 @@ async function handleMessage(message) {
     return connectCodex();
   }
 
+  if (message?.type === MESSAGE_TYPES.EXTRACT_ATTACHMENT) {
+    return extractAttachment(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.AGENT_REQUEST) {
     return requestAgent(message.payload);
   }
@@ -150,6 +154,24 @@ async function requestAgent(payload) {
   }
 }
 
+async function extractAttachment(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "extract_attachment",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.EXTRACT_ATTACHMENT, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Attachment extraction failed."
+    };
+  }
+}
+
 async function executeActionPlan(plan) {
   const policy = validateActionPlan(plan);
 
@@ -182,6 +204,12 @@ async function executeActionPlan(plan) {
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
 
   for (const action of actions) {
+    const browserLevelResult = await executeBrowserLevelAction(tab, action);
+    if (browserLevelResult) {
+      results.push(browserLevelResult);
+      continue;
+    }
+
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (browserAction) => window.__browserCompanionActions.execute(browserAction),
@@ -197,6 +225,100 @@ async function executeActionPlan(plan) {
       results
     })
   };
+}
+
+async function executeBrowserLevelAction(tab, action) {
+  if (action?.type === "capture_viewport") {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: false,
+      artifact: {
+        kind: "screenshot",
+        dataUrl
+      },
+      validation_messages: [],
+      log_message: "Captured the visible viewport."
+    };
+  }
+
+  if (action?.type === "capture_numbered_overlay") {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => window.__browserCompanionActions.showNumberedOverlay()
+    });
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const [{ result: overlayMap }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => window.__browserCompanionActions.getOverlayMap()
+    });
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: false,
+      artifact: {
+        kind: "numbered_overlay",
+        dataUrl,
+        overlayMap
+      },
+      validation_messages: [],
+      log_message: "Captured a numbered overlay of visible controls."
+    };
+  }
+
+  if (action?.type === "go_back") {
+    await chrome.tabs.goBack(tab.id);
+    await waitForTabSettled(tab.id);
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: true,
+      validation_messages: [],
+      log_message: "Went back in the active tab."
+    };
+  }
+
+  if (action?.type === "wait_for_page_change") {
+    await waitForTabSettled(tab.id, action.timeoutMs || 10000);
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: true,
+      validation_messages: [],
+      log_message: "Waited for the page to settle."
+    };
+  }
+
+  return null;
+}
+
+function waitForTabSettled(tabId, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(done, timeoutMs);
+
+    function done() {
+      clearTimeout(timeout);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }
+
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        done();
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(listener);
+  });
 }
 
 function sendNativeMessage(payload) {

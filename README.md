@@ -8,10 +8,13 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Active-tab page observation
 - DOM, visible text, link, button, and form extraction
 - Attachment registration for local context
-- Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, and TypeScript attachment text extraction
+- Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, TypeScript, PDF, DOCX, XLSX, and image OCR attachment extraction through the native connector
 - Native host health, sign-in start, and Codex request protocol
-- Safe action preview and confirmation for form filling
-- Constrained browser action executor for scroll, highlight, focus, fill, select, checkbox, radio, and click actions
+- Safe action preview and confirmation for form filling and final submit or accept actions
+- Typed `SUBMIT` confirmation before high-risk submit, accept, send, publish, or finalize clicks
+- Constrained browser action executor for scroll, highlight, focus, fill, select, checkbox, radio, click, viewport screenshot, numbered overlay, wait, and back actions
+- Enter sends the chat message; Shift+Enter inserts a new line
+- Assistant responses follow the user's language unless the user asks otherwise
 - Shared message, schema, and policy modules
 
 ## Load locally
@@ -21,6 +24,8 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 3. Click Load unpacked.
 4. Select this project folder.
 5. Open a normal web page and click the Browser Companion extension icon.
+6. If you change extension files during development, click Reload for the extension in `chrome://extensions`.
+7. When observing a new site, approve the site access prompt for that origin.
 
 ## Development
 
@@ -47,6 +52,8 @@ powershell -ExecutionPolicy Bypass -File native-host/install-windows.ps1 -Extens
 ```
 
 Then click Connect in the side panel. The connector starts the ChatGPT/Codex sign-in flow through `codex login --device-auth`.
+
+Attachment extraction uses local Node dependencies in the native host. Extracted text stays local unless the privacy toggle allows it to be sent in a Codex request.
 
 `LOCAL_CONTEXT.md` is the local project memory and is intentionally ignored by git.
 

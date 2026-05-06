@@ -9,6 +9,8 @@ export const ACTION_TYPES = Object.freeze({
   CAPTURE_NUMBERED_OVERLAY: "capture_numbered_overlay",
   SCROLL_TO_ELEMENT: "scroll_to_element",
   SCROLL_BY: "scroll_by",
+  WAIT_FOR_PAGE_CHANGE: "wait_for_page_change",
+  GO_BACK: "go_back",
   FOCUS_ELEMENT: "focus_element",
   HIGHLIGHT_ELEMENT: "highlight_element",
   CLEAR_HIGHLIGHTS: "clear_highlights",

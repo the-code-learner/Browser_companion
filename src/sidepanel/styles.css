@@ -54,6 +54,7 @@ button:hover {
 .topbar,
 .page-strip,
 .action-preview,
+.privacy-panel,
 .context-grid article,
 .activity {
   border: 1px solid var(--line);
@@ -195,7 +196,11 @@ h2 {
   position: absolute;
   width: 1px;
   height: 1px;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .file-input span {
@@ -216,6 +221,7 @@ h2 {
 }
 
 .context-grid article,
+.privacy-panel,
 .activity {
   padding: 12px;
 }
@@ -308,6 +314,63 @@ h2 {
 .preview-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.wide-button {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.toggle-row,
+.confirmation-box {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.toggle-row + .toggle-row {
+  margin-top: 8px;
+}
+
+.confirmation-box {
+  align-items: stretch;
+  flex-direction: column;
+  margin-top: 10px;
+}
+
+.confirmation-box span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.confirmation-box input {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px;
+  color: var(--ink);
+}
+
+.policy-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.policy-list li {
+  border-left: 3px solid var(--line);
+  padding-left: 8px;
+}
+
+.policy-list strong,
+.policy-list span {
+  display: block;
+}
+
+.policy-list span {
+  color: var(--muted);
 }
 
 @media (min-width: 520px) {

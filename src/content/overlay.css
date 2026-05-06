@@ -3,3 +3,18 @@
   outline-offset: 2px !important;
 }
 
+.browser-companion-overlay-marker {
+  position: absolute !important;
+  z-index: 2147483647 !important;
+  display: grid !important;
+  width: 22px !important;
+  height: 22px !important;
+  place-items: center !important;
+  border: 2px solid #ffffff !important;
+  border-radius: 999px !important;
+  color: #ffffff !important;
+  background: #246bfe !important;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%) !important;
+  font: 700 12px/1 system-ui, sans-serif !important;
+  pointer-events: none !important;
+}

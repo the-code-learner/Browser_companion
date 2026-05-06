@@ -112,6 +112,8 @@
             "capture_numbered_overlay",
             "scroll_to_element",
             "scroll_by",
+            "wait_for_page_change",
+            "go_back",
             "focus_element",
             "highlight_element",
             "clear_highlights",
@@ -151,4 +153,3 @@
     }
   }
 }
-

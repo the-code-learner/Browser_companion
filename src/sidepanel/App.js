@@ -21,13 +21,23 @@ const state = {
   ],
   pendingPlan: null,
   pendingPolicy: null,
+  confirmationText: "",
+  privacy: {
+    persistSession: false,
+    sendAttachmentsToCodex: true
+  },
   activity: []
 };
 
 const app = document.getElementById("app");
 
-render();
-checkConnector();
+initialize();
+
+async function initialize() {
+  await restoreSession();
+  render();
+  checkConnector();
+}
 
 function render() {
   app.innerHTML = `
@@ -72,6 +82,7 @@ function render() {
         <ul class="compact-list">
           ${state.attachments.length ? state.attachments.map(renderAttachment).join("") : "<li>No files attached.</li>"}
         </ul>
+        <button id="clear-attachments" type="button" class="wide-button">Clear Attachments</button>
       </article>
 
       <article>
@@ -84,6 +95,21 @@ function render() {
         </div>
         <p>${escapeHtml(state.connector.message)}</p>
       </article>
+    </section>
+
+    <section class="privacy-panel">
+      <div class="section-title">
+        <h2>Privacy</h2>
+        <button id="clear-session" type="button">Clear Session</button>
+      </div>
+      <label class="toggle-row">
+        <input id="persist-session" type="checkbox" ${state.privacy.persistSession ? "checked" : ""}>
+        <span>Persist this local session in Chrome storage</span>
+      </label>
+      <label class="toggle-row">
+        <input id="send-attachments" type="checkbox" ${state.privacy.sendAttachmentsToCodex ? "checked" : ""}>
+        <span>Allow extracted attachment text in Codex requests</span>
+      </label>
     </section>
 
     <section class="activity">
@@ -102,15 +128,56 @@ function render() {
   document.getElementById("connect-codex").addEventListener("click", connectCodex);
   document.getElementById("clear-activity").addEventListener("click", () => {
     state.activity = [];
+    persistSession();
     render();
+  });
+  document.getElementById("clear-attachments").addEventListener("click", clearAttachments);
+  document.getElementById("clear-session").addEventListener("click", clearSession);
+  document.getElementById("persist-session").addEventListener("change", (event) => {
+    state.privacy.persistSession = event.target.checked;
+    persistSession();
+    render();
+  });
+  document.getElementById("send-attachments").addEventListener("change", (event) => {
+    state.privacy.sendAttachmentsToCodex = event.target.checked;
+    persistSession();
   });
   document.getElementById("attachment-input").addEventListener("change", handleAttachments);
   document.getElementById("chat-form").addEventListener("submit", handleChatSubmit);
+  document.getElementById("chat-input").addEventListener("keydown", handleComposerKeydown);
 
   if (state.pendingPlan) {
     document.getElementById("confirm-plan").addEventListener("click", confirmPendingPlan);
     document.getElementById("cancel-plan").addEventListener("click", cancelPendingPlan);
+    const confirmationInput = document.getElementById("confirmation-text");
+    if (confirmationInput) {
+      confirmationInput.addEventListener("input", (event) => {
+        state.confirmationText = event.target.value.trim();
+        updateConfirmButtonState();
+      });
+    }
   }
+}
+
+function handleComposerKeydown(event) {
+  if (event.key !== "Enter" || event.shiftKey) {
+    return;
+  }
+
+  event.preventDefault();
+  document.getElementById("chat-form").requestSubmit();
+}
+
+function updateConfirmButtonState() {
+  const button = document.getElementById("confirm-plan");
+  if (!button || !state.pendingPlan) {
+    return;
+  }
+
+  const highestRisk = getHighestRisk(state.pendingPolicy);
+  const needsTypedConfirmation = ["high", "sensitive"].includes(highestRisk);
+  const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
+  button.disabled = !state.pendingPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
 }
 
 function renderMessage(message) {
@@ -125,7 +192,11 @@ function renderMessage(message) {
 function renderActionPreview() {
   const policy = state.pendingPolicy;
   const blocked = policy && !policy.allowed;
-  const confirmation = policy?.requiresConfirmation ? "Confirmation required" : "Ready";
+  const highestRisk = getHighestRisk(policy);
+  const confirmation = getConfirmationLabel(highestRisk, policy);
+  const needsTypedConfirmation = ["high", "sensitive"].includes(highestRisk);
+  const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
+  const confirmDisabled = blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
 
   return `
     <section class="action-preview" aria-label="Action preview">
@@ -140,11 +211,30 @@ function renderActionPreview() {
       <ul class="compact-list">
         ${state.pendingPlan.actions.map(renderAction).join("")}
       </ul>
+      ${renderPolicyDetails(policy)}
+      ${needsTypedConfirmation ? `
+        <label class="confirmation-box">
+          <span>Type ${escapeHtml(requiredPhrase)} to continue</span>
+          <input id="confirmation-text" type="text" value="${escapeHtml(state.confirmationText)}" autocomplete="off">
+        </label>
+      ` : ""}
       <div class="preview-actions">
         <button id="cancel-plan" type="button">Cancel</button>
-        <button id="confirm-plan" type="button" ${blocked ? "disabled" : ""}>Confirm</button>
+        <button id="confirm-plan" type="button" ${confirmDisabled ? "disabled" : ""}>${escapeHtml(getConfirmButtonText(highestRisk, state.pendingPlan))}</button>
       </div>
     </section>
+  `;
+}
+
+function renderPolicyDetails(policy) {
+  if (!policy?.results?.length) {
+    return "";
+  }
+
+  return `
+    <ul class="policy-list">
+      ${policy.results.map((result) => `<li><strong>${escapeHtml(result.risk)}</strong><span>${escapeHtml(result.reason)}</span></li>`).join("")}
+    </ul>
   `;
 }
 
@@ -167,6 +257,16 @@ async function observePage() {
   state.page.summary = "Observing the active tab...";
   render();
 
+  const permission = await ensureCurrentSitePermission();
+
+  if (!permission.ok) {
+    state.page.status = "error";
+    state.page.summary = permission.error;
+    state.activity.unshift(`Observation blocked: ${permission.error}`);
+    render();
+    return null;
+  }
+
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.OBSERVE_ACTIVE_TAB));
 
   if (!response.ok) {
@@ -188,6 +288,56 @@ async function observePage() {
   state.activity.unshift(`Observed ${state.page.title}.`);
   render();
   return observation;
+}
+
+async function ensureCurrentSitePermission() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  if (!tab?.url) {
+    return {
+      ok: false,
+      error: "No active tab URL is available."
+    };
+  }
+
+  let originPattern;
+
+  try {
+    const url = new URL(tab.url);
+
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return {
+        ok: false,
+        error: "Browser Companion can observe normal http and https pages only."
+      };
+    }
+
+    originPattern = `${url.origin}/*`;
+  } catch (error) {
+    return {
+      ok: false,
+      error: "The current page URL cannot be observed."
+    };
+  }
+
+  const hasPermission = await chrome.permissions.contains({
+    origins: [originPattern]
+  });
+
+  if (hasPermission) {
+    return { ok: true };
+  }
+
+  const granted = await chrome.permissions.request({
+    origins: [originPattern]
+  });
+
+  return granted
+    ? { ok: true }
+    : {
+        ok: false,
+        error: `Site access was not granted for ${originPattern}.`
+      };
 }
 
 async function checkConnector() {
@@ -241,46 +391,92 @@ async function handleAttachments(event) {
   const loaded = await Promise.all(files.map(readAttachment));
   state.attachments.unshift(...loaded);
   state.activity.unshift(`Attached ${files.length} file${files.length === 1 ? "" : "s"}.`);
+  persistSession();
   render();
 }
 
-function readAttachment(file) {
+async function readAttachment(file) {
   const textLike = /^text\/|json|csv|xml|markdown|javascript|typescript/i.test(file.type) || /\.(txt|md|csv|json|xml|html|css|js|ts)$/i.test(file.name);
+  const base = {
+    id: crypto.randomUUID(),
+    name: file.name,
+    size: file.size,
+    type: file.type || "unknown",
+    status: "registered",
+    text: "",
+    warnings: []
+  };
+
+  if (file.size > 15 * 1024 * 1024) {
+    return {
+      ...base,
+      status: "too large",
+      warnings: ["Files larger than 15 MB are not extracted in the side panel."]
+    };
+  }
+
+  const extracted = await extractAttachmentViaBridge(file, base.id);
+
+  if (extracted) {
+    return {
+      ...base,
+      status: extracted.status || "text ready",
+      text: extracted.text || "",
+      warnings: extracted.warnings || []
+    };
+  }
 
   if (!textLike) {
-    return Promise.resolve({
-      id: crypto.randomUUID(),
-      name: file.name,
-      size: file.size,
-      type: file.type || "unknown",
-      status: "registered",
-      text: ""
-    });
+    return base;
   }
 
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => {
       resolve({
-        id: crypto.randomUUID(),
-        name: file.name,
-        size: file.size,
-        type: file.type || "text",
+        ...base,
         status: "text ready",
         text: String(reader.result || "").slice(0, 30000)
       });
     };
     reader.onerror = () => {
       resolve({
-        id: crypto.randomUUID(),
-        name: file.name,
-        size: file.size,
-        type: file.type || "unknown",
+        ...base,
         status: "read failed",
         text: ""
       });
     };
     reader.readAsText(file);
+  });
+}
+
+async function extractAttachmentViaBridge(file, id) {
+  const base64 = await readFileAsBase64(file);
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXTRACT_ATTACHMENT, {
+    id,
+    name: file.name,
+    size: file.size,
+    type: file.type || "unknown",
+    base64
+  }));
+
+  if (!response.ok) {
+    state.activity.unshift(`Local extraction unavailable for ${file.name}: ${response.error}`);
+    return null;
+  }
+
+  return response.envelope.payload;
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      resolve(dataUrl.includes(",") ? dataUrl.split(",").pop() : dataUrl);
+    };
+    reader.onerror = () => reject(new Error("Could not read attachment bytes."));
+    reader.readAsDataURL(file);
   });
 }
 
@@ -306,16 +502,19 @@ async function handleChatSubmit(event) {
 }
 
 async function getAgentResult(goal) {
+  const responseLanguage = detectUserLanguage(goal);
+
   if (state.connector.status === "connected") {
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
       goal,
+      responseLanguage,
       observation: state.page.observation,
       attachments: state.attachments.map((file) => ({
         id: file.id,
         name: file.name,
         type: file.type,
         status: file.status,
-        text: file.text
+        text: state.privacy.sendAttachmentsToCodex ? file.text : ""
       }))
     }));
 
@@ -326,7 +525,7 @@ async function getAgentResult(goal) {
     state.activity.unshift(`Codex request failed: ${response.error}`);
   }
 
-  return buildLocalAgentResult(goal);
+  return buildLocalAgentResult(goal, responseLanguage);
 }
 
 async function handleAgentResult(result) {
@@ -334,6 +533,7 @@ async function handleAgentResult(result) {
     const policyResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.VALIDATE_ACTION_PLAN, { plan: result }));
     state.pendingPlan = result;
     state.pendingPolicy = policyResponse.envelope.payload;
+    state.confirmationText = "";
     state.messages.push({
       role: "assistant",
       text: result.summary_for_user
@@ -356,6 +556,16 @@ async function handleAgentResult(result) {
     return;
   }
 
+  if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
+    state.messages.push({
+      role: "assistant",
+      text: result.message || "The local Codex connector is not ready, so I used only local page context."
+    });
+    state.activity.unshift("Codex agent was unavailable.");
+    render();
+    return;
+  }
+
   state.messages.push({
     role: "assistant",
     text: result?.text || "I could not produce a safe browser action from that request yet."
@@ -373,6 +583,7 @@ async function confirmPendingPlan() {
   state.activity.unshift("Executing confirmed action plan...");
   state.pendingPlan = null;
   state.pendingPolicy = null;
+  state.confirmationText = "";
   render();
 
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan }));
@@ -398,47 +609,102 @@ async function confirmPendingPlan() {
 function cancelPendingPlan() {
   state.pendingPlan = null;
   state.pendingPolicy = null;
+  state.confirmationText = "";
   state.activity.unshift("Action plan canceled.");
+  persistSession();
   render();
 }
 
-function buildLocalAgentResult(goal) {
+function buildLocalAgentResult(goal, responseLanguage) {
   const observation = state.page.observation;
   const lowerGoal = goal.toLowerCase();
 
   if (!observation) {
     return {
       type: "ask_user",
-      question: "I need to observe the current tab before I can help with that page."
+      question: localText(responseLanguage, "needObservation")
     };
   }
 
   if (/\b(captcha|password|payment|card|delete account|sign contract)\b/i.test(goal)) {
     return {
       type: "stop_for_human",
-      reason: "This request touches a human-only or sensitive flow, so I will stop instead of automating it."
+      reason: localText(responseLanguage, "humanOnly")
     };
   }
 
+  if (/\b(submit|send|accept|agree|invia|accetta|conferma|procedi)\b/i.test(lowerGoal)) {
+    const finalPlan = buildFinalClickPlan(goal, observation, responseLanguage);
+    if (finalPlan.actions.length > 0) {
+      return finalPlan;
+    }
+  }
+
   if (/\b(fill|complete|register|apply|form|profile)\b/i.test(lowerGoal)) {
-    const plan = buildFormFillPlan(goal, observation);
+    const plan = buildFormFillPlan(goal, observation, responseLanguage);
     if (plan.actions.length > 0) {
       return plan;
     }
 
     return {
       type: "ask_user",
-      question: "I found form context, but I could not confidently match attachment data to fields. Attach a text, CSV, JSON, or Markdown profile with clear labels."
+      question: localText(responseLanguage, "attachClearProfile")
     };
   }
 
   return {
     type: "natural_response",
-    text: summarizePageForUser(observation)
+    text: summarizePageForUser(observation, responseLanguage)
   };
 }
 
-function buildFormFillPlan(goal, observation) {
+function buildFinalClickPlan(goal, observation, responseLanguage) {
+  const candidates = [
+    ...(observation.buttons || []),
+    ...(observation.interactive_elements || []).filter((item) => item.role === "button" || item.role === "link")
+  ];
+  const target = candidates.find((item) => /\b(submit|send|publish|accept|agree|continue|confirm|invia|accetta|conferma|procedi)\b/i.test(item.name || ""));
+
+  if (!target) {
+    return {
+      type: "agent_plan",
+      goal,
+      risk_level: "high",
+      summary_for_user: localText(responseLanguage, "noSubmitControl"),
+      needs_clarification: true,
+      requires_confirmation: true,
+      will_submit: true,
+      actions: [],
+      uncertain_fields: []
+    };
+  }
+
+  return {
+    type: "agent_plan",
+    goal,
+    risk_level: "high",
+    summary_for_user: localText(responseLanguage, "submitFound", target.name),
+    needs_clarification: false,
+    requires_confirmation: true,
+    will_submit: true,
+    actions: [
+      {
+        id: "act_submit_001",
+        type: "click_element",
+        target: {
+          agent_id: target.agent_id,
+          role: target.role,
+          name: target.name,
+          selector_candidates: target.selector_candidates || []
+        },
+        reason: "User requested a final submit or accept action."
+      }
+    ],
+    uncertain_fields: []
+  };
+}
+
+function buildFormFillPlan(goal, observation, responseLanguage) {
   const facts = extractAttachmentFacts();
   const actions = [];
   const uncertainFields = [];
@@ -485,7 +751,7 @@ function buildFormFillPlan(goal, observation) {
     type: "agent_plan",
     goal,
     risk_level: "medium",
-    summary_for_user: `I can fill ${actions.length} non-sensitive field${actions.length === 1 ? "" : "s"} from local attachment context. I will not submit the form.`,
+    summary_for_user: localText(responseLanguage, "fillSummary", actions.length),
     needs_clarification: false,
     requires_confirmation: true,
     will_submit: false,
@@ -558,16 +824,73 @@ function isSensitiveField(field) {
   return /\b(password|card|cvv|cvc|tax|vat|passport|identity|health|medical|legal representative|ssn)\b/i.test(`${field.name} ${field.type} ${field.nearby_text}`);
 }
 
-function summarizePageForUser(observation) {
+function summarizePageForUser(observation, responseLanguage) {
   const headings = (observation.headings || []).map((heading) => heading.text).filter(Boolean).slice(0, 5);
   const fieldCount = observation.forms.reduce((total, form) => total + form.fields.length, 0);
   const headingText = headings.length ? ` Main sections: ${headings.join("; ")}.` : "";
+  if (responseLanguage === "it") {
+    const italianHeadingText = headings.length ? ` Sezioni principali: ${headings.join("; ")}.` : "";
+    return `Ho osservato la pagina: ${observation.links.length} link, ${observation.buttons.length} pulsanti e ${fieldCount} campi modulo.${italianHeadingText}`;
+  }
   return `I observed the page: ${observation.links.length} links, ${observation.buttons.length} buttons, and ${fieldCount} form fields.${headingText}`;
 }
 
 function summarizeObservation(observation) {
   const fieldCount = observation.forms.reduce((total, form) => total + form.fields.length, 0);
   return `${observation.links.length} links, ${observation.buttons.length} buttons, ${fieldCount} fields, and ${observation.visible_text.length} characters of visible text captured.`;
+}
+
+async function restoreSession() {
+  const stored = await chrome.storage.local.get(["browserCompanionSession"]);
+  const session = stored.browserCompanionSession;
+
+  if (!session?.privacy?.persistSession) {
+    return;
+  }
+
+  state.privacy = session.privacy;
+  state.attachments = session.attachments || [];
+  state.messages = session.messages || state.messages;
+  state.activity = session.activity || [];
+}
+
+function persistSession() {
+  if (!state.privacy.persistSession) {
+    chrome.storage.local.remove("browserCompanionSession");
+    return;
+  }
+
+  chrome.storage.local.set({
+    browserCompanionSession: {
+      privacy: state.privacy,
+      attachments: state.attachments,
+      messages: state.messages.slice(-30),
+      activity: state.activity.slice(0, 80)
+    }
+  });
+}
+
+function clearAttachments() {
+  state.attachments = [];
+  state.activity.unshift("Attachments cleared from local session memory.");
+  persistSession();
+  render();
+}
+
+function clearSession() {
+  state.attachments = [];
+  state.messages = [
+    {
+      role: "assistant",
+      text: "Local session cleared. Tell me what you want to accomplish on the current page."
+    }
+  ];
+  state.pendingPlan = null;
+  state.pendingPolicy = null;
+  state.confirmationText = "";
+  state.activity = ["Local session cleared."];
+  chrome.storage.local.remove("browserCompanionSession");
+  render();
 }
 
 function sendRuntimeMessage(message) {
@@ -578,6 +901,33 @@ function getConnectorClass() {
   if (state.connector.status === "connected") return "ok";
   if (state.connector.status === "unknown" || state.connector.status === "connecting") return "neutral";
   return "warn";
+}
+
+function getHighestRisk(policy) {
+  const order = ["low", "medium", "high", "sensitive", "blocked"];
+  return (policy?.results || []).reduce((highest, result) => {
+    return order.indexOf(result.risk) > order.indexOf(highest) ? result.risk : highest;
+  }, "low");
+}
+
+function getConfirmationLabel(risk, policy) {
+  if (!policy?.requiresConfirmation) return "Ready";
+  if (risk === "high") return "Explicit final-action confirmation required";
+  if (risk === "sensitive") return "Sensitive data confirmation required";
+  if (risk === "blocked") return "Blocked by policy";
+  return "Confirmation required";
+}
+
+function getRequiredConfirmationPhrase(risk, plan) {
+  if (risk === "sensitive") return "CONFIRM SENSITIVE";
+  if (plan?.will_submit || risk === "high") return "SUBMIT";
+  return "CONFIRM";
+}
+
+function getConfirmButtonText(risk, plan) {
+  if (risk === "sensitive") return "Confirm Sensitive Action";
+  if (plan?.will_submit || risk === "high") return "Submit / Accept";
+  return "Confirm";
 }
 
 function formatBytes(bytes) {
@@ -592,6 +942,37 @@ function normalizeKey(value) {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function detectUserLanguage(text) {
+  if (/\b(cosa|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo)\b/i.test(text)) {
+    return "it";
+  }
+
+  return "en";
+}
+
+function localText(language, key, value) {
+  const messages = {
+    en: {
+      needObservation: "I need to observe the current tab before I can help with that page.",
+      humanOnly: "This request touches a human-only or sensitive flow, so I will stop instead of automating it.",
+      attachClearProfile: "I found form context, but I could not confidently match attachment data to fields. Attach a text, CSV, JSON, Markdown, PDF, DOCX, XLSX, or image file with clear labels.",
+      noSubmitControl: "I could not find a submit or accept control on the observed page.",
+      submitFound: `I found "${value}". This may submit, accept, send, or finalize something on the website. Type SUBMIT to enable the final action.`,
+      fillSummary: `I can fill ${value} non-sensitive field${value === 1 ? "" : "s"} from local attachment context. I will not submit the form.`
+    },
+    it: {
+      needObservation: "Devo osservare la scheda corrente prima di aiutarti con questa pagina.",
+      humanOnly: "Questa richiesta riguarda un flusso sensibile o da gestire manualmente, quindi mi fermo invece di automatizzarlo.",
+      attachClearProfile: "Ho trovato un modulo, ma non riesco ad abbinare con sicurezza i dati allegati ai campi. Allega un file TXT, CSV, JSON, Markdown, PDF, DOCX, XLSX o immagine con etichette chiare.",
+      noSubmitControl: "Non ho trovato un controllo di invio o accettazione nella pagina osservata.",
+      submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Digita SUBMIT per abilitare l'azione finale.`,
+      fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`
+    }
+  };
+
+  return messages[language]?.[key] || messages.en[key];
 }
 
 function escapeHtml(value) {

@@ -11,6 +11,7 @@ const LOW_RISK_ACTIONS = new Set([
   ACTION_TYPES.CAPTURE_NUMBERED_OVERLAY,
   ACTION_TYPES.SCROLL_TO_ELEMENT,
   ACTION_TYPES.SCROLL_BY,
+  ACTION_TYPES.WAIT_FOR_PAGE_CHANGE,
   ACTION_TYPES.HIGHLIGHT_ELEMENT,
   ACTION_TYPES.CLEAR_HIGHLIGHTS,
   ACTION_TYPES.ASK_USER,
@@ -19,6 +20,7 @@ const LOW_RISK_ACTIONS = new Set([
 
 const MEDIUM_RISK_ACTIONS = new Set([
   ACTION_TYPES.FOCUS_ELEMENT,
+  ACTION_TYPES.GO_BACK,
   ACTION_TYPES.FILL_FIELD,
   ACTION_TYPES.SELECT_OPTION,
   ACTION_TYPES.TOGGLE_CHECKBOX,
@@ -28,7 +30,7 @@ const MEDIUM_RISK_ACTIONS = new Set([
   ACTION_TYPES.CLICK_OVERLAY_NUMBER
 ]);
 
-const SUBMIT_WORDS = /\b(submit|send|publish|delete|remove|buy|purchase|pay|accept|agree|sign|authorize|confirm order)\b/i;
+const SUBMIT_WORDS = /\b(submit|send|publish|delete|remove|buy|purchase|pay|accept|agree|sign|authorize|confirm order|continue and submit|finalize|invia|accetta|conferma|procedi)\b/i;
 const SENSITIVE_WORDS = /\b(password|passcode|card|cvv|cvc|iban|ssn|social security|tax id|vat|passport|identity|health|medical|legal representative)\b/i;
 const BLOCKED_WORDS = /\b(captcha|2fa|mfa|one-time code|otp|bypass access|circumvent)\b/i;
 
@@ -66,9 +68,11 @@ export function validateActionPlan(plan) {
       index,
       actionType: action?.type || "unknown",
       risk,
-      allowed: risk !== RISK_LEVELS.BLOCKED,
+      allowed: risk !== RISK_LEVELS.BLOCKED && action?.type !== ACTION_TYPES.UPLOAD_FILE_TO_FIELD,
       requiresConfirmation: risk !== RISK_LEVELS.LOW,
-      reason: getPolicyReason(risk)
+      reason: action?.type === ACTION_TYPES.UPLOAD_FILE_TO_FIELD
+        ? "File upload fields must be completed by the user through the browser file picker."
+        : getPolicyReason(risk)
     };
   });
 
@@ -99,4 +103,3 @@ function getPolicyReason(risk) {
 
   return "The action is outside the allowed browser automation policy.";
 }
-

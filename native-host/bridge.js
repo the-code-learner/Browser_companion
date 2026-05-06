@@ -46,11 +46,114 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "extract_attachment") {
+    extractAttachment(message.payload)
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "attachment_extraction",
+        status: "error",
+        text: "",
+        message: error.message || "Attachment extraction failed."
+      }));
+    return;
+  }
+
   writeMessage({
     connected: false,
     status: "unsupported",
     message: `Unsupported bridge message: ${message?.type || "missing"}`
   });
+}
+
+async function extractAttachment(payload = {}) {
+  const fileName = payload.name || "attachment";
+  const extension = path.extname(fileName).toLowerCase();
+  const mimeType = payload.type || "";
+  const bytes = Buffer.from(payload.base64 || "", "base64");
+
+  if (!bytes.length) {
+    return {
+      type: "attachment_extraction",
+      status: "empty",
+      text: "",
+      message: "Attachment did not contain readable bytes."
+    };
+  }
+
+  if (isTextLike(fileName, mimeType)) {
+    return extractionResult(bytes.toString("utf8"), "text ready");
+  }
+
+  if (extension === ".docx" || mimeType.includes("wordprocessingml")) {
+    const mammoth = await import("mammoth");
+    const result = await mammoth.extractRawText({ buffer: bytes });
+    return extractionResult(result.value, "docx text ready", result.messages?.map((item) => item.message));
+  }
+
+  if (extension === ".pdf" || mimeType === "application/pdf") {
+    const pdfParse = await import("pdf-parse");
+    const parser = pdfParse.default || pdfParse;
+    const result = await parser(bytes);
+    return extractionResult(result.text, "pdf text ready");
+  }
+
+  if (extension === ".xlsx" || mimeType.includes("spreadsheetml")) {
+    const exceljs = await import("exceljs");
+    const workbook = new exceljs.default.Workbook();
+    await workbook.xlsx.load(bytes);
+    const parts = [];
+    workbook.eachSheet((worksheet) => {
+      const lines = [`Sheet: ${worksheet.name}`];
+      worksheet.eachRow((row) => {
+        const values = row.values.slice(1).map((value) => cellToText(value));
+        lines.push(values.join(","));
+      });
+      parts.push(lines.join("\n"));
+    });
+    return extractionResult(parts.join("\n\n"), "spreadsheet text ready");
+  }
+
+  if ([".xls", ".ods"].includes(extension)) {
+    return {
+      type: "attachment_extraction",
+      status: "registered",
+      text: "",
+      message: "Legacy spreadsheet formats are registered but not extracted. Save the file as XLSX or CSV."
+    };
+  }
+
+  if (/^image\//.test(mimeType) || [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"].includes(extension)) {
+    const tesseract = await import("tesseract.js");
+    const worker = await tesseract.createWorker("eng");
+    try {
+      const result = await worker.recognize(bytes);
+      return extractionResult(result.data.text, "ocr text ready");
+    } finally {
+      await worker.terminate();
+    }
+  }
+
+  return {
+    type: "attachment_extraction",
+    status: "registered",
+    text: "",
+    message: "This attachment type is registered but no extractor is available yet."
+  };
+}
+
+function extractionResult(text, status, warnings = []) {
+  const cleanText = compact(text).slice(0, 120000);
+  return {
+    type: "attachment_extraction",
+    status,
+    text: cleanText,
+    warnings,
+    message: cleanText ? `Extracted ${cleanText.length} characters.` : "No text was extracted."
+  };
+}
+
+function isTextLike(fileName, mimeType) {
+  return /^text\//i.test(mimeType) || /json|csv|xml|markdown|javascript|typescript|html|css/i.test(mimeType) || /\.(txt|md|csv|json|xml|html|css|js|ts)$/i.test(fileName);
 }
 
 function getHealth() {
@@ -72,10 +175,34 @@ function getHealth() {
     connected: loggedIn,
     status: loggedIn ? "ready" : "login_required",
     codexVersion: codexVersion.stdout.trim(),
+    capabilities: getCapabilities(),
     message: loggedIn
       ? "Local connector can reach Codex CLI and a login session appears to be available."
       : "Codex CLI is installed, but ChatGPT/Codex sign-in is required."
   };
+}
+
+function getCapabilities() {
+  return {
+    codexExec: true,
+    attachmentExtraction: {
+      text: true,
+      docx: hasPackage("mammoth"),
+      pdf: hasPackage("pdf-parse"),
+      spreadsheet: hasPackage("exceljs"),
+      imageOcr: hasPackage("tesseract.js")
+    },
+    protocolVersion: 2
+  };
+}
+
+function hasPackage(packageName) {
+  try {
+    import.meta.resolve(packageName);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function connectCodex() {
@@ -162,6 +289,9 @@ function buildAgentPrompt(payload) {
     "User goal:",
     payload.goal || "",
     "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
     "Current page observation JSON:",
     JSON.stringify(payload.observation || {}, null, 2),
     "",
@@ -190,4 +320,16 @@ function writeMessage(message) {
 
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function cellToText(value) {
+  if (value == null) return "";
+  if (typeof value === "object") {
+    if (value.text) return value.text;
+    if (value.result != null) return String(value.result);
+    if (value.richText) return value.richText.map((part) => part.text).join("");
+    if (value.hyperlink) return value.hyperlink;
+    return JSON.stringify(value);
+  }
+  return String(value);
 }
