@@ -373,9 +373,9 @@ h2 {
 .utility-drawer {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 8px;
+  gap: 6px;
   overflow-y: auto;
-  max-height: 34vh;
+  max-height: 28vh;
 }
 
 .utility-drawer details {
@@ -384,18 +384,19 @@ h2 {
 
 .utility-drawer summary {
   display: flex;
-  min-height: 40px;
+  min-height: 30px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 12px;
+  padding: 0 10px;
   color: var(--ink);
   cursor: pointer;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .utility-drawer details > :not(summary) {
-  margin: 0 12px 12px;
+  margin: 0 10px 8px;
 }
 
 .utility-drawer details > .button-row {
@@ -494,14 +495,17 @@ h2 {
 
 .wide-button {
   width: 100%;
-  margin-top: 10px;
+  min-height: 30px;
+  margin-top: 6px;
+  font-size: 12px;
 }
 
 .toggle-row,
 .confirmation-box,
 .field-stack {
   display: flex;
-  gap: 8px;
+  gap: 6px;
+  font-size: 12px;
 }
 
 .toggle-row {
@@ -521,7 +525,7 @@ h2 {
 .field-stack {
   align-items: stretch;
   flex-direction: column;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .confirmation-box span,
@@ -532,11 +536,12 @@ h2 {
 
 .confirmation-box input,
 .field-stack select {
-  min-height: 36px;
+  min-height: 30px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  padding: 8px;
+  padding: 5px 7px;
   color: var(--ink);
+  font-size: 12px;
 }
 
 .policy-list {
