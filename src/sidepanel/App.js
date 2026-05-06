@@ -560,9 +560,61 @@ async function observePage(options = {}) {
     summary: summarizeObservation(observation),
     observation
   };
+  await enrichGoogleDocObservation();
   state.activity.unshift(`Observed ${state.page.title}.`);
   render();
   return observation;
+}
+
+async function enrichGoogleDocObservation() {
+  const observation = state.page.observation;
+  const docId = extractGoogleDocId(observation?.tab?.url || state.page.url);
+
+  if (!docId || String(observation?.visible_text || "").length > 1200) {
+    return;
+  }
+
+  const exported = await fetchGoogleDocText(docId);
+
+  if (!exported || exported.text.length <= String(observation.visible_text || "").length + 200) {
+    return;
+  }
+
+  state.page.observation = {
+    ...observation,
+    visible_text: exported.text,
+    external_text_source: exported.source,
+    external_text_status: exported.status
+  };
+  state.page.summary = summarizeObservation(state.page.observation);
+  state.activity.unshift(`Fetched Google Docs text from ${exported.source}.`);
+}
+
+async function fetchGoogleDocText(docId) {
+  const candidates = [
+    `https://docs.google.com/document/d/${docId}/export?format=txt`,
+    `https://docs.google.com/document/d/${docId}/mobilebasic`
+  ];
+
+  for (const url of candidates) {
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.HTTP_REQUEST, {
+      url,
+      method: "GET"
+    }));
+
+    const payload = response.ok ? response.envelope.payload : null;
+    const text = cleanFetchedText(payload?.bodyPreview || "", payload?.contentType || "");
+
+    if (payload?.ok && text.length > 200) {
+      return {
+        source: payload.finalUrl || url,
+        status: payload.statusCode,
+        text
+      };
+    }
+  }
+
+  return null;
 }
 
 async function ensureCurrentSitePermission() {
@@ -1548,6 +1600,16 @@ function stripLargeArtifactsForSynthesis(result) {
     };
   }
 
+  if (result.artifact?.kind === "screenshot") {
+    return {
+      ...result,
+      artifact: {
+        kind: "screenshot",
+        ocrText: String(result.artifact.ocrText || "").slice(0, 4000)
+      }
+    };
+  }
+
   return result;
 }
 
@@ -1586,7 +1648,40 @@ function getArtifactDetails(artifact) {
     ];
   }
 
+  if (artifact.kind === "screenshot") {
+    return [
+      "Viewport screenshot captured.",
+      artifact.ocrText ? `OCR text: ${artifact.ocrText.slice(0, 600)}` : "No OCR text was extracted from the viewport."
+    ];
+  }
+
   return [];
+}
+
+function extractGoogleDocId(url) {
+  try {
+    const parsed = new URL(url || "");
+    if (parsed.hostname !== "docs.google.com") {
+      return "";
+    }
+
+    return parsed.pathname.match(/\/document\/d\/([^/]+)/)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function cleanFetchedText(body, contentType) {
+  const raw = String(body || "");
+  if (!raw) {
+    return "";
+  }
+
+  if (/html/i.test(contentType) || /^\s*</.test(raw)) {
+    return stripHtml(raw);
+  }
+
+  return raw.replace(/\s+/g, " ").trim();
 }
 
 function stripHtml(html) {

@@ -358,12 +358,12 @@ async function executeActionPlan(plan) {
 
 async function executeBrowserLevelAction(tab, action) {
   if (action?.type === "observe_page" || action?.type === "get_visible_text" || action?.type === "get_links" || action?.type === "get_buttons" || action?.type === "get_forms" || action?.type === "get_dom_snapshot") {
-    const observed = await tryObserveTabForAction(tab, action);
-    return observed;
+    return tryObserveTabForAction(tab, action);
   }
 
   if (action?.type === "capture_viewport") {
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const ocrText = await extractViewportText(dataUrl);
     return {
       type: "execution_result",
       action_id: action.id || action.type,
@@ -372,10 +372,13 @@ async function executeBrowserLevelAction(tab, action) {
       page_changed: false,
       artifact: {
         kind: "screenshot",
-        dataUrl
+        dataUrl,
+        ocrText
       },
       validation_messages: [],
-      log_message: "Captured the visible viewport."
+      log_message: ocrText
+        ? `Captured the visible viewport and extracted ${ocrText.length} OCR characters.`
+        : "Captured the visible viewport."
     };
   }
 
@@ -539,6 +542,15 @@ async function tryObserveTabForAction(tab, action) {
       },
       result
     );
+    const googleDocText = await maybeFetchGoogleDocText(tab, observation);
+    const enrichedObservation = googleDocText
+      ? {
+          ...observation,
+          visible_text: googleDocText.text,
+          external_text_source: googleDocText.source,
+          external_text_status: googleDocText.status
+        }
+      : observation;
 
     return {
       type: "execution_result",
@@ -548,10 +560,12 @@ async function tryObserveTabForAction(tab, action) {
       page_changed: false,
       artifact: {
         kind: "page_observation",
-        observation
+        observation: enrichedObservation
       },
       validation_messages: [],
-      log_message: "Observed the active tab."
+      log_message: googleDocText
+        ? `Observed the active tab and fetched Google Docs text from ${googleDocText.source}.`
+        : "Observed the active tab."
     };
   } catch (error) {
     return {
@@ -563,6 +577,99 @@ async function tryObserveTabForAction(tab, action) {
       validation_messages: [],
       log_message: error.message || "Could not observe the active tab."
     };
+  }
+}
+
+async function maybeFetchGoogleDocText(tab, observation) {
+  const url = tab.url || observation?.tab?.url || "";
+  const docId = extractGoogleDocId(url);
+
+  if (!docId || String(observation?.visible_text || "").length > 1200) {
+    return null;
+  }
+
+  const candidates = [
+    `https://docs.google.com/document/d/${docId}/export?format=txt`,
+    `https://docs.google.com/document/d/${docId}/mobilebasic`
+  ];
+
+  for (const candidate of candidates) {
+    const response = await runHttpRequest({ url: candidate, method: "GET" });
+    const payload = response.ok ? response.envelope.payload : null;
+    const text = cleanGoogleDocText(payload?.bodyPreview || "", payload?.contentType || "");
+
+    if (payload?.ok && text.length > String(observation?.visible_text || "").length + 200) {
+      return {
+        source: payload.finalUrl || candidate,
+        status: payload.statusCode,
+        text
+      };
+    }
+  }
+
+  return null;
+}
+
+function extractGoogleDocId(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "docs.google.com") {
+      return "";
+    }
+
+    return parsed.pathname.match(/\/document\/d\/([^/]+)/)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function cleanGoogleDocText(body, contentType) {
+  const raw = String(body || "");
+  if (!raw) {
+    return "";
+  }
+
+  if (/html/i.test(contentType) || /^\s*</.test(raw)) {
+    return decodeHtml(raw
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " "))
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+function decodeHtml(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ");
+}
+
+async function extractViewportText(dataUrl) {
+  try {
+    const base64 = String(dataUrl || "").split(",").pop() || "";
+    if (!base64) {
+      return "";
+    }
+
+    const response = await extractAttachment({
+      id: "viewport",
+      name: "viewport.png",
+      type: "image/png",
+      size: Math.round(base64.length * 0.75),
+      base64
+    });
+
+    return response.ok ? String(response.envelope.payload?.text || "").slice(0, 12000) : "";
+  } catch {
+    return "";
   }
 }
 
