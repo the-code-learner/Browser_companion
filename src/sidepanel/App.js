@@ -40,6 +40,7 @@ const state = {
     draftTitle: "",
     draftContent: ""
   },
+  pendingMemoryIntent: null,
   chatAtBottom: true,
   activity: []
 };
@@ -935,6 +936,7 @@ async function handleChatSubmit(event) {
     render();
     return;
   }
+  state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
 
   if (!state.page.observation) {
     await observePage();
@@ -1034,9 +1036,11 @@ async function handleAgentResult(result) {
     return;
   }
 
+  const responseText = result?.text || "I could not produce a safe browser action from that request yet.";
+  const memorySaved = await maybeSaveDeferredMemory(responseText);
   state.messages.push({
     role: "assistant",
-    text: result?.text || "I could not produce a safe browser action from that request yet.",
+    text: memorySaved ? appendMemorySavedNote(responseText) : responseText,
     createdAt: Date.now()
   });
   render();
@@ -1099,10 +1103,10 @@ async function executeActionPlan(plan) {
 
   const synthesized = await maybeSynthesizeResults(plan, results);
   const answerText = synthesized || getExecutionSummary(results);
-  await maybeSaveResearchMemory(plan, results, answerText);
+  const memorySaved = await maybeSaveResearchMemory(plan, results, answerText);
   state.messages.push({
     role: "assistant",
-    text: answerText,
+    text: memorySaved ? appendMemorySavedNote(answerText) : answerText,
     createdAt: Date.now()
   });
   await refreshPageAfterAction();
@@ -1201,34 +1205,88 @@ function isResearchIntent(text) {
   return /\b(cerca|search|look up|find|internet|online|web|google|fonti|sources|dettagli|details|informazioni|information)\b/i.test(text);
 }
 
+function isDeferredMemoryIntent(text) {
+  return /\b(ricordati|remember|save|store|memorizza|salva|aggiungi|add)\b/i.test(text)
+    && /\b(sintesi|summary|profilo|profile|cv|chi sono|who i am|findings|risultati|results)\b/i.test(text);
+}
+
+function parseDeferredMemoryIntent(text) {
+  if (!isDeferredMemoryIntent(text)) {
+    return null;
+  }
+
+  return {
+    goal: text,
+    title: inferResearchMemoryTitle(text),
+    createdAt: Date.now()
+  };
+}
+
 function shouldRememberAfterResearch(text) {
-  return isResearchIntent(text) && /\b(ricordati|remember|save|store|memorizza|salva)\b/i.test(text);
+  return isResearchIntent(text) && /\b(ricordati|remember|save|store|memorizza|salva|aggiungi|add)\b/i.test(text);
 }
 
 async function maybeSaveResearchMemory(plan, results, answerText) {
-  const goal = plan?.goal || [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
+  const goal = state.pendingMemoryIntent?.goal || plan?.goal || [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
   const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "screenshot"].includes(result.artifact?.kind));
 
   if (!shouldRememberAfterResearch(goal) || !hasResearchArtifact || !answerText || /^No browser actions/.test(answerText)) {
     return false;
   }
 
-  const title = inferResearchMemoryTitle(goal);
+  const title = state.pendingMemoryIntent?.title || inferResearchMemoryTitle(goal);
   const saved = await saveUserMemory({
     title,
-    content: answerText
+    content: curateMemoryContent(answerText)
   });
 
   if (saved) {
+    state.pendingMemoryIntent = null;
     state.activity.unshift(`Saved research summary to user memory: ${title}.`);
   }
 
   return saved;
 }
 
+async function maybeSaveDeferredMemory(answerText) {
+  const intent = state.pendingMemoryIntent;
+
+  if (!intent || !answerText || /^I could not produce/.test(answerText)) {
+    return false;
+  }
+
+  const saved = await saveUserMemory({
+    title: intent.title || inferResearchMemoryTitle(intent.goal),
+    content: curateMemoryContent(answerText)
+  });
+
+  if (saved) {
+    state.pendingMemoryIntent = null;
+  }
+
+  return saved;
+}
+
+function curateMemoryContent(text) {
+  return String(text || "")
+    .replace(/^Add this CV summary:\s*/i, "")
+    .replace(/^CV Summary\s*/i, "CV Summary\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 5000);
+}
+
+function appendMemorySavedNote(text) {
+  return `${text}\n\n_Memory saved locally._`;
+}
+
 function inferResearchMemoryTitle(goal) {
   if (/\bchi sono\b/i.test(goal)) {
     return "User profile and public work context";
+  }
+
+  if (/\bcv|curriculum|resume\b/i.test(goal)) {
+    return "User CV summary";
   }
 
   if (/\benti|istituzioni|ambasciate|consolati|ICE|ITA|camere di commercio|hotel|UAE|Hong Kong\b/i.test(goal)) {
