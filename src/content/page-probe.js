@@ -14,9 +14,11 @@
   const observation = {
     viewport: getViewport(),
     visibleText: getVisibleText(),
+    headings: getHeadings(),
     links: getLinks(),
     buttons: getButtons(),
-    forms: getForms()
+    forms: getForms(),
+    interactiveElements: getInteractiveElements()
   };
 
   return observation;
@@ -50,6 +52,18 @@
       }));
   }
 
+  function getHeadings() {
+    return Array.from(document.querySelectorAll("h1,h2,h3,[role='heading']"))
+      .filter(isVisible)
+      .slice(0, 60)
+      .map((element, index) => ({
+        agent_id: `heading_${index + 1}`,
+        level: element.getAttribute("aria-level") || element.tagName.replace(/\D/g, "") || undefined,
+        text: compactText(element.innerText),
+        bbox: getBox(element)
+      }));
+  }
+
   function getButtons() {
     return Array.from(document.querySelectorAll("button,[role='button'],input[type='button'],input[type='submit']"))
       .filter(isVisible)
@@ -76,6 +90,20 @@
       const fields = Array.from(form.querySelectorAll("input,select,textarea,[contenteditable='true']"));
       return buildFormModel(form, `form_${index + 1}`, fields);
     });
+  }
+
+  function getInteractiveElements() {
+    return Array.from(document.querySelectorAll(interactiveSelector))
+      .filter(isVisible)
+      .slice(0, 160)
+      .map((element, index) => ({
+        agent_id: `el_${index + 1}`,
+        tag: element.tagName.toLowerCase(),
+        role: inferRole(element),
+        name: getAccessibleName(element),
+        selector_candidates: getSelectorCandidates(element),
+        bbox: getBox(element)
+      }));
   }
 
   function buildFormModel(container, agentId, fields) {
@@ -229,4 +257,3 @@
     return String(value).replace(/'/g, "\\'");
   }
 })();
-

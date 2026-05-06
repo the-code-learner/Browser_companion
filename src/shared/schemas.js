@@ -38,9 +38,11 @@ export function createObservation(tab, pageData) {
     tab,
     viewport: pageData.viewport,
     visible_text: pageData.visibleText,
+    headings: pageData.headings,
     links: pageData.links,
     buttons: pageData.buttons,
     forms: pageData.forms,
+    interactive_elements: pageData.interactiveElements,
     capturedAt: new Date().toISOString()
   };
 }
@@ -53,4 +55,3 @@ export function isAgentPlan(value) {
       Array.isArray(value.actions)
   );
 }
-

@@ -8,13 +8,15 @@ const requiredFiles = [
   "src/sidepanel/index.html",
   "src/sidepanel/App.js",
   "src/content/page-probe.js",
+  "src/content/actions.js",
   "src/shared/messages.js",
   "src/shared/policy.js",
   "src/shared/schemas.js",
   "codex/system-prompt.md",
   "codex/tool-schema.json",
   "native-host/host-manifest.json",
-  "native-host/bridge.js"
+  "native-host/bridge.js",
+  "native-host/install-windows.ps1"
 ];
 
 const missing = [];
@@ -38,4 +40,3 @@ if (missing.length > 0) {
 }
 
 console.log("Browser Companion extension scaffold looks consistent.");
-

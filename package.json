@@ -6,7 +6,8 @@
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {
-    "check": "node scripts/check-extension.mjs"
+    "check": "node scripts/check-extension.mjs",
+    "test": "node scripts/test-policy.mjs"
   },
   "engines": {
     "node": ">=20"
