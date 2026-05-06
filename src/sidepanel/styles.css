@@ -446,6 +446,13 @@ h2 {
   display: block;
 }
 
+.attachment-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--warn);
+  font-size: 12px;
+}
+
 .action-preview {
   padding: 12px;
 }

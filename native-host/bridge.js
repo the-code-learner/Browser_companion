@@ -121,9 +121,18 @@ async function extractAttachment(payload = {}) {
 
   if (extension === ".pdf" || mimeType === "application/pdf") {
     const pdfParse = await import("pdf-parse");
-    const parser = pdfParse.default || pdfParse;
-    const result = await parser(bytes);
-    return extractionResult(result.text, "pdf text ready");
+
+    if (typeof pdfParse.PDFParse !== "function") {
+      throw new Error("PDF extraction is unavailable because the installed pdf-parse package does not expose PDFParse.");
+    }
+
+    const parser = new pdfParse.PDFParse({ data: bytes });
+    try {
+      const result = await parser.getText();
+      return extractionResult(result.text, "pdf text ready");
+    } finally {
+      await parser.destroy();
+    }
   }
 
   if (extension === ".xlsx" || mimeType.includes("spreadsheetml")) {

@@ -379,10 +379,15 @@ function renderAction(action) {
 }
 
 function renderAttachment(file) {
+  const detail = file.message
+    || (file.warnings || [])[0]
+    || (file.status === "error" ? "Attachment extraction failed. Reattach the file to retry with the current extractor." : "");
+
   return `
     <li>
       <strong>${escapeHtml(file.name)}</strong>
       <span>${escapeHtml(file.status)} - ${formatBytes(file.size)}</span>
+      ${detail ? `<small class="attachment-detail">${escapeHtml(detail)}</small>` : ""}
     </li>
   `;
 }
@@ -432,16 +437,22 @@ function getConnectorInstallCommand() {
   return `powershell -ExecutionPolicy Bypass -File native-host/install-windows.ps1 -ExtensionId ${chrome.runtime.id}`;
 }
 
-async function observePage() {
-  state.page.status = "observing";
-  state.page.summary = "Observing the active tab...";
-  render();
+async function observePage(options = {}) {
+  const silent = Boolean(options.silent);
+
+  if (!silent) {
+    state.page.status = "observing";
+    state.page.summary = "Observing the active tab...";
+    render();
+  }
 
   const permission = await ensureCurrentSitePermission();
 
   if (!permission.ok) {
-    state.page.status = "error";
-    state.page.summary = permission.error;
+    if (!silent) {
+      state.page.status = "error";
+      state.page.summary = permission.error;
+    }
     state.activity.unshift(`Observation blocked: ${permission.error}`);
     render();
     return null;
@@ -450,8 +461,10 @@ async function observePage() {
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.OBSERVE_ACTIVE_TAB));
 
   if (!response.ok) {
-    state.page.status = "error";
-    state.page.summary = response.error;
+    if (!silent) {
+      state.page.status = "error";
+      state.page.summary = response.error;
+    }
     state.activity.unshift(`Observation failed: ${response.error}`);
     render();
     return null;
@@ -584,6 +597,7 @@ async function readAttachment(file) {
     type: file.type || "unknown",
     status: "registered",
     text: "",
+    message: "",
     warnings: []
   };
 
@@ -591,6 +605,7 @@ async function readAttachment(file) {
     return {
       ...base,
       status: "too large",
+      message: "Files larger than 15 MB are not extracted in the side panel.",
       warnings: ["Files larger than 15 MB are not extracted in the side panel."]
     };
   }
@@ -602,6 +617,7 @@ async function readAttachment(file) {
       ...base,
       status: extracted.status || "text ready",
       text: extracted.text || "",
+      message: extracted.message || "",
       warnings: extracted.warnings || []
     };
   }
@@ -623,6 +639,7 @@ async function readAttachment(file) {
       resolve({
         ...base,
         status: "read failed",
+        message: "The browser could not read this attachment as text.",
         text: ""
       });
     };
@@ -863,7 +880,7 @@ async function refreshPageAfterAction() {
     return;
   }
 
-  await observePage();
+  await observePage({ silent: true });
 }
 
 function normalizePlan(plan) {
