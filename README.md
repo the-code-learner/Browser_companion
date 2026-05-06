@@ -53,6 +53,8 @@ powershell -ExecutionPolicy Bypass -File native-host/install-windows.ps1 -Extens
 
 Then click Connect in the side panel. The connector starts the ChatGPT/Codex sign-in flow through `codex login --device-auth`.
 
+The extension cannot run this PowerShell command before the native host is registered. When the connector is missing, the side panel shows a Copy Command button with the correct extension ID already filled in.
+
 Attachment extraction uses local Node dependencies in the native host. Extracted text stays local unless the privacy toggle allows it to be sent in a Codex request.
 
 `LOCAL_CONTEXT.md` is the local project memory and is intentionally ignored by git.

@@ -9,6 +9,7 @@ import process from "node:process";
 let inputBuffer = Buffer.alloc(0);
 const bridgeDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(bridgeDir, "..");
+const codexBin = resolveCodexBin();
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -163,7 +164,8 @@ function getHealth() {
     return {
       connected: false,
       status: "codex_missing",
-      message: "Codex CLI was not found on PATH. Install Codex and sign in with ChatGPT to continue."
+      codexPath: codexBin,
+      message: "Codex CLI was not found by the native connector. Re-run the connector install command from a terminal where codex works, or edit CODEX_BIN in native-host/bridge-launcher.cmd."
     };
   }
 
@@ -175,6 +177,7 @@ function getHealth() {
     connected: loggedIn,
     status: loggedIn ? "ready" : "login_required",
     codexVersion: codexVersion.stdout.trim(),
+    codexPath: codexBin,
     capabilities: getCapabilities(),
     message: loggedIn
       ? "Local connector can reach Codex CLI and a login session appears to be available."
@@ -216,11 +219,7 @@ function connectCodex() {
     return health;
   }
 
-  const child = spawn("codex", ["login", "--device-auth"], {
-    detached: true,
-    stdio: "ignore",
-    shell: process.platform === "win32"
-  });
+  const child = spawnLoginProcess();
   child.unref();
 
   return {
@@ -228,6 +227,30 @@ function connectCodex() {
     status: "login_started",
     message: "Codex login was started. Complete the ChatGPT sign-in flow, then check the connector again."
   };
+}
+
+function spawnLoginProcess() {
+  const loginCommand = `"${codexBin}" login --device-auth`;
+
+  if (process.platform === "win32") {
+    return spawn("cmd.exe", ["/c", "start", "Browser Companion Codex Login", "cmd.exe", "/k", loginCommand], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    });
+  }
+
+  if (process.platform === "darwin") {
+    return spawn("osascript", ["-e", 'tell application "Terminal" to do script "codex login --device-auth"'], {
+      detached: true,
+      stdio: "ignore"
+    });
+  }
+
+  return spawn("sh", ["-lc", 'x-terminal-emulator -e "codex login --device-auth" || gnome-terminal -- sh -lc "codex login --device-auth; read -p Press\\\\ Enter" || codex login --device-auth'], {
+    detached: true,
+    stdio: "ignore"
+  });
 }
 
 function runAgentRequest(payload = {}) {
@@ -303,12 +326,62 @@ function buildAgentPrompt(payload) {
 }
 
 function runCodex(args, options = {}) {
-  return spawnSync("codex", args, {
+  return spawnSync(codexBin, args, {
     encoding: "utf8",
-    shell: process.platform === "win32",
+    shell: false,
     maxBuffer: 1024 * 1024 * 12,
     ...options
   });
+}
+
+function resolveCodexBin() {
+  if (process.env.CODEX_BIN && fs.existsSync(process.env.CODEX_BIN)) {
+    return process.env.CODEX_BIN;
+  }
+
+  if (process.platform === "win32") {
+    const candidates = [
+      path.join(process.env.USERPROFILE || "", ".vscode", "extensions"),
+      path.join(process.env.LOCALAPPDATA || "", "Programs")
+    ];
+
+    for (const base of candidates) {
+      const found = findFile(base, "codex.exe", 4);
+      if (found) return found;
+    }
+
+    return "codex.exe";
+  }
+
+  return "codex";
+}
+
+function findFile(root, fileName, maxDepth, depth = 0) {
+  if (!root || depth > maxDepth || !fs.existsSync(root)) {
+    return null;
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase() === fileName.toLowerCase()) {
+      return fullPath;
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = findFile(path.join(root, entry.name), fileName, maxDepth, depth + 1);
+    if (found) return found;
+  }
+
+  return null;
 }
 
 function writeMessage(message) {

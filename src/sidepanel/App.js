@@ -94,6 +94,7 @@ function render() {
           </div>
         </div>
         <p>${escapeHtml(state.connector.message)}</p>
+        ${renderConnectorSetup()}
       </article>
     </section>
 
@@ -126,6 +127,14 @@ function render() {
   document.getElementById("observe-page").addEventListener("click", observePage);
   document.getElementById("check-connector").addEventListener("click", checkConnector);
   document.getElementById("connect-codex").addEventListener("click", connectCodex);
+  const copyInstallCommand = document.getElementById("copy-install-command");
+  if (copyInstallCommand) {
+    copyInstallCommand.addEventListener("click", copyConnectorInstallCommand);
+  }
+  const openExtensions = document.getElementById("open-extensions");
+  if (openExtensions) {
+    openExtensions.addEventListener("click", () => chrome.tabs.create({ url: "chrome://extensions" }));
+  }
   document.getElementById("clear-activity").addEventListener("click", () => {
     state.activity = [];
     persistSession();
@@ -250,6 +259,36 @@ function renderAttachment(file) {
       <span>${escapeHtml(file.status)} - ${formatBytes(file.size)}</span>
     </li>
   `;
+}
+
+function renderConnectorSetup() {
+  if (!["missing", "error", "unknown"].includes(state.connector.status)) {
+    return "";
+  }
+
+  const command = getConnectorInstallCommand();
+
+  return `
+    <div class="connector-setup">
+      <span class="eyebrow">Local setup</span>
+      <code>${escapeHtml(command)}</code>
+      <div class="button-row">
+        <button id="copy-install-command" type="button">Copy Command</button>
+        <button id="open-extensions" type="button">Open Extensions</button>
+      </div>
+    </div>
+  `;
+}
+
+async function copyConnectorInstallCommand() {
+  const command = getConnectorInstallCommand();
+  await navigator.clipboard.writeText(command);
+  state.activity.unshift("Connector install command copied.");
+  render();
+}
+
+function getConnectorInstallCommand() {
+  return `powershell -ExecutionPolicy Bypass -File native-host/install-windows.ps1 -ExtensionId ${chrome.runtime.id}`;
 }
 
 async function observePage() {

@@ -10,10 +10,19 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BridgePath = Join-Path $ScriptDir "bridge.js"
 $ManifestPath = Join-Path $ScriptDir "host-manifest.generated.json"
 $NodePath = (Get-Command node).Source
+$CodexCommand = Get-Command codex -ErrorAction SilentlyContinue
+
+if (-not $CodexCommand) {
+  Write-Warning "Codex was not found in this PowerShell PATH. The connector will still be registered, but Connect will not work until Codex is installed or CODEX_BIN is updated in bridge-launcher.cmd."
+  $CodexPath = "codex"
+} else {
+  $CodexPath = $CodexCommand.Source
+}
 
 $LauncherPath = Join-Path $ScriptDir "bridge-launcher.cmd"
 @"
 @echo off
+set "CODEX_BIN=$CodexPath"
 "$NodePath" "$BridgePath"
 "@ | Set-Content -Encoding ASCII $LauncherPath
 
@@ -33,3 +42,4 @@ Set-ItemProperty -Path $RegistryPath -Name "(default)" -Value $ManifestPath
 
 Write-Host "Browser Companion native host registered for Chrome extension $ExtensionId"
 Write-Host "Manifest: $ManifestPath"
+Write-Host "Codex: $CodexPath"
