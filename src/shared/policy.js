@@ -49,6 +49,10 @@ export function classifyAction(action) {
     return RISK_LEVELS.HIGH;
   }
 
+  if (action?.type === ACTION_TYPES.CLICK_ELEMENT && action?.target?.role === "link") {
+    return RISK_LEVELS.LOW;
+  }
+
   if (LOW_RISK_ACTIONS.has(action?.type)) {
     return RISK_LEVELS.LOW;
   }

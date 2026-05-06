@@ -601,13 +601,23 @@ async function getAgentResult(goal) {
 async function handleAgentResult(result) {
   if (result?.type === "agent_plan") {
     const policyResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.VALIDATE_ACTION_PLAN, { plan: result }));
-    state.pendingPlan = result;
-    state.pendingPolicy = policyResponse.envelope.payload;
     state.confirmationText = "";
     state.messages.push({
       role: "assistant",
       text: result.summary_for_user
     });
+
+    const policy = policyResponse.envelope.payload;
+
+    if (policy.allowed && !policy.requiresConfirmation) {
+      state.activity.unshift("Executing low-risk action plan.");
+      render();
+      await executeActionPlan(result);
+      return;
+    }
+
+    state.pendingPlan = result;
+    state.pendingPolicy = policy;
     state.activity.unshift("Action plan prepared for confirmation.");
     render();
     return;
@@ -650,10 +660,14 @@ async function confirmPendingPlan() {
     return;
   }
 
-  state.activity.unshift("Executing confirmed action plan...");
   state.pendingPlan = null;
   state.pendingPolicy = null;
   state.confirmationText = "";
+  await executeActionPlan(plan);
+}
+
+async function executeActionPlan(plan) {
+  state.activity.unshift("Executing browser action plan...");
   render();
 
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan }));
@@ -670,7 +684,7 @@ async function confirmPendingPlan() {
   state.messages.push({
     role: "assistant",
     text: results.every((result) => result.status === "success")
-      ? "The confirmed browser actions were completed. I stopped before any submit-like final action."
+      ? "The browser actions were completed."
       : "Some browser actions could not be completed. Check the activity log for details."
   });
   await observePage();

@@ -32,6 +32,21 @@ const fillPlan = {
   ]
 };
 
+const linkClickPlan = {
+  type: "agent_plan",
+  actions: [
+    {
+      type: "click_element",
+      target: {
+        agent_id: "link_1",
+        role: "link",
+        name: "Deployment"
+      },
+      reason: "Open a normal documentation link."
+    }
+  ]
+};
+
 const blockedPlan = {
   type: "agent_plan",
   actions: [
@@ -49,6 +64,7 @@ const blockedPlan = {
 };
 
 assert.equal(validateActionPlan(lowRiskPlan).requiresConfirmation, false);
+assert.equal(validateActionPlan(linkClickPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(fillPlan).requiresConfirmation, true);
 assert.equal(validateActionPlan(blockedPlan).allowed, true);
 assert.equal(validateActionPlan(blockedPlan).results[0].risk, "sensitive");
@@ -71,4 +87,3 @@ const captchaPlan = {
 assert.equal(validateActionPlan(captchaPlan).allowed, false);
 
 console.log("Policy tests passed.");
-
