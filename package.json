@@ -7,7 +7,8 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/check-extension.mjs",
-    "test": "node scripts/test-policy.mjs"
+    "test": "node scripts/test-policy.mjs",
+    "test:attachments": "node scripts/test-attachment-extraction.mjs"
   },
   "engines": {
     "node": ">=20"

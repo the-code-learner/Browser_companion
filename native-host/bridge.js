@@ -109,10 +109,6 @@ async function extractAttachment(payload = {}) {
     };
   }
 
-  if (isTextLike(fileName, mimeType)) {
-    return extractionResult(bytes.toString("utf8"), "text ready");
-  }
-
   if (extension === ".docx" || mimeType.includes("wordprocessingml")) {
     const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer: bytes });
@@ -160,9 +156,15 @@ async function extractAttachment(payload = {}) {
     };
   }
 
+  if (isTextLike(fileName, mimeType)) {
+    return extractionResult(bytes.toString("utf8"), "text ready");
+  }
+
   if (/^image\//.test(mimeType) || [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"].includes(extension)) {
     const tesseract = await import("tesseract.js");
-    const worker = await tesseract.createWorker("eng");
+    const worker = await tesseract.createWorker("eng", 1, {
+      cachePath: path.join(os.tmpdir(), "browser-companion-tessdata")
+    });
     try {
       const result = await worker.recognize(bytes);
       return extractionResult(result.data.text, "ocr text ready");
