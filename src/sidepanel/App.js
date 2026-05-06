@@ -681,7 +681,7 @@ async function handleAgentResult(result) {
 }
 
 async function confirmPendingPlan() {
-  const plan = state.pendingPlan;
+  const plan = normalizePlan(state.pendingPlan);
 
   if (!plan) {
     return;
@@ -690,15 +690,29 @@ async function confirmPendingPlan() {
   state.pendingPlan = null;
   state.pendingPolicy = null;
   state.confirmationText = "";
-  await executeActionPlan(plan);
+
+  try {
+    await executeActionPlan(plan);
+  } catch (error) {
+    state.messages.push({
+      role: "assistant",
+      text: error.message || "The confirmed action could not be executed.",
+      createdAt: Date.now()
+    });
+    state.activity.unshift(`Execution failed: ${error.message || "Unexpected error."}`);
+    render();
+  }
 }
 
 async function executeActionPlan(plan) {
+  const normalizedPlan = normalizePlan(plan);
+  const actions = normalizedPlan?.actions || [];
+
   state.activity.unshift("Executing browser action plan...");
-  addActionNote("Executing browser actions", plan.actions.map(formatActionDetail));
+  addActionNote("Executing browser actions", actions.map(formatActionDetail));
   render();
 
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan }));
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan: normalizedPlan }));
 
   if (!response.ok) {
     state.messages.push({ role: "assistant", text: response.error, createdAt: Date.now() });
@@ -730,6 +744,18 @@ async function executeActionPlan(plan) {
     createdAt: Date.now()
   });
   await observePage();
+}
+
+function normalizePlan(plan) {
+  if (!plan || typeof plan !== "object") {
+    return null;
+  }
+
+  return {
+    ...plan,
+    actions: Array.isArray(plan.actions) ? plan.actions : [],
+    uncertain_fields: Array.isArray(plan.uncertain_fields) ? plan.uncertain_fields : []
+  };
 }
 
 function cancelPendingPlan() {
