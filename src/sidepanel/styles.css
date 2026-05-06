@@ -1,5 +1,49 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
+  --bg: #f7f8fb;
+  --panel: #ffffff;
+  --ink: #172033;
+  --muted: #687386;
+  --line: #dfe4ee;
+  --accent: #246bfe;
+  --accent-soft: #e8f0ff;
+  --warn: #9c5a00;
+  --warn-bg: #fff3d7;
+  --ok: #176b4d;
+  --ok-bg: #ddf7ed;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111318;
+    --panel: #181c23;
+    --ink: #e8edf7;
+    --muted: #9aa6b8;
+    --line: #2b3340;
+    --accent: #7aa2ff;
+    --accent-soft: #1f2b44;
+    --warn: #ffd17a;
+    --warn-bg: #3b2b12;
+    --ok: #8be0bd;
+    --ok-bg: #17372b;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #111318;
+  --panel: #181c23;
+  --ink: #e8edf7;
+  --muted: #9aa6b8;
+  --line: #2b3340;
+  --accent: #7aa2ff;
+  --accent-soft: #1f2b44;
+  --warn: #ffd17a;
+  --warn-bg: #3b2b12;
+  --ok: #8be0bd;
+  --ok-bg: #17372b;
+}
+
+:root[data-theme="light"] {
   --bg: #f7f8fb;
   --panel: #ffffff;
   --ink: #172033;
@@ -63,11 +107,31 @@ button:hover {
 }
 
 .topbar {
+  position: relative;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   padding: 14px;
+}
+
+.topbar > div {
+  padding-left: 34px;
+}
+
+.theme-toggle {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: grid;
+  width: 26px;
+  min-height: 26px;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 h1,
@@ -452,6 +516,6 @@ h2 {
   border-radius: 7px;
   padding: 8px;
   color: var(--ink);
-  background: #f4f6fa;
+  background: color-mix(in srgb, var(--panel) 86%, var(--ink) 14%);
   font: 12px/1.4 ui-monospace, "SFMono-Regular", Consolas, monospace;
 }

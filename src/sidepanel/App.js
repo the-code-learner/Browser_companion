@@ -1,6 +1,7 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
 
 const state = {
+  theme: "system",
   connector: {
     status: "unknown",
     message: "Connector status has not been checked."
@@ -40,6 +41,7 @@ initialize();
 
 async function initialize() {
   await restoreSession();
+  applyTheme();
   render();
   checkConnector();
 }
@@ -47,6 +49,7 @@ async function initialize() {
 function render() {
   app.innerHTML = `
     <section class="topbar">
+      <button id="theme-toggle" class="theme-toggle" type="button" title="${escapeHtml(getThemeTitle())}">${escapeHtml(getThemeIcon())}</button>
       <div>
         <h1>Browser Companion</h1>
         <p class="muted">Chat with a local browser agent that observes before acting.</p>
@@ -120,6 +123,7 @@ function render() {
   `;
 
   document.getElementById("observe-page").addEventListener("click", observePage);
+  document.getElementById("theme-toggle").addEventListener("click", cycleTheme);
   document.getElementById("check-connector").addEventListener("click", checkConnector);
   document.getElementById("connect-codex").addEventListener("click", connectCodex);
   const copyInstallCommand = document.getElementById("copy-install-command");
@@ -167,6 +171,31 @@ function render() {
       });
     }
   }
+}
+
+function cycleTheme() {
+  const order = ["system", "light", "dark"];
+  const currentIndex = order.indexOf(state.theme);
+  state.theme = order[(currentIndex + 1) % order.length];
+  applyTheme();
+  chrome.storage.local.set({ browserCompanionTheme: state.theme });
+  render();
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+}
+
+function getThemeIcon() {
+  if (state.theme === "dark") return "D";
+  if (state.theme === "light") return "L";
+  return "S";
+}
+
+function getThemeTitle() {
+  if (state.theme === "dark") return "Theme: dark";
+  if (state.theme === "light") return "Theme: light";
+  return "Theme: system";
 }
 
 function renderComposer() {
@@ -1171,8 +1200,9 @@ function summarizeSearchArtifact(artifact) {
 }
 
 async function restoreSession() {
-  const stored = await chrome.storage.local.get(["browserCompanionSession"]);
+  const stored = await chrome.storage.local.get(["browserCompanionSession", "browserCompanionTheme"]);
   const session = stored.browserCompanionSession;
+  state.theme = stored.browserCompanionTheme || "system";
 
   if (!session?.privacy?.persistSession) {
     return;
