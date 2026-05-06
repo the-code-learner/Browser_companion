@@ -160,6 +160,7 @@
             "get_buttons",
             "capture_viewport",
             "capture_numbered_overlay",
+            "open_url",
             "scroll_to_element",
             "scroll_by",
             "wait_for_page_change",

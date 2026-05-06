@@ -245,6 +245,21 @@ async function executeBrowserLevelAction(tab, action) {
     };
   }
 
+  if (action?.type === "open_url") {
+    const url = normalizeNavigationUrl(action.value || action.url);
+    await chrome.tabs.update(tab.id, { url });
+    await waitForTabSettled(tab.id);
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: true,
+      validation_messages: [],
+      log_message: `Opened ${url}.`
+    };
+  }
+
   if (action?.type === "capture_numbered_overlay") {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -299,6 +314,23 @@ async function executeBrowserLevelAction(tab, action) {
   }
 
   return null;
+}
+
+function normalizeNavigationUrl(value) {
+  const raw = String(value || "").trim();
+
+  if (!raw) {
+    throw new Error("Navigation URL is missing.");
+  }
+
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const url = new URL(withProtocol);
+
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Only http and https navigation is allowed.");
+  }
+
+  return url.href;
 }
 
 function waitForTabSettled(tabId, timeoutMs = 10000) {

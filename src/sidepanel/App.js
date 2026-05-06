@@ -717,6 +717,11 @@ function buildLocalAgentResult(goal, responseLanguage) {
     };
   }
 
+  const navigationPlan = buildNavigationPlan(goal, responseLanguage);
+  if (navigationPlan) {
+    return navigationPlan;
+  }
+
   if (/\b(submit|send|accept|agree|invia|accetta|conferma|procedi)\b/i.test(lowerGoal)) {
     const finalPlan = buildFinalClickPlan(goal, observation, responseLanguage);
     if (finalPlan.actions.length > 0) {
@@ -740,6 +745,98 @@ function buildLocalAgentResult(goal, responseLanguage) {
     type: "natural_response",
     text: summarizePageForUser(observation, responseLanguage)
   };
+}
+
+function buildNavigationPlan(goal, responseLanguage) {
+  const searchMatch = goal.match(/\b(?:open|apri)\s+((?:https?:\/\/)?(?:www\.)?(?:google|bing|duckduckgo|brave|yahoo)(?:\.[a-z]{2,})?)\b.*\b(?:search|cerca)\b.*["“”']([^"“”']+)["“”']/i)
+    || goal.match(/\b(?:search|cerca)\b.*["“”']([^"“”']+)["“”'].*\b(?:on|su)\s+((?:https?:\/\/)?(?:www\.)?(?:google|bing|duckduckgo|brave|yahoo)(?:\.[a-z]{2,})?)/i);
+
+  if (searchMatch) {
+    const first = searchMatch[1];
+    const second = searchMatch[2];
+    const engine = /google|bing|duckduckgo|brave|yahoo/i.test(first) ? first : second;
+    const query = engine === first ? second : first;
+    const url = buildSearchUrl(engine, query.trim());
+    return {
+      type: "agent_plan",
+      goal,
+      risk_level: "low",
+      summary_for_user: localText(responseLanguage, "openSearch", query.trim()),
+      needs_clarification: false,
+      requires_confirmation: false,
+      will_submit: false,
+      actions: [
+        {
+          id: "act_open_url_001",
+          type: "open_url",
+          target: {
+            agent_id: "",
+            role: "",
+            name: "",
+            selector_candidates: []
+          },
+          value: url,
+          source: {
+            file_id: "",
+            confidence: 1
+          },
+          reason: "Open the requested Google search URL."
+        }
+      ],
+      uncertain_fields: []
+    };
+  }
+
+  const openMatch = goal.match(/\b(?:open|apri|go to|vai su|naviga a)\s+((?:https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s]*)?)/i)
+    || goal.match(/\b((?:https?:\/\/)[^\s]+)\b/i);
+  if (!openMatch) {
+    return null;
+  }
+
+  return {
+    type: "agent_plan",
+    goal,
+    risk_level: "low",
+    summary_for_user: localText(responseLanguage, "openUrl", openMatch[1]),
+    needs_clarification: false,
+    requires_confirmation: false,
+    will_submit: false,
+    actions: [
+      {
+        id: "act_open_url_001",
+        type: "open_url",
+        target: {
+          agent_id: "",
+          role: "",
+          name: "",
+          selector_candidates: []
+        },
+        value: openMatch[1],
+        source: {
+          file_id: "",
+          confidence: 1
+        },
+        reason: "Open the requested URL."
+      }
+    ],
+    uncertain_fields: []
+  };
+}
+
+function buildSearchUrl(engine, query) {
+  const host = normalizeUrlValue(engine).hostname.replace(/^www\./, "");
+  const encoded = encodeURIComponent(query);
+
+  if (host.startsWith("duckduckgo.")) return `https://duckduckgo.com/?q=${encoded}`;
+  if (host.startsWith("bing.")) return `https://www.bing.com/search?q=${encoded}`;
+  if (host.startsWith("brave.")) return `https://search.brave.com/search?q=${encoded}`;
+  if (host.startsWith("yahoo.")) return `https://search.yahoo.com/search?p=${encoded}`;
+  return `https://www.google.com/search?q=${encoded}`;
+}
+
+function normalizeUrlValue(value) {
+  const raw = String(value || "").trim();
+  return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
 }
 
 function buildFinalClickPlan(goal, observation, responseLanguage) {
@@ -1046,7 +1143,9 @@ function localText(language, key, value) {
       attachClearProfile: "I found form context, but I could not confidently match attachment data to fields. Attach a text, CSV, JSON, Markdown, PDF, DOCX, XLSX, or image file with clear labels.",
       noSubmitControl: "I could not find a submit or accept control on the observed page.",
       submitFound: `I found "${value}". This may submit, accept, send, or finalize something on the website. Type SUBMIT to enable the final action.`,
-      fillSummary: `I can fill ${value} non-sensitive field${value === 1 ? "" : "s"} from local attachment context. I will not submit the form.`
+      fillSummary: `I can fill ${value} non-sensitive field${value === 1 ? "" : "s"} from local attachment context. I will not submit the form.`,
+      openUrl: `I will open ${value}.`,
+      openSearch: `I will open Google search results for "${value}".`
     },
     it: {
       needObservation: "Devo osservare la scheda corrente prima di aiutarti con questa pagina.",
@@ -1054,7 +1153,9 @@ function localText(language, key, value) {
       attachClearProfile: "Ho trovato un modulo, ma non riesco ad abbinare con sicurezza i dati allegati ai campi. Allega un file TXT, CSV, JSON, Markdown, PDF, DOCX, XLSX o immagine con etichette chiare.",
       noSubmitControl: "Non ho trovato un controllo di invio o accettazione nella pagina osservata.",
       submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Digita SUBMIT per abilitare l'azione finale.`,
-      fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`
+      fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`,
+      openUrl: `Apro ${value}.`,
+      openSearch: `Apro i risultati Google per "${value}".`
     }
   };
 

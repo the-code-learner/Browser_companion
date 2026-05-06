@@ -47,6 +47,22 @@ const linkClickPlan = {
   ]
 };
 
+const openUrlPlan = {
+  type: "agent_plan",
+  actions: [
+    {
+      type: "open_url",
+      target: {
+        agent_id: "",
+        role: "",
+        name: ""
+      },
+      value: "https://www.google.com/search?q=ciao",
+      reason: "Open a normal web URL requested by the user."
+    }
+  ]
+};
+
 const blockedPlan = {
   type: "agent_plan",
   actions: [
@@ -65,6 +81,7 @@ const blockedPlan = {
 
 assert.equal(validateActionPlan(lowRiskPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(linkClickPlan).requiresConfirmation, false);
+assert.equal(validateActionPlan(openUrlPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(fillPlan).requiresConfirmation, true);
 assert.equal(validateActionPlan(blockedPlan).allowed, true);
 assert.equal(validateActionPlan(blockedPlan).results[0].risk, "sensitive");

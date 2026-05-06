@@ -7,6 +7,7 @@ export const ACTION_TYPES = Object.freeze({
   GET_BUTTONS: "get_buttons",
   CAPTURE_VIEWPORT: "capture_viewport",
   CAPTURE_NUMBERED_OVERLAY: "capture_numbered_overlay",
+  OPEN_URL: "open_url",
   SCROLL_TO_ELEMENT: "scroll_to_element",
   SCROLL_BY: "scroll_by",
   WAIT_FOR_PAGE_CHANGE: "wait_for_page_change",
