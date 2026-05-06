@@ -14,6 +14,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Typed `SUBMIT` confirmation before high-risk submit, accept, send, publish, or finalize clicks
 - Constrained browser action executor for scroll, highlight, focus, fill, select, checkbox, radio, click, viewport screenshot, numbered overlay, wait, and back actions
 - General http/https URL navigation through the `open_url` browser action
+- Safe public HTTP analysis through `http_request` for GET, HEAD, and OPTIONS without browser cookies
 - Enter sends the chat message; Shift+Enter inserts a new line
 - Assistant responses follow the user's language unless the user asks otherwise
 - Side panel selector for the Codex model used by agent requests

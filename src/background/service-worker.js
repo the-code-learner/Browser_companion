@@ -44,6 +44,10 @@ async function handleMessage(message) {
     return extractAttachment(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.HTTP_REQUEST) {
+    return runHttpRequest(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.AGENT_REQUEST) {
     return requestAgent(message.payload);
   }
@@ -172,6 +176,24 @@ async function extractAttachment(payload) {
   }
 }
 
+async function runHttpRequest(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "http_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.HTTP_REQUEST, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "HTTP request failed."
+    };
+  }
+}
+
 async function executeActionPlan(plan) {
   const policy = validateActionPlan(plan);
 
@@ -257,6 +279,46 @@ async function executeBrowserLevelAction(tab, action) {
       page_changed: true,
       validation_messages: [],
       log_message: `Opened ${url}.`
+    };
+  }
+
+  if (action?.type === "http_request") {
+    const response = await runHttpRequest({
+      url: action.value || action.url,
+      method: action.method || "GET",
+      headers: action.headers || {}
+    });
+
+    if (!response.ok) {
+      return {
+        type: "execution_result",
+        action_id: action.id || action.type,
+        status: "error",
+        target_verified: false,
+        page_changed: false,
+        validation_messages: [],
+        log_message: response.error
+      };
+    }
+
+    const result = response.envelope.payload;
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: result.status === "success" ? "success" : "error",
+      target_verified: true,
+      page_changed: false,
+      artifact: {
+        kind: "http_response",
+        url: result.url,
+        statusCode: result.statusCode,
+        finalUrl: result.finalUrl,
+        contentType: result.contentType,
+        bodyPreview: result.bodyPreview,
+        headers: result.headers
+      },
+      validation_messages: [],
+      log_message: result.message
     };
   }
 

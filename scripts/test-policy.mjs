@@ -63,6 +63,22 @@ const openUrlPlan = {
   ]
 };
 
+const httpRequestPlan = {
+  type: "agent_plan",
+  actions: [
+    {
+      type: "http_request",
+      target: {
+        agent_id: "",
+        role: "",
+        name: ""
+      },
+      value: "https://example.com/robots.txt",
+      reason: "Fetch a public URL for technical analysis."
+    }
+  ]
+};
+
 const blockedPlan = {
   type: "agent_plan",
   actions: [
@@ -82,6 +98,7 @@ const blockedPlan = {
 assert.equal(validateActionPlan(lowRiskPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(linkClickPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(openUrlPlan).requiresConfirmation, false);
+assert.equal(validateActionPlan(httpRequestPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(fillPlan).requiresConfirmation, true);
 assert.equal(validateActionPlan(blockedPlan).allowed, true);
 assert.equal(validateActionPlan(blockedPlan).results[0].risk, "sensitive");

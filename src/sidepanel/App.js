@@ -19,6 +19,7 @@ const state = {
       text: "Tell me what you want to accomplish on the current page. I can observe the page first, then propose safe next steps."
     }
   ],
+  actionNotes: [],
   pendingPlan: null,
   pendingPolicy: null,
   confirmationText: "",
@@ -64,7 +65,7 @@ function render() {
     ${state.pendingPlan ? renderActionPreview() : ""}
 
     <section class="chat-log" aria-label="Chat messages">
-      ${state.messages.map(renderMessage).join("")}
+      ${renderChatTimeline()}
     </section>
 
     <form id="chat-form" class="composer">
@@ -210,6 +211,25 @@ function renderMessage(message) {
       <span>${message.role === "user" ? "You" : "Companion"}</span>
       <p>${escapeHtml(message.text)}</p>
     </article>
+  `;
+}
+
+function renderChatTimeline() {
+  const items = [
+    ...state.messages.map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
+    ...state.actionNotes.map((item) => ({ kind: "note", createdAt: item.createdAt || 0, item }))
+  ].sort((a, b) => a.createdAt - b.createdAt);
+
+  return items.map((entry) => entry.kind === "message" ? renderMessage(entry.item) : renderActionNote(entry.item)).join("");
+}
+
+function renderActionNote(note) {
+  const details = note.details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  return `
+    <details class="action-note">
+      <summary>${escapeHtml(note.summary)}</summary>
+      <ul>${details}</ul>
+    </details>
   `;
 }
 
@@ -611,6 +631,7 @@ async function handleAgentResult(result) {
 
     if (policy.allowed && !policy.requiresConfirmation) {
       state.activity.unshift("Executing low-risk action plan.");
+      addActionNote("Executed low-risk action plan", result.actions.map(formatActionDetail));
       render();
       await executeActionPlan(result);
       return;
@@ -619,6 +640,11 @@ async function handleAgentResult(result) {
     state.pendingPlan = result;
     state.pendingPolicy = policy;
     state.activity.unshift("Action plan prepared for confirmation.");
+    addActionNote("Asked for action approval", [
+      result.summary_for_user,
+      ...result.actions.map(formatActionDetail),
+      ...policy.results.map((item) => `${item.risk}: ${item.reason}`)
+    ]);
     render();
     return;
   }
@@ -668,6 +694,7 @@ async function confirmPendingPlan() {
 
 async function executeActionPlan(plan) {
   state.activity.unshift("Executing browser action plan...");
+  addActionNote("Executing browser actions", plan.actions.map(formatActionDetail));
   render();
 
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan }));
@@ -681,6 +708,18 @@ async function executeActionPlan(plan) {
 
   const results = response.envelope.payload.results || [];
   results.forEach((result) => state.activity.unshift(result.log_message));
+  addActionNote("Browser action result", results.map((result) => `${result.status}: ${result.log_message}`));
+  const httpArtifacts = results
+    .map((result) => result.artifact)
+    .filter((artifact) => artifact?.kind === "http_response");
+
+  for (const artifact of httpArtifacts) {
+    state.messages.push({
+      role: "assistant",
+      text: summarizeHttpArtifact(artifact)
+    });
+  }
+
   state.messages.push({
     role: "assistant",
     text: results.every((result) => result.status === "success")
@@ -695,8 +734,24 @@ function cancelPendingPlan() {
   state.pendingPolicy = null;
   state.confirmationText = "";
   state.activity.unshift("Action plan canceled.");
+  addActionNote("Canceled action approval", ["The pending browser action plan was canceled."]);
   persistSession();
   render();
+}
+
+function addActionNote(summary, details = []) {
+  state.actionNotes.push({
+    id: crypto.randomUUID(),
+    createdAt: Date.now() + state.actionNotes.length / 1000,
+    summary,
+    details: details.filter(Boolean).slice(0, 20)
+  });
+}
+
+function formatActionDetail(action) {
+  const target = action.target?.name ? ` on ${action.target.name}` : "";
+  const value = action.value ? ` -> ${action.value}` : "";
+  return `${action.type}${target}${value}${action.reason ? `: ${action.reason}` : ""}`;
 }
 
 function buildLocalAgentResult(goal, responseLanguage) {
@@ -1019,6 +1074,21 @@ function summarizePageForUser(observation, responseLanguage) {
 function summarizeObservation(observation) {
   const fieldCount = observation.forms.reduce((total, form) => total + form.fields.length, 0);
   return `${observation.links.length} links, ${observation.buttons.length} buttons, ${fieldCount} fields, and ${observation.visible_text.length} characters of visible text captured.`;
+}
+
+function summarizeHttpArtifact(artifact) {
+  const preview = String(artifact.bodyPreview || "").slice(0, 1200);
+  const headerLines = Object.entries(artifact.headers || {})
+    .filter(([key]) => ["content-type", "server", "location", "cache-control", "x-robots-tag"].includes(key.toLowerCase()))
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\n");
+
+  return [
+    `HTTP ${artifact.statusCode} ${artifact.finalUrl || artifact.url}`,
+    artifact.contentType ? `Content-Type: ${artifact.contentType}` : "",
+    headerLines ? `Headers:\n${headerLines}` : "",
+    preview ? `Body preview:\n${preview}` : ""
+  ].filter(Boolean).join("\n\n");
 }
 
 async function restoreSession() {

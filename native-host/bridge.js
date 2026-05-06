@@ -59,6 +59,17 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "http_request") {
+    runHttpRequest(message.payload)
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "http_response",
+        status: "error",
+        message: error.message || "HTTP request failed."
+      }));
+    return;
+  }
+
   writeMessage({
     connected: false,
     status: "unsupported",
@@ -140,6 +151,97 @@ async function extractAttachment(payload = {}) {
     text: "",
     message: "This attachment type is registered but no extractor is available yet."
   };
+}
+
+async function runHttpRequest(payload = {}) {
+  const method = String(payload.method || "GET").toUpperCase();
+  const allowedMethods = new Set(["GET", "HEAD", "OPTIONS"]);
+
+  if (!allowedMethods.has(method)) {
+    throw new Error("Only GET, HEAD, and OPTIONS HTTP requests are supported by the safe HTTP tool.");
+  }
+
+  const url = normalizeHttpUrl(payload.url || payload.value);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(url, {
+      method,
+      redirect: "follow",
+      signal: controller.signal,
+      headers: sanitizeHeaders(payload.headers || {})
+    });
+    const headers = Object.fromEntries(response.headers.entries());
+    const contentType = response.headers.get("content-type") || "";
+    const bodyText = method === "HEAD" ? "" : await readLimitedResponseText(response, 200000);
+
+    return {
+      type: "http_response",
+      status: "success",
+      url,
+      finalUrl: response.url,
+      statusCode: response.status,
+      ok: response.ok,
+      contentType,
+      headers,
+      bodyPreview: bodyText,
+      message: `Fetched ${response.status} ${response.url} (${bodyText.length} characters captured).`
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeHttpUrl(value) {
+  const raw = String(value || "").trim();
+
+  if (!raw) {
+    throw new Error("HTTP request URL is missing.");
+  }
+
+  const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Only http and https URLs are supported.");
+  }
+
+  return url.href;
+}
+
+function sanitizeHeaders(headers) {
+  const blocked = new Set(["cookie", "authorization", "proxy-authorization", "host", "content-length"]);
+  const clean = {};
+
+  for (const [key, value] of Object.entries(headers || {})) {
+    const lowerKey = key.toLowerCase();
+    if (blocked.has(lowerKey)) continue;
+    clean[key] = String(value);
+  }
+
+  clean["User-Agent"] ||= "BrowserCompanion/0.1";
+  return clean;
+}
+
+async function readLimitedResponseText(response, limit) {
+  const reader = response.body?.getReader();
+
+  if (!reader) {
+    return "";
+  }
+
+  const chunks = [];
+  let received = 0;
+
+  while (received < limit) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+  }
+
+  await reader.cancel().catch(() => {});
+  return Buffer.concat(chunks).subarray(0, limit).toString("utf8");
 }
 
 function extractionResult(text, status, warnings = []) {
