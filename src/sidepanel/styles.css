@@ -164,6 +164,34 @@ h2 {
   font-weight: 700;
 }
 
+.action-note {
+  max-width: 92%;
+  color: #8a94a6;
+  font-size: 12px;
+}
+
+.action-note summary {
+  overflow: hidden;
+  max-width: 100%;
+  cursor: pointer;
+  list-style-position: inside;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-note[open] {
+  border-left: 3px solid var(--line);
+  padding-left: 8px;
+}
+
+.action-note ul {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
 .composer {
   display: grid;
   grid-template-columns: auto 1fr auto;

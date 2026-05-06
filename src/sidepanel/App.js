@@ -16,7 +16,8 @@ const state = {
   messages: [
     {
       role: "assistant",
-      text: "Tell me what you want to accomplish on the current page. I can observe the page first, then propose safe next steps."
+      text: "Tell me what you want to accomplish on the current page. I can observe the page first, then propose safe next steps.",
+      createdAt: Date.now()
     }
   ],
   actionNotes: [],
@@ -578,7 +579,7 @@ async function handleChatSubmit(event) {
     return;
   }
 
-  state.messages.push({ role: "user", text });
+  state.messages.push({ role: "user", text, createdAt: Date.now() });
   input.value = "";
   render();
 
@@ -624,7 +625,8 @@ async function handleAgentResult(result) {
     state.confirmationText = "";
     state.messages.push({
       role: "assistant",
-      text: result.summary_for_user
+      text: result.summary_for_user,
+      createdAt: Date.now()
     });
 
     const policy = policyResponse.envelope.payload;
@@ -650,13 +652,13 @@ async function handleAgentResult(result) {
   }
 
   if (result?.type === "ask_user") {
-    state.messages.push({ role: "assistant", text: result.question });
+    state.messages.push({ role: "assistant", text: result.question, createdAt: Date.now() });
     render();
     return;
   }
 
   if (result?.type === "stop_for_human") {
-    state.messages.push({ role: "assistant", text: result.reason });
+    state.messages.push({ role: "assistant", text: result.reason, createdAt: Date.now() });
     state.activity.unshift("Automation stopped for human action.");
     render();
     return;
@@ -665,7 +667,8 @@ async function handleAgentResult(result) {
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
     state.messages.push({
       role: "assistant",
-      text: result.message || "The local Codex connector is not ready, so I used only local page context."
+      text: result.message || "The local Codex connector is not ready, so I used only local page context.",
+      createdAt: Date.now()
     });
     state.activity.unshift("Codex agent was unavailable.");
     render();
@@ -674,7 +677,8 @@ async function handleAgentResult(result) {
 
   state.messages.push({
     role: "assistant",
-    text: result?.text || "I could not produce a safe browser action from that request yet."
+    text: result?.text || "I could not produce a safe browser action from that request yet.",
+    createdAt: Date.now()
   });
   render();
 }
@@ -700,7 +704,7 @@ async function executeActionPlan(plan) {
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan }));
 
   if (!response.ok) {
-    state.messages.push({ role: "assistant", text: response.error });
+    state.messages.push({ role: "assistant", text: response.error, createdAt: Date.now() });
     state.activity.unshift(`Execution failed: ${response.error}`);
     render();
     return;
@@ -716,7 +720,8 @@ async function executeActionPlan(plan) {
   for (const artifact of httpArtifacts) {
     state.messages.push({
       role: "assistant",
-      text: summarizeHttpArtifact(artifact)
+      text: summarizeHttpArtifact(artifact),
+      createdAt: Date.now()
     });
   }
 
@@ -724,7 +729,8 @@ async function executeActionPlan(plan) {
     role: "assistant",
     text: results.every((result) => result.status === "success")
       ? "The browser actions were completed."
-      : "Some browser actions could not be completed. Check the activity log for details."
+      : "Some browser actions could not be completed. Check the activity log for details.",
+    createdAt: Date.now()
   });
   await observePage();
 }
@@ -1103,6 +1109,7 @@ async function restoreSession() {
   state.codex = session.codex || state.codex;
   state.attachments = session.attachments || [];
   state.messages = session.messages || state.messages;
+  state.actionNotes = session.actionNotes || [];
   state.activity = session.activity || [];
 }
 
@@ -1118,6 +1125,7 @@ function persistSession() {
       codex: state.codex,
       attachments: state.attachments,
       messages: state.messages.slice(-30),
+      actionNotes: state.actionNotes.slice(-80),
       activity: state.activity.slice(0, 80)
     }
   });
@@ -1135,12 +1143,14 @@ function clearSession() {
   state.messages = [
     {
       role: "assistant",
-      text: "Local session cleared. Tell me what you want to accomplish on the current page."
+      text: "Local session cleared. Tell me what you want to accomplish on the current page.",
+      createdAt: Date.now()
     }
   ];
   state.pendingPlan = null;
   state.pendingPolicy = null;
   state.confirmationText = "";
+  state.actionNotes = [];
   state.activity = ["Local session cleared."];
   chrome.storage.local.remove("browserCompanionSession");
   render();
