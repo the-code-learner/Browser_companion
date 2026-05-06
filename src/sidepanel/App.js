@@ -922,7 +922,7 @@ async function handleChatSubmit(event) {
   input.value = "";
   render();
 
-  const memoryRequest = parseMemoryRequest(text);
+  const memoryRequest = parseDirectMemoryRequest(text);
   if (memoryRequest) {
     const saved = await saveUserMemory(memoryRequest);
     state.messages.push({
@@ -1098,9 +1098,11 @@ async function executeActionPlan(plan) {
   });
 
   const synthesized = await maybeSynthesizeResults(plan, results);
+  const answerText = synthesized || getExecutionSummary(results);
+  await maybeSaveResearchMemory(plan, results, answerText);
   state.messages.push({
     role: "assistant",
-    text: synthesized || getExecutionSummary(results),
+    text: answerText,
     createdAt: Date.now()
   });
   await refreshPageAfterAction();
@@ -1172,9 +1174,13 @@ function formatActionDetail(action) {
   return `${action.type}${target}${value}${action.reason ? `: ${action.reason}` : ""}`;
 }
 
-function parseMemoryRequest(text) {
+function parseDirectMemoryRequest(text) {
   const raw = String(text || "").trim();
-  const match = raw.match(/\b(?:remember|save|store|ricordati|salva|memorizza)\b(?:\s+(?:that|che|questo|this))?\s*[:,-]?\s+([\s\S]{6,})/i);
+  if (isResearchIntent(raw)) {
+    return null;
+  }
+
+  const match = raw.match(/^(?:remember|save|store|ricordati|salva|memorizza)\b(?:\s+(?:that|che|questo|this))?\s*[:,-]?\s+([\s\S]{6,})/i);
 
   if (!match) {
     return null;
@@ -1189,6 +1195,47 @@ function parseMemoryRequest(text) {
     title: createMemoryTitle(content),
     content
   };
+}
+
+function isResearchIntent(text) {
+  return /\b(cerca|search|look up|find|internet|online|web|google|fonti|sources|dettagli|details|informazioni|information)\b/i.test(text);
+}
+
+function shouldRememberAfterResearch(text) {
+  return isResearchIntent(text) && /\b(ricordati|remember|save|store|memorizza|salva)\b/i.test(text);
+}
+
+async function maybeSaveResearchMemory(plan, results, answerText) {
+  const goal = plan?.goal || [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
+  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "screenshot"].includes(result.artifact?.kind));
+
+  if (!shouldRememberAfterResearch(goal) || !hasResearchArtifact || !answerText || /^No browser actions/.test(answerText)) {
+    return false;
+  }
+
+  const title = inferResearchMemoryTitle(goal);
+  const saved = await saveUserMemory({
+    title,
+    content: answerText
+  });
+
+  if (saved) {
+    state.activity.unshift(`Saved research summary to user memory: ${title}.`);
+  }
+
+  return saved;
+}
+
+function inferResearchMemoryTitle(goal) {
+  if (/\bchi sono\b/i.test(goal)) {
+    return "User profile and public work context";
+  }
+
+  if (/\benti|istituzioni|ambasciate|consolati|ICE|ITA|camere di commercio|hotel|UAE|Hong Kong\b/i.test(goal)) {
+    return "User institutions and project context";
+  }
+
+  return "User research memory";
 }
 
 function createMemoryTitle(content) {
