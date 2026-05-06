@@ -26,6 +26,9 @@ const state = {
     persistSession: false,
     sendAttachmentsToCodex: true
   },
+  codex: {
+    model: "gpt-5.5"
+  },
   activity: []
 };
 
@@ -94,6 +97,12 @@ function render() {
           </div>
         </div>
         <p>${escapeHtml(state.connector.message)}</p>
+        <label class="field-stack">
+          <span>Codex model</span>
+          <select id="codex-model">
+            ${renderModelOptions()}
+          </select>
+        </label>
         ${renderConnectorSetup()}
       </article>
     </section>
@@ -135,6 +144,12 @@ function render() {
   if (openExtensions) {
     openExtensions.addEventListener("click", () => chrome.tabs.create({ url: "chrome://extensions" }));
   }
+  document.getElementById("codex-model").addEventListener("change", (event) => {
+    state.codex.model = event.target.value;
+    state.activity.unshift(`Codex model set to ${state.codex.model}.`);
+    persistSession();
+    render();
+  });
   document.getElementById("clear-activity").addEventListener("click", () => {
     state.activity = [];
     persistSession();
@@ -259,6 +274,21 @@ function renderAttachment(file) {
       <span>${escapeHtml(file.status)} - ${formatBytes(file.size)}</span>
     </li>
   `;
+}
+
+function renderModelOptions() {
+  const models = [
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.2"
+  ];
+
+  return models.map((model) => {
+    const selected = model === state.codex.model ? "selected" : "";
+    return `<option value="${escapeHtml(model)}" ${selected}>${escapeHtml(model)}</option>`;
+  }).join("");
 }
 
 function renderConnectorSetup() {
@@ -547,6 +577,7 @@ async function getAgentResult(goal) {
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
       goal,
       responseLanguage,
+      model: state.codex.model,
       observation: state.page.observation,
       attachments: state.attachments.map((file) => ({
         id: file.id,
@@ -888,6 +919,7 @@ async function restoreSession() {
   }
 
   state.privacy = session.privacy;
+  state.codex = session.codex || state.codex;
   state.attachments = session.attachments || [];
   state.messages = session.messages || state.messages;
   state.activity = session.activity || [];
@@ -902,6 +934,7 @@ function persistSession() {
   chrome.storage.local.set({
     browserCompanionSession: {
       privacy: state.privacy,
+      codex: state.codex,
       attachments: state.attachments,
       messages: state.messages.slice(-30),
       activity: state.activity.slice(0, 80)

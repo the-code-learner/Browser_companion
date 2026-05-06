@@ -17,4 +17,8 @@ Return one of these response shapes:
 - An `ask_user` JSON object when information is missing.
 - A `stop_for_human` JSON object when automation should not continue.
 
+The response schema is strict. Always include every top-level key required by the schema. For unused string fields, use an empty string. For unused arrays, use an empty array. For unused booleans, use false. For a natural response, put the user-facing answer in `text`. For `ask_user`, put the question in `question`. For `stop_for_human`, put the stop explanation in `reason`. For `agent_plan`, put the user-facing explanation in `summary_for_user` and the executable steps in `actions`.
+
+Every action must include `id`, `type`, `target`, `value`, `source`, and `reason`. For action fields that do not apply, use empty strings, an empty target with empty strings and empty selector candidates, and a source with empty `file_id` and confidence 0.
+
 Before proposing actions, prefer read-only observation. When proposing actions, include the target role, accessible name, agent ID, source of the data, risk level, and a short user-readable reason.

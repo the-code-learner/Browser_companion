@@ -1,25 +1,43 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://browser-companion.local/schemas/tool-schema.json",
-  "title": "Browser Companion Agent Plan",
+  "title": "Browser Companion Agent Response",
   "type": "object",
+  "additionalProperties": false,
   "required": [
     "type",
+    "text",
+    "question",
+    "reason",
     "goal",
     "risk_level",
     "summary_for_user",
     "needs_clarification",
     "requires_confirmation",
     "will_submit",
-    "actions"
+    "actions",
+    "uncertain_fields"
   ],
   "properties": {
     "type": {
-      "const": "agent_plan"
+      "enum": [
+        "natural_response",
+        "ask_user",
+        "stop_for_human",
+        "agent_plan"
+      ]
+    },
+    "text": {
+      "type": "string"
+    },
+    "question": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
     },
     "goal": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "risk_level": {
       "enum": [
@@ -51,25 +69,36 @@
     "uncertain_fields": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": [
-          "field",
-          "reason"
-        ],
-        "properties": {
-          "field": {
-            "type": "string"
-          },
-          "reason": {
-            "type": "string"
-          }
-        }
+        "$ref": "#/$defs/uncertain_field"
       }
     }
   },
   "$defs": {
+    "uncertain_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "reason"
+      ],
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
     "target": {
       "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "role",
+        "name",
+        "selector_candidates"
+      ],
       "properties": {
         "agent_id": {
           "type": "string"
@@ -86,20 +115,41 @@
             "type": "string"
           }
         }
-      },
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
       "required": [
-        "agent_id",
-        "role",
-        "name"
-      ]
+        "file_id",
+        "confidence"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
     },
     "action": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
+        "id",
         "type",
+        "target",
+        "value",
+        "source",
         "reason"
       ],
       "properties": {
+        "id": {
+          "type": "string"
+        },
         "type": {
           "enum": [
             "observe_page",
@@ -132,19 +182,11 @@
         "target": {
           "$ref": "#/$defs/target"
         },
-        "value": {},
+        "value": {
+          "type": "string"
+        },
         "source": {
-          "type": "object",
-          "properties": {
-            "file_id": {
-              "type": "string"
-            },
-            "confidence": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            }
-          }
+          "$ref": "#/$defs/source"
         },
         "reason": {
           "type": "string"

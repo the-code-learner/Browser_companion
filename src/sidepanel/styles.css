@@ -322,9 +322,13 @@ h2 {
 }
 
 .toggle-row,
-.confirmation-box {
+.confirmation-box,
+.field-stack {
   display: flex;
   gap: 8px;
+}
+
+.toggle-row {
   align-items: center;
 }
 
@@ -338,12 +342,20 @@ h2 {
   margin-top: 10px;
 }
 
-.confirmation-box span {
+.field-stack {
+  align-items: stretch;
+  flex-direction: column;
+  margin-top: 12px;
+}
+
+.confirmation-box span,
+.field-stack span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.confirmation-box input {
+.confirmation-box input,
+.field-stack select {
   min-height: 36px;
   border: 1px solid var(--line);
   border-radius: 7px;

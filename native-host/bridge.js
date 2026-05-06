@@ -270,6 +270,8 @@ function runAgentRequest(payload = {}) {
 
   const result = runCodex([
     "exec",
+    "--model",
+    normalizeModel(payload.model),
     "--skip-git-repo-check",
     "--sandbox",
     "read-only",
@@ -286,7 +288,7 @@ function runAgentRequest(payload = {}) {
   if (result.error || result.status !== 0) {
     return {
       type: "agent_error",
-      message: compact(`${result.error?.message || ""} ${result.stderr || ""}`) || "Codex agent request failed."
+      message: summarizeCodexFailure(result)
     };
   }
 
@@ -296,7 +298,7 @@ function runAgentRequest(payload = {}) {
   } catch (error) {
     return {
       type: "natural_response",
-      text: "Codex responded, but the response was not a valid Browser Companion plan."
+      text: "Codex responded, but the response was not valid Browser Companion JSON."
     };
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -323,6 +325,18 @@ function buildAgentPrompt(payload) {
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions are needed."
   ].join("\n");
+}
+
+function normalizeModel(model) {
+  const allowed = new Set([
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.2"
+  ]);
+
+  return allowed.has(model) ? model : "gpt-5.5";
 }
 
 function runCodex(args, options = {}) {
@@ -393,6 +407,27 @@ function writeMessage(message) {
 
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function summarizeCodexFailure(result) {
+  const combined = compact(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`);
+  const schemaMessage = combined.match(/Invalid schema[^"]*|invalid_json_schema[^"]*/i)?.[0];
+
+  if (schemaMessage) {
+    return `Codex rejected the response schema: ${schemaMessage}`;
+  }
+
+  const errorMessage = combined.match(/ERROR:\s*(\{.*?\})(?=\s*ERROR:|\s*$)/i)?.[1];
+  if (errorMessage) {
+    try {
+      const parsed = JSON.parse(errorMessage);
+      return parsed.error?.message || "Codex returned an error.";
+    } catch {
+      return compact(errorMessage).slice(0, 500);
+    }
+  }
+
+  return combined.slice(-800) || "Codex agent request failed.";
 }
 
 function cellToText(value) {
