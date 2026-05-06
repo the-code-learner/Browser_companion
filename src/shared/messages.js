@@ -8,6 +8,7 @@ export const MESSAGE_TYPES = Object.freeze({
   HTTP_REQUEST: "http_request",
   WEB_SEARCH: "web_search",
   AGENT_REQUEST: "agent_request",
+  SYNTHESIS_REQUEST: "synthesis_request",
   AGENT_RESPONSE: "agent_response",
   VALIDATE_ACTION_PLAN: "validate_action_plan",
   POLICY_RESULT: "policy_result",

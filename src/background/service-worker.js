@@ -56,6 +56,10 @@ async function handleMessage(message) {
     return requestAgent(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.SYNTHESIS_REQUEST) {
+    return requestSynthesis(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.VALIDATE_ACTION_PLAN) {
     return {
       ok: true,
@@ -158,6 +162,24 @@ async function requestAgent(payload) {
     return {
       ok: false,
       error: error.message || "Codex agent request failed."
+    };
+  }
+}
+
+async function requestSynthesis(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "synthesis_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.AGENT_RESPONSE, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Codex synthesis request failed."
     };
   }
 }

@@ -760,25 +760,14 @@ async function executeActionPlan(plan) {
     .map((result) => result.artifact)
     .filter((artifact) => artifact?.kind === "web_search");
 
-  for (const artifact of httpArtifacts) {
-    state.messages.push({
-      role: "assistant",
-      text: summarizeHttpArtifact(artifact),
-      createdAt: Date.now()
-    });
-  }
+  [...httpArtifacts, ...searchArtifacts].forEach((artifact) => {
+    addActionNote(getArtifactSummary(artifact), getArtifactDetails(artifact));
+  });
 
-  for (const artifact of searchArtifacts) {
-    state.messages.push({
-      role: "assistant",
-      text: summarizeSearchArtifact(artifact),
-      createdAt: Date.now()
-    });
-  }
-
+  const synthesized = await maybeSynthesizeResults(plan, results);
   state.messages.push({
     role: "assistant",
-    text: getExecutionSummary(results),
+    text: synthesized || getExecutionSummary(results),
     createdAt: Date.now()
   });
   await refreshPageAfterAction();
@@ -1211,6 +1200,82 @@ function formatHttpBodyPreview(artifact) {
   }
 
   return body.slice(0, 1200);
+}
+
+async function maybeSynthesizeResults(plan, results) {
+  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation"].includes(result.artifact?.kind));
+
+  if (!hasResearchArtifact || state.connector.status !== "connected") {
+    return "";
+  }
+
+  const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, {
+    goal: lastUserMessage,
+    responseLanguage: detectUserLanguage(lastUserMessage),
+    model: state.codex.model,
+    observation: state.page.observation,
+    results: results.map(stripLargeArtifactsForSynthesis)
+  }));
+
+  if (!response.ok) {
+    state.activity.unshift(`Synthesis failed: ${response.error}`);
+    return "";
+  }
+
+  return response.envelope.payload?.text || "";
+}
+
+function stripLargeArtifactsForSynthesis(result) {
+  if (result.artifact?.kind === "http_response") {
+    return {
+      ...result,
+      artifact: {
+        ...result.artifact,
+        bodyPreview: formatHttpBodyPreview(result.artifact).slice(0, 4000)
+      }
+    };
+  }
+
+  return result;
+}
+
+function getArtifactSummary(artifact) {
+  if (artifact.kind === "web_search") {
+    return `Search results: ${artifact.query}`;
+  }
+
+  if (artifact.kind === "http_response") {
+    return `HTTP ${artifact.statusCode}: ${artifact.finalUrl || artifact.url}`;
+  }
+
+  if (artifact.kind === "page_observation") {
+    return "Page observation captured";
+  }
+
+  return "Tool artifact";
+}
+
+function getArtifactDetails(artifact) {
+  if (artifact.kind === "web_search") {
+    return (artifact.results || []).slice(0, 8).map((result, index) => `${index + 1}. ${result.title} - ${result.url}${result.snippet ? ` - ${result.snippet}` : ""}`);
+  }
+
+  if (artifact.kind === "http_response") {
+    return summarizeHttpArtifact(artifact).split("\n").filter(Boolean).slice(0, 16);
+  }
+
+  if (artifact.kind === "page_observation") {
+    const observation = artifact.observation;
+    return [
+      observation?.tab?.title || "Untitled page",
+      `${observation?.links?.length || 0} links`,
+      `${observation?.buttons?.length || 0} buttons`,
+      `${observation?.visible_text?.length || 0} visible text characters`
+    ];
+  }
+
+  return [];
 }
 
 function stripHtml(html) {

@@ -47,6 +47,11 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "synthesis_request") {
+    writeMessage(runSynthesisRequest(message.payload));
+    return;
+  }
+
   if (message?.type === "extract_attachment") {
     extractAttachment(message.payload)
       .then(writeMessage)
@@ -491,6 +496,52 @@ function runAgentRequest(payload = {}) {
   }
 }
 
+function runSynthesisRequest(payload = {}) {
+  const health = getHealth();
+
+  if (!health.connected) {
+    return {
+      type: "natural_response",
+      text: "I gathered tool results, but Codex is not available to synthesize them."
+    };
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-"));
+  const outputPath = path.join(tempDir, "codex-synthesis.txt");
+  const prompt = buildSynthesisPrompt(payload);
+
+  const result = runCodex([
+    "exec",
+    "--model",
+    normalizeModel(payload.model),
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "--output-last-message",
+    outputPath,
+    "-"
+  ], {
+    input: prompt,
+    timeout: 120000
+  });
+
+  if (result.error || result.status !== 0) {
+    return {
+      type: "natural_response",
+      text: summarizeCodexFailure(result)
+    };
+  }
+
+  try {
+    return {
+      type: "natural_response",
+      text: fs.readFileSync(outputPath, "utf8").trim()
+    };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 function buildAgentPrompt(payload) {
   const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
 
@@ -510,6 +561,28 @@ function buildAgentPrompt(payload) {
     JSON.stringify(payload.attachments || [], null, 2),
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions are needed."
+  ].join("\n");
+}
+
+function buildSynthesisPrompt(payload) {
+  const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
+
+  return [
+    systemPrompt,
+    "",
+    "Task: Produce a concise answer-focused synthesis for the user. Do not return JSON. Do not dump raw search results. Explain what is known, what sources indicate, and any uncertainty.",
+    "",
+    "User goal:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Current page observation JSON:",
+    JSON.stringify(payload.observation || {}, null, 2),
+    "",
+    "Tool execution results JSON:",
+    JSON.stringify(payload.results || [], null, 2)
   ].join("\n");
 }
 
