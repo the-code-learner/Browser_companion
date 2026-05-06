@@ -32,6 +32,15 @@ const state = {
   codex: {
     model: "gpt-5.5"
   },
+  userMemory: {
+    status: "unknown",
+    message: "User memory has not been loaded.",
+    path: "",
+    items: [],
+    draftTitle: "",
+    draftContent: ""
+  },
+  chatAtBottom: true,
   activity: []
 };
 
@@ -44,6 +53,7 @@ async function initialize() {
   applyTheme();
   render();
   checkConnector();
+  loadUserMemory();
 }
 
 function render() {
@@ -71,10 +81,25 @@ function render() {
     <section class="chat-log" aria-label="Chat messages">
       ${renderChatTimeline()}
     </section>
+    <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>↓</button>
 
     ${renderComposer()}
 
     <section class="utility-drawer" aria-label="Additional controls">
+      <details>
+        <summary>Memory <span>${state.userMemory.items.length}</span></summary>
+        <p>${escapeHtml(state.userMemory.message)}</p>
+        ${state.userMemory.path ? `<p class="memory-path">${escapeHtml(state.userMemory.path)}</p>` : ""}
+        <form id="memory-form" class="memory-form">
+          <input id="memory-title" type="text" placeholder="Title" value="${escapeHtml(state.userMemory.draftTitle)}">
+          <textarea id="memory-content" rows="3" placeholder="Only save information the user explicitly asked to remember">${escapeHtml(state.userMemory.draftContent)}</textarea>
+          <button type="submit">Save Memory</button>
+        </form>
+        <ul class="memory-list">
+          ${state.userMemory.items.length ? state.userMemory.items.map(renderMemoryItem).join("") : "<li>No saved user memory.</li>"}
+        </ul>
+      </details>
+
       <details>
         <summary>Attachments <span>${state.attachments.length}</span></summary>
         <ul class="compact-list">
@@ -124,6 +149,7 @@ function render() {
 
   document.getElementById("observe-page").addEventListener("click", observePage);
   document.getElementById("theme-toggle").addEventListener("click", cycleTheme);
+  setupChatScrollControls();
   document.getElementById("check-connector").addEventListener("click", checkConnector);
   document.getElementById("connect-codex").addEventListener("click", connectCodex);
   const copyInstallCommand = document.getElementById("copy-install-command");
@@ -146,6 +172,19 @@ function render() {
     render();
   });
   document.getElementById("clear-attachments").addEventListener("click", clearAttachments);
+  document.getElementById("memory-form").addEventListener("submit", saveMemoryFromForm);
+  document.getElementById("memory-title").addEventListener("input", (event) => {
+    state.userMemory.draftTitle = event.target.value;
+  });
+  document.getElementById("memory-content").addEventListener("input", (event) => {
+    state.userMemory.draftContent = event.target.value;
+  });
+  document.querySelectorAll("[data-memory-edit]").forEach((button) => {
+    button.addEventListener("click", () => startMemoryEdit(button.dataset.memoryEdit));
+  });
+  document.querySelectorAll("[data-memory-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteMemoryItem(button.dataset.memoryDelete));
+  });
   document.getElementById("clear-session").addEventListener("click", clearSession);
   document.getElementById("persist-session").addEventListener("change", (event) => {
     state.privacy.persistSession = event.target.checked;
@@ -209,6 +248,36 @@ function renderComposer() {
       <button type="submit">Send</button>
     </form>
   `;
+}
+
+function setupChatScrollControls() {
+  const chatLog = document.querySelector(".chat-log");
+  const jumpButton = document.getElementById("jump-to-latest");
+
+  if (!chatLog || !jumpButton) {
+    return;
+  }
+
+  const update = () => {
+    const distanceFromBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight;
+    const atBottom = distanceFromBottom < 48;
+    state.chatAtBottom = atBottom;
+    jumpButton.hidden = atBottom;
+  };
+
+  chatLog.addEventListener("scroll", update);
+  jumpButton.addEventListener("click", () => {
+    chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: "smooth" });
+    state.chatAtBottom = true;
+    jumpButton.hidden = true;
+  });
+
+  requestAnimationFrame(() => {
+    if (state.chatAtBottom) {
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+    update();
+  });
 }
 
 function handleComposerKeydown(event) {
@@ -392,6 +461,19 @@ function renderAttachment(file) {
   `;
 }
 
+function renderMemoryItem(item) {
+  return `
+    <li>
+      <strong>${escapeHtml(item.title || "User note")}</strong>
+      <p>${escapeHtml(item.content || "")}</p>
+      <div class="button-row">
+        <button type="button" data-memory-edit="${escapeHtml(item.id)}">Edit</button>
+        <button type="button" data-memory-delete="${escapeHtml(item.id)}">Delete</button>
+      </div>
+    </li>
+  `;
+}
+
 function renderModelOptions() {
   const models = [
     "gpt-5.5",
@@ -553,6 +635,104 @@ async function checkConnector() {
   render();
 }
 
+async function loadUserMemory() {
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.USER_MEMORY_GET));
+
+  if (!response.ok) {
+    state.userMemory.status = "error";
+    state.userMemory.message = response.error || "User memory is unavailable.";
+    render();
+    return;
+  }
+
+  applyUserMemoryPayload(response.envelope.payload);
+  render();
+}
+
+async function saveMemoryFromForm(event) {
+  event.preventDefault();
+  const title = document.getElementById("memory-title").value.trim() || "User note";
+  const content = document.getElementById("memory-content").value.trim();
+
+  if (!content) {
+    state.userMemory.message = "Memory content is empty.";
+    render();
+    return;
+  }
+
+  await saveUserMemory({
+    id: state.userMemory.editingId || "",
+    title,
+    content
+  });
+}
+
+async function saveUserMemory(item) {
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.USER_MEMORY_SAVE, item));
+
+  if (!response.ok) {
+    state.userMemory.status = "error";
+    state.userMemory.message = response.error || "User memory could not be saved.";
+    render();
+    return false;
+  }
+
+  if (response.envelope.payload?.status === "error") {
+    applyUserMemoryPayload(response.envelope.payload);
+    render();
+    return false;
+  }
+
+  applyUserMemoryPayload(response.envelope.payload);
+  state.userMemory.draftTitle = "";
+  state.userMemory.draftContent = "";
+  state.userMemory.editingId = "";
+  state.activity.unshift(response.envelope.payload.message || "User memory saved.");
+  render();
+  return true;
+}
+
+function startMemoryEdit(id) {
+  const item = state.userMemory.items.find((memoryItem) => memoryItem.id === id);
+  if (!item) {
+    return;
+  }
+
+  state.userMemory.editingId = item.id;
+  state.userMemory.draftTitle = item.title || "User note";
+  state.userMemory.draftContent = item.content || "";
+  state.userMemory.message = `Editing "${state.userMemory.draftTitle}".`;
+  render();
+}
+
+async function deleteMemoryItem(id) {
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.USER_MEMORY_DELETE, { id }));
+
+  if (!response.ok) {
+    state.userMemory.status = "error";
+    state.userMemory.message = response.error || "User memory could not be deleted.";
+    render();
+    return;
+  }
+
+  if (response.envelope.payload?.status === "error") {
+    applyUserMemoryPayload(response.envelope.payload);
+    render();
+    return;
+  }
+
+  applyUserMemoryPayload(response.envelope.payload);
+  state.activity.unshift(response.envelope.payload.message || "User memory deleted.");
+  render();
+}
+
+function applyUserMemoryPayload(payload = {}) {
+  state.userMemory.status = payload.status || "ready";
+  state.userMemory.message = payload.message || "User memory loaded.";
+  state.userMemory.path = payload.path || state.userMemory.path;
+  state.userMemory.items = Array.isArray(payload.items) ? payload.items : [];
+}
+
 async function connectCodex() {
   state.connector = {
     status: "connecting",
@@ -690,6 +870,20 @@ async function handleChatSubmit(event) {
   input.value = "";
   render();
 
+  const memoryRequest = parseMemoryRequest(text);
+  if (memoryRequest) {
+    const saved = await saveUserMemory(memoryRequest);
+    state.messages.push({
+      role: "assistant",
+      text: saved
+        ? localText(detectUserLanguage(text), "memorySaved")
+        : localText(detectUserLanguage(text), "memorySaveFailed"),
+      createdAt: Date.now()
+    });
+    render();
+    return;
+  }
+
   if (!state.page.observation) {
     await observePage();
   }
@@ -707,6 +901,12 @@ async function getAgentResult(goal) {
       responseLanguage,
       model: state.codex.model,
       observation: state.page.observation,
+      userMemory: state.userMemory.items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        content: item.content,
+        updatedAt: item.updatedAt
+      })),
       attachments: state.attachments.map((file) => ({
         id: file.id,
         name: file.name,
@@ -918,6 +1118,30 @@ function formatActionDetail(action) {
   const target = action.target?.name ? ` on ${action.target.name}` : "";
   const value = action.value ? ` -> ${action.value}` : "";
   return `${action.type}${target}${value}${action.reason ? `: ${action.reason}` : ""}`;
+}
+
+function parseMemoryRequest(text) {
+  const raw = String(text || "").trim();
+  const match = raw.match(/\b(?:remember|save|store|ricordati|salva|memorizza)\b(?:\s+(?:that|che|questo|this))?\s*[:,-]?\s+([\s\S]{6,})/i);
+
+  if (!match) {
+    return null;
+  }
+
+  const content = match[1].trim();
+  if (!content || /\?$/.test(content)) {
+    return null;
+  }
+
+  return {
+    title: createMemoryTitle(content),
+    content
+  };
+}
+
+function createMemoryTitle(content) {
+  const words = compact(content).split(/\s+/).slice(0, 8).join(" ");
+  return words.length > 64 ? `${words.slice(0, 61)}...` : words || "User note";
 }
 
 function buildLocalAgentResult(goal, responseLanguage) {
@@ -1296,6 +1520,12 @@ async function maybeSynthesizeResults(plan, results) {
     responseLanguage: detectUserLanguage(lastUserMessage),
     model: state.codex.model,
     observation: state.page.observation,
+    userMemory: state.userMemory.items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      content: item.content,
+      updatedAt: item.updatedAt
+    })),
     results: results.map(stripLargeArtifactsForSynthesis)
   }));
 
@@ -1510,7 +1740,7 @@ function normalizeKey(value) {
 }
 
 function detectUserLanguage(text) {
-  if (/\b(cosa|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo)\b/i.test(text)) {
+  if (/\b(cosa|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza)\b/i.test(text)) {
     return "it";
   }
 
@@ -1527,7 +1757,9 @@ function localText(language, key, value) {
       submitFound: `I found "${value}". This may submit, accept, send, or finalize something on the website. Type SUBMIT to enable the final action.`,
       fillSummary: `I can fill ${value} non-sensitive field${value === 1 ? "" : "s"} from local attachment context. I will not submit the form.`,
       openUrl: `I will open ${value}.`,
-      openSearch: `I will open Google search results for "${value}".`
+      openSearch: `I will open Google search results for "${value}".`,
+      memorySaved: "Saved that to local user memory.",
+      memorySaveFailed: "I could not save that to local user memory."
     },
     it: {
       needObservation: "Devo osservare la scheda corrente prima di aiutarti con questa pagina.",
@@ -1537,7 +1769,9 @@ function localText(language, key, value) {
       submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Digita SUBMIT per abilitare l'azione finale.`,
       fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`,
       openUrl: `Apro ${value}.`,
-      openSearch: `Apro i risultati Google per "${value}".`
+      openSearch: `Apro i risultati Google per "${value}".`,
+      memorySaved: "Salvato nella memoria utente locale.",
+      memorySaveFailed: "Non sono riuscito a salvarlo nella memoria utente locale."
     }
   };
 

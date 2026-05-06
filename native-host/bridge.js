@@ -5,10 +5,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
+import crypto from "node:crypto";
 
 let inputBuffer = Buffer.alloc(0);
 const bridgeDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(bridgeDir, "..");
+const userMemoryPath = path.join(projectRoot, "USER_MEMORY.md");
 const codexBin = resolveCodexBin();
 
 process.stdin.on("data", (chunk) => {
@@ -84,6 +86,39 @@ function handleMessage(message) {
         results: [],
         message: error.message || "Web search failed."
       }));
+    return;
+  }
+
+  if (message?.type === "user_memory_get") {
+    writeMessage(getUserMemory());
+    return;
+  }
+
+  if (message?.type === "user_memory_save") {
+    try {
+      writeMessage(saveUserMemory(message.payload));
+    } catch (error) {
+      writeMessage({
+        type: "user_memory",
+        status: "error",
+        items: readUserMemoryItems(),
+        message: error.message || "User memory could not be saved."
+      });
+    }
+    return;
+  }
+
+  if (message?.type === "user_memory_delete") {
+    try {
+      writeMessage(deleteUserMemory(message.payload));
+    } catch (error) {
+      writeMessage({
+        type: "user_memory",
+        status: "error",
+        items: readUserMemoryItems(),
+        message: error.message || "User memory could not be deleted."
+      });
+    }
     return;
   }
 
@@ -267,6 +302,152 @@ function parseDuckDuckGoResults(html) {
   }
 
   return results;
+}
+
+function getUserMemory() {
+  const items = readUserMemoryItems();
+  return {
+    type: "user_memory",
+    status: "ready",
+    path: userMemoryPath,
+    items,
+    message: `Loaded ${items.length} user memory item${items.length === 1 ? "" : "s"}.`
+  };
+}
+
+function saveUserMemory(payload = {}) {
+  const title = compact(payload.title || "User note").slice(0, 120) || "User note";
+  const content = compact(payload.content || payload.text || "").slice(0, 5000);
+
+  if (!content) {
+    throw new Error("Memory content is empty.");
+  }
+
+  const now = new Date().toISOString();
+  const items = readUserMemoryItems();
+  const id = payload.id && /^[a-z0-9-]{8,80}$/i.test(payload.id)
+    ? payload.id
+    : crypto.randomUUID();
+  const existingIndex = items.findIndex((item) => item.id === id);
+  const nextItem = {
+    id,
+    title,
+    content,
+    createdAt: existingIndex >= 0 ? items[existingIndex].createdAt : now,
+    updatedAt: now
+  };
+
+  if (existingIndex >= 0) {
+    items[existingIndex] = nextItem;
+  } else {
+    items.push(nextItem);
+  }
+
+  writeUserMemoryItems(items);
+
+  return {
+    type: "user_memory",
+    status: "saved",
+    path: userMemoryPath,
+    item: nextItem,
+    items,
+    message: `Saved memory item "${title}".`
+  };
+}
+
+function deleteUserMemory(payload = {}) {
+  const id = String(payload.id || "");
+  const items = readUserMemoryItems();
+  const nextItems = items.filter((item) => item.id !== id);
+
+  if (nextItems.length === items.length) {
+    throw new Error("Memory item was not found.");
+  }
+
+  writeUserMemoryItems(nextItems);
+
+  return {
+    type: "user_memory",
+    status: "deleted",
+    path: userMemoryPath,
+    items: nextItems,
+    message: "Deleted memory item."
+  };
+}
+
+function readUserMemoryItems() {
+  if (!fs.existsSync(userMemoryPath)) {
+    writeUserMemoryItems([]);
+    return [];
+  }
+
+  const markdown = fs.readFileSync(userMemoryPath, "utf8");
+  const items = [];
+  const pattern = /<!-- memory:([a-z0-9-]+) -->\s*## ([^\n]+)\n([\s\S]*?)<!-- \/memory:\1 -->/gi;
+  let match;
+
+  while ((match = pattern.exec(markdown))) {
+    const body = match[3].trim();
+    const createdAt = body.match(/\*\*Created:\*\* ([^\n]+)/)?.[1]?.trim() || "";
+    const updatedAt = body.match(/\*\*Updated:\*\* ([^\n]+)/)?.[1]?.trim() || "";
+    const content = body
+      .replace(/\*\*Created:\*\* [^\n]+\n?/i, "")
+      .replace(/\*\*Updated:\*\* [^\n]+\n?/i, "")
+      .trim();
+
+    items.push({
+      id: match[1],
+      title: match[2].trim(),
+      content,
+      createdAt,
+      updatedAt
+    });
+  }
+
+  return items;
+}
+
+function writeUserMemoryItems(items) {
+  const now = new Date().toISOString();
+  const body = items.map((item) => {
+    const title = sanitizeMemoryLine(item.title || "User note");
+    const content = sanitizeMemoryContent(item.content || "");
+    const createdAt = sanitizeMemoryLine(item.createdAt || now);
+    const updatedAt = sanitizeMemoryLine(item.updatedAt || now);
+
+    return [
+      `<!-- memory:${item.id} -->`,
+      `## ${title}`,
+      `**Created:** ${createdAt}`,
+      `**Updated:** ${updatedAt}`,
+      "",
+      content,
+      `<!-- /memory:${item.id} -->`
+    ].join("\n");
+  }).join("\n\n");
+
+  fs.writeFileSync(userMemoryPath, [
+    "# Browser Companion User Memory",
+    "",
+    `Last updated: ${now}`,
+    "Scope: local user-requested memory, ignored by git.",
+    "",
+    "This file stores general information about the user only when the user explicitly asks Browser Companion to remember it.",
+    "",
+    body
+  ].join("\n").trimEnd() + "\n", "utf8");
+}
+
+function sanitizeMemoryLine(value) {
+  return compact(value).replace(/[#<>]/g, "").slice(0, 160);
+}
+
+function sanitizeMemoryContent(value) {
+  return String(value || "")
+    .replace(/<!--\s*memory:[\s\S]*?-->/gi, "")
+    .replace(/<!--\s*\/memory:[\s\S]*?-->/gi, "")
+    .trim()
+    .slice(0, 5000);
 }
 
 function unwrapDuckDuckGoUrl(url) {
@@ -568,6 +749,9 @@ function buildAgentPrompt(payload) {
     "Current page observation JSON:",
     JSON.stringify(payload.observation || {}, null, 2),
     "",
+    "Local user memory JSON:",
+    JSON.stringify(payload.userMemory || [], null, 2),
+    "",
     "Local attachment context JSON:",
     JSON.stringify(payload.attachments || [], null, 2),
     "",
@@ -591,6 +775,9 @@ function buildSynthesisPrompt(payload) {
     "",
     "Current page observation JSON:",
     JSON.stringify(payload.observation || {}, null, 2),
+    "",
+    "Local user memory JSON:",
+    JSON.stringify(payload.userMemory || [], null, 2),
     "",
     "Tool execution results JSON:",
     JSON.stringify(payload.results || [], null, 2)

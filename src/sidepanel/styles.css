@@ -66,7 +66,7 @@ body {
   min-width: 320px;
   color: var(--ink);
   background: var(--bg);
-  font: 14px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 13px/1.35 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 button,
@@ -75,7 +75,7 @@ textarea {
 }
 
 button {
-  min-height: 36px;
+  min-height: 30px;
   border: 1px solid var(--line);
   border-radius: 7px;
   color: var(--ink);
@@ -92,8 +92,8 @@ button:hover {
   min-height: 100vh;
   max-height: 100vh;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
+  gap: 8px;
+  padding: 10px;
   overflow: hidden;
 }
 
@@ -111,21 +111,21 @@ button:hover {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px;
+  gap: 8px;
+  padding: 10px;
 }
 
 .topbar > div {
-  padding-left: 34px;
+  padding-left: 28px;
 }
 
 .theme-toggle {
   position: absolute;
-  top: 12px;
-  left: 12px;
+  top: 9px;
+  left: 9px;
   display: grid;
-  width: 26px;
-  min-height: 26px;
+  width: 24px;
+  min-height: 24px;
   place-items: center;
   border-radius: 999px;
   padding: 0;
@@ -141,7 +141,7 @@ p {
 }
 
 h1 {
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.2;
 }
 
@@ -159,8 +159,8 @@ h2 {
 .status {
   flex: 0 0 auto;
   border-radius: 999px;
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: 3px 7px;
+  font-size: 11px;
   text-transform: capitalize;
 }
 
@@ -182,16 +182,16 @@ h2 {
 .page-strip {
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
-  padding: 12px;
+  padding: 9px;
 }
 
 .eyebrow {
   display: block;
   margin-bottom: 3px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -205,6 +205,28 @@ h2 {
   min-height: 220px;
   overflow-y: auto;
   padding-right: 2px;
+}
+
+.jump-to-latest {
+  position: fixed;
+  right: 18px;
+  bottom: 112px;
+  z-index: 8;
+  display: grid;
+  width: 32px;
+  min-height: 32px;
+  place-items: center;
+  border-radius: 999px;
+  color: #ffffff;
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 18%);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.jump-to-latest[hidden] {
+  display: none;
 }
 
 .message {
@@ -322,23 +344,23 @@ h2 {
   z-index: 5;
   display: grid;
   grid-template-columns: auto 1fr auto;
-  gap: 8px;
+  gap: 6px;
   align-items: end;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 8px;
+  padding: 7px;
   background: var(--panel);
   box-shadow: 0 -8px 18px rgb(23 32 51 / 8%);
 }
 
 .composer textarea {
   width: 100%;
-  min-height: 48px;
+  min-height: 42px;
   max-height: 140px;
   resize: vertical;
   border: 1px solid var(--line);
   border-radius: 7px;
-  padding: 8px;
+  padding: 7px;
   color: var(--ink);
 }
 
@@ -361,11 +383,11 @@ h2 {
 
 .file-input span {
   display: inline-flex;
-  min-height: 36px;
+  min-height: 30px;
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 7px;
-  padding: 0 10px;
+  padding: 0 8px;
   background: var(--panel);
   cursor: pointer;
 }
@@ -375,7 +397,7 @@ h2 {
   grid-template-columns: 1fr;
   gap: 6px;
   overflow-y: auto;
-  max-height: 28vh;
+  max-height: 24vh;
 }
 
 .utility-drawer details {
@@ -384,19 +406,19 @@ h2 {
 
 .utility-drawer summary {
   display: flex;
-  min-height: 30px;
+  min-height: 26px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 8px;
   color: var(--ink);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
 .utility-drawer details > :not(summary) {
-  margin: 0 10px 8px;
+  margin: 0 8px 7px;
 }
 
 .utility-drawer details > .button-row {
@@ -422,6 +444,12 @@ h2 {
   gap: 6px;
 }
 
+.button-row button {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
 .section-title button {
   min-height: 28px;
   padding: 0 8px;
@@ -444,6 +472,51 @@ h2 {
 .compact-list strong,
 .compact-list span {
   display: block;
+}
+
+.memory-form {
+  display: grid;
+  gap: 6px;
+}
+
+.memory-form input,
+.memory-form textarea,
+.field-stack select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px;
+  color: var(--ink);
+  background: var(--panel);
+  font: inherit;
+}
+
+.memory-form textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.memory-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.memory-list li {
+  word-break: break-word;
+}
+
+.memory-list p,
+.memory-path {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memory-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attachment-detail {

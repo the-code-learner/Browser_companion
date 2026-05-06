@@ -52,6 +52,18 @@ async function handleMessage(message) {
     return runWebSearch(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.USER_MEMORY_GET) {
+    return getUserMemory();
+  }
+
+  if (message?.type === MESSAGE_TYPES.USER_MEMORY_SAVE) {
+    return saveUserMemory(message.payload);
+  }
+
+  if (message?.type === MESSAGE_TYPES.USER_MEMORY_DELETE) {
+    return deleteUserMemory(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.AGENT_REQUEST) {
     return requestAgent(message.payload);
   }
@@ -234,6 +246,57 @@ async function runWebSearch(payload) {
     return {
       ok: false,
       error: error.message || "Web search failed."
+    };
+  }
+}
+
+async function getUserMemory() {
+  try {
+    const response = await sendNativeMessage({ type: "user_memory_get" });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.USER_MEMORY_GET, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "User memory could not be loaded."
+    };
+  }
+}
+
+async function saveUserMemory(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "user_memory_save",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.USER_MEMORY_SAVE, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "User memory could not be saved."
+    };
+  }
+}
+
+async function deleteUserMemory(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "user_memory_delete",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.USER_MEMORY_DELETE, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "User memory could not be deleted."
     };
   }
 }
