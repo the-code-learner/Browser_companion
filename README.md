@@ -19,6 +19,8 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Assistant responses follow the user's language unless the user asks otherwise
 - Side panel selector for the Codex model used by agent requests
 - Expandable one-line action notes inside the chat for approvals, executed actions, and results
+- Collapsible utility drawers for attachments, connector, privacy, and activity
+- Sticky chat composer pinned to the bottom of the side panel
 - Shared message, schema, and policy modules
 
 ## Load locally

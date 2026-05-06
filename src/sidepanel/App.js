@@ -69,34 +69,22 @@ function render() {
       ${renderChatTimeline()}
     </section>
 
-    <form id="chat-form" class="composer">
-      <label class="file-input">
-        <input id="attachment-input" type="file" multiple>
-        <span>Attach</span>
-      </label>
-      <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page"></textarea>
-      <button type="submit">Send</button>
-    </form>
+    ${renderComposer()}
 
-    <section class="context-grid">
-      <article>
-        <div class="section-title">
-          <h2>Attachments</h2>
-          <span>${state.attachments.length}</span>
-        </div>
+    <section class="utility-drawer" aria-label="Additional controls">
+      <details>
+        <summary>Attachments <span>${state.attachments.length}</span></summary>
         <ul class="compact-list">
           ${state.attachments.length ? state.attachments.map(renderAttachment).join("") : "<li>No files attached.</li>"}
         </ul>
         <button id="clear-attachments" type="button" class="wide-button">Clear Attachments</button>
-      </article>
+      </details>
 
-      <article>
-        <div class="section-title">
-          <h2>Connector</h2>
-          <div class="button-row">
-            <button id="check-connector" type="button">Check</button>
-            <button id="connect-codex" type="button">Connect</button>
-          </div>
+      <details>
+        <summary>Connector <span>${escapeHtml(state.connector.status)}</span></summary>
+        <div class="button-row">
+          <button id="check-connector" type="button">Check</button>
+          <button id="connect-codex" type="button">Connect</button>
         </div>
         <p>${escapeHtml(state.connector.message)}</p>
         <label class="field-stack">
@@ -106,14 +94,11 @@ function render() {
           </select>
         </label>
         ${renderConnectorSetup()}
-      </article>
-    </section>
+      </details>
 
-    <section class="privacy-panel">
-      <div class="section-title">
-        <h2>Privacy</h2>
+      <details>
+        <summary>Privacy</summary>
         <button id="clear-session" type="button">Clear Session</button>
-      </div>
       <label class="toggle-row">
         <input id="persist-session" type="checkbox" ${state.privacy.persistSession ? "checked" : ""}>
         <span>Persist this local session in Chrome storage</span>
@@ -122,16 +107,15 @@ function render() {
         <input id="send-attachments" type="checkbox" ${state.privacy.sendAttachmentsToCodex ? "checked" : ""}>
         <span>Allow extracted attachment text in Codex requests</span>
       </label>
-    </section>
+      </details>
 
-    <section class="activity">
-      <div class="section-title">
-        <h2>Activity</h2>
+      <details>
+        <summary>Activity <span>${state.activity.length}</span></summary>
         <button id="clear-activity" type="button">Clear</button>
-      </div>
       <ol>
         ${state.activity.length ? state.activity.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>No actions yet.</li>"}
       </ol>
+      </details>
     </section>
   `;
 
@@ -183,6 +167,19 @@ function render() {
       });
     }
   }
+}
+
+function renderComposer() {
+  return `
+    <form id="chat-form" class="composer">
+      <label class="file-input">
+        <input id="attachment-input" type="file" multiple>
+        <span>Attach</span>
+      </label>
+      <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  `;
 }
 
 function handleComposerKeydown(event) {

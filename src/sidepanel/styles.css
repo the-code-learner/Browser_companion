@@ -46,17 +46,17 @@ button:hover {
 .app-shell {
   display: flex;
   min-height: 100vh;
+  max-height: 100vh;
   flex-direction: column;
   gap: 12px;
   padding: 14px;
+  overflow: hidden;
 }
 
 .topbar,
 .page-strip,
 .action-preview,
-.privacy-panel,
-.context-grid article,
-.activity {
+.utility-drawer details {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -87,7 +87,7 @@ h2 {
 
 .muted,
 .page-strip p,
-.context-grid p,
+.utility-drawer p,
 .compact-list span {
   color: var(--muted);
 }
@@ -140,6 +140,7 @@ h2 {
   gap: 10px;
   min-height: 220px;
   overflow-y: auto;
+  padding-right: 2px;
 }
 
 .message {
@@ -193,6 +194,9 @@ h2 {
 }
 
 .composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
   display: grid;
   grid-template-columns: auto 1fr auto;
   gap: 8px;
@@ -201,6 +205,7 @@ h2 {
   border-radius: 8px;
   padding: 8px;
   background: var(--panel);
+  box-shadow: 0 -8px 18px rgb(23 32 51 / 8%);
 }
 
 .composer textarea {
@@ -242,16 +247,36 @@ h2 {
   cursor: pointer;
 }
 
-.context-grid {
+.utility-drawer {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 10px;
+  gap: 8px;
+  overflow-y: auto;
+  max-height: 34vh;
 }
 
-.context-grid article,
-.privacy-panel,
-.activity {
-  padding: 12px;
+.utility-drawer details {
+  padding: 0;
+}
+
+.utility-drawer summary {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px;
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.utility-drawer details > :not(summary) {
+  margin: 0 12px 12px;
+}
+
+.utility-drawer details > .button-row {
+  margin-top: 0;
 }
 
 .section-title {
@@ -280,7 +305,7 @@ h2 {
 }
 
 .compact-list,
-.activity ol {
+.utility-drawer ol {
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -429,10 +454,4 @@ h2 {
   color: var(--ink);
   background: #f4f6fa;
   font: 12px/1.4 ui-monospace, "SFMono-Regular", Consolas, monospace;
-}
-
-@media (min-width: 520px) {
-  .context-grid {
-    grid-template-columns: 1fr 1fr;
-  }
 }
