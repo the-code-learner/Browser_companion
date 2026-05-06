@@ -1192,7 +1192,7 @@ function parseMemoryRequest(text) {
 }
 
 function createMemoryTitle(content) {
-  const words = compact(content).split(/\s+/).slice(0, 8).join(" ");
+  const words = String(content || "").replace(/\s+/g, " ").trim().split(/\s+/).slice(0, 8).join(" ");
   return words.length > 64 ? `${words.slice(0, 61)}...` : words || "User note";
 }
 
@@ -1824,6 +1824,12 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function compact(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeKey(value) {
