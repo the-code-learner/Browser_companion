@@ -161,6 +161,7 @@
             "capture_viewport",
             "capture_numbered_overlay",
             "http_request",
+            "web_search",
             "open_url",
             "scroll_to_element",
             "scroll_by",

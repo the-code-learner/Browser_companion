@@ -70,6 +70,18 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "web_search") {
+    runWebSearch(message.payload)
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "web_search",
+        status: "error",
+        results: [],
+        message: error.message || "Web search failed."
+      }));
+    return;
+  }
+
   writeMessage({
     connected: false,
     status: "unsupported",
@@ -191,6 +203,78 @@ async function runHttpRequest(payload = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function runWebSearch(payload = {}) {
+  const query = compact(payload.query || payload.value);
+  const limit = Math.min(Math.max(Number(payload.limit || 8), 1), 10);
+
+  if (!query) {
+    throw new Error("Web search query is missing.");
+  }
+
+  const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "BrowserCompanion/0.1",
+      "Accept": "text/html"
+    },
+    redirect: "follow"
+  });
+  const html = await response.text();
+  const results = parseDuckDuckGoResults(html).slice(0, limit);
+
+  return {
+    type: "web_search",
+    status: "success",
+    query,
+    results,
+    message: `Found ${results.length} public web result${results.length === 1 ? "" : "s"} for "${query}".`
+  };
+}
+
+function parseDuckDuckGoResults(html) {
+  const results = [];
+  const resultBlocks = html.match(/<div class="result[\s\S]*?<\/div>\s*<\/div>/g) || [];
+
+  for (const block of resultBlocks) {
+    const linkMatch = block.match(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!linkMatch) continue;
+    const snippetMatch = block.match(/<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/div>/);
+    const rawUrl = decodeHtml(linkMatch[1]);
+    const url = unwrapDuckDuckGoUrl(rawUrl);
+    results.push({
+      title: cleanHtml(linkMatch[2]),
+      url,
+      snippet: cleanHtml(snippetMatch?.[1] || snippetMatch?.[2] || "")
+    });
+  }
+
+  return results;
+}
+
+function unwrapDuckDuckGoUrl(url) {
+  try {
+    const parsed = new URL(url, "https://duckduckgo.com");
+    const uddg = parsed.searchParams.get("uddg");
+    return uddg || parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+function cleanHtml(value) {
+  return decodeHtml(String(value || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+function decodeHtml(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 function normalizeHttpUrl(value) {

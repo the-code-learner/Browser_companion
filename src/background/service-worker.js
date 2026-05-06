@@ -48,6 +48,10 @@ async function handleMessage(message) {
     return runHttpRequest(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.WEB_SEARCH) {
+    return runWebSearch(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.AGENT_REQUEST) {
     return requestAgent(message.payload);
   }
@@ -194,6 +198,24 @@ async function runHttpRequest(payload) {
   }
 }
 
+async function runWebSearch(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "web_search",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.WEB_SEARCH, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Web search failed."
+    };
+  }
+}
+
 async function executeActionPlan(plan) {
   const policy = validateActionPlan(plan);
 
@@ -250,6 +272,11 @@ async function executeActionPlan(plan) {
 }
 
 async function executeBrowserLevelAction(tab, action) {
+  if (action?.type === "observe_page" || action?.type === "get_visible_text" || action?.type === "get_links" || action?.type === "get_buttons" || action?.type === "get_forms" || action?.type === "get_dom_snapshot") {
+    const observed = await tryObserveTabForAction(tab, action);
+    return observed;
+  }
+
   if (action?.type === "capture_viewport") {
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     return {
@@ -322,6 +349,41 @@ async function executeBrowserLevelAction(tab, action) {
     };
   }
 
+  if (action?.type === "web_search") {
+    const response = await runWebSearch({
+      query: action.value || action.query,
+      limit: action.limit || 8
+    });
+
+    if (!response.ok) {
+      return {
+        type: "execution_result",
+        action_id: action.id || action.type,
+        status: "error",
+        target_verified: false,
+        page_changed: false,
+        validation_messages: [],
+        log_message: response.error
+      };
+    }
+
+    const result = response.envelope.payload;
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: result.status === "success" ? "success" : "error",
+      target_verified: true,
+      page_changed: false,
+      artifact: {
+        kind: "web_search",
+        query: result.query,
+        results: result.results
+      },
+      validation_messages: [],
+      log_message: result.message
+    };
+  }
+
   if (action?.type === "capture_numbered_overlay") {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -376,6 +438,47 @@ async function executeBrowserLevelAction(tab, action) {
   }
 
   return null;
+}
+
+async function tryObserveTabForAction(tab, action) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["src/content/page-probe.js"]
+    });
+    const observation = createObservation(
+      {
+        id: tab.id,
+        url: tab.url,
+        title: tab.title
+      },
+      result
+    );
+
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: false,
+      artifact: {
+        kind: "page_observation",
+        observation
+      },
+      validation_messages: [],
+      log_message: "Observed the active tab."
+    };
+  } catch (error) {
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "error",
+      target_verified: false,
+      page_changed: false,
+      validation_messages: [],
+      log_message: error.message || "Could not observe the active tab."
+    };
+  }
 }
 
 function normalizeNavigationUrl(value) {

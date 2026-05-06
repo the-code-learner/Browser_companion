@@ -727,11 +727,22 @@ async function executeActionPlan(plan) {
   const httpArtifacts = results
     .map((result) => result.artifact)
     .filter((artifact) => artifact?.kind === "http_response");
+  const searchArtifacts = results
+    .map((result) => result.artifact)
+    .filter((artifact) => artifact?.kind === "web_search");
 
   for (const artifact of httpArtifacts) {
     state.messages.push({
       role: "assistant",
       text: summarizeHttpArtifact(artifact),
+      createdAt: Date.now()
+    });
+  }
+
+  for (const artifact of searchArtifacts) {
+    state.messages.push({
+      role: "assistant",
+      text: summarizeSearchArtifact(artifact),
       createdAt: Date.now()
     });
   }
@@ -743,6 +754,35 @@ async function executeActionPlan(plan) {
       : "Some browser actions could not be completed. Check the activity log for details.",
     createdAt: Date.now()
   });
+  await refreshPageAfterAction();
+}
+
+async function refreshPageAfterAction() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  if (!tab?.url) {
+    return;
+  }
+
+  let originPattern;
+  try {
+    const url = new URL(tab.url);
+    if (!["http:", "https:"].includes(url.protocol)) return;
+    originPattern = `${url.origin}/*`;
+  } catch {
+    return;
+  }
+
+  const hasPermission = await chrome.permissions.contains({
+    origins: [originPattern]
+  });
+
+  if (!hasPermission) {
+    state.activity.unshift(`Skipped post-action observation because site access is not granted for ${originPattern}.`);
+    render();
+    return;
+  }
+
   await observePage();
 }
 
@@ -1118,6 +1158,16 @@ function summarizeHttpArtifact(artifact) {
     headerLines ? `Headers:\n${headerLines}` : "",
     preview ? `Body preview:\n${preview}` : ""
   ].filter(Boolean).join("\n\n");
+}
+
+function summarizeSearchArtifact(artifact) {
+  const results = artifact.results || [];
+  const lines = results.slice(0, 6).map((result, index) => {
+    const snippet = result.snippet ? ` - ${result.snippet}` : "";
+    return `${index + 1}. ${result.title}\n${result.url}${snippet}`;
+  });
+
+  return [`Search results for "${artifact.query}"`, ...lines].join("\n\n");
 }
 
 async function restoreSession() {

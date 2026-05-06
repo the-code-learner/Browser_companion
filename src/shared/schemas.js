@@ -8,6 +8,7 @@ export const ACTION_TYPES = Object.freeze({
   CAPTURE_VIEWPORT: "capture_viewport",
   CAPTURE_NUMBERED_OVERLAY: "capture_numbered_overlay",
   HTTP_REQUEST: "http_request",
+  WEB_SEARCH: "web_search",
   OPEN_URL: "open_url",
   SCROLL_TO_ELEMENT: "scroll_to_element",
   SCROLL_BY: "scroll_by",
