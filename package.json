@@ -1,0 +1,14 @@
+{
+  "name": "browser-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome MV3 browser companion extension with side panel chat and Codex connector readiness.",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-extension.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

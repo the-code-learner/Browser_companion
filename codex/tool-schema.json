@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://browser-companion.local/schemas/tool-schema.json",
+  "title": "Browser Companion Agent Plan",
+  "type": "object",
+  "required": [
+    "type",
+    "goal",
+    "risk_level",
+    "summary_for_user",
+    "needs_clarification",
+    "requires_confirmation",
+    "will_submit",
+    "actions"
+  ],
+  "properties": {
+    "type": {
+      "const": "agent_plan"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "risk_level": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "sensitive",
+        "blocked"
+      ]
+    },
+    "summary_for_user": {
+      "type": "string"
+    },
+    "needs_clarification": {
+      "type": "boolean"
+    },
+    "requires_confirmation": {
+      "type": "boolean"
+    },
+    "will_submit": {
+      "type": "boolean"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "uncertain_fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "field",
+          "reason"
+        ],
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "target": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "selector_candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "agent_id",
+        "role",
+        "name"
+      ]
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "type",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "observe_page",
+            "get_visible_text",
+            "get_dom_snapshot",
+            "get_forms",
+            "get_links",
+            "get_buttons",
+            "capture_viewport",
+            "capture_numbered_overlay",
+            "scroll_to_element",
+            "scroll_by",
+            "focus_element",
+            "highlight_element",
+            "clear_highlights",
+            "fill_field",
+            "select_option",
+            "toggle_checkbox",
+            "set_radio",
+            "upload_file_to_field",
+            "click_element",
+            "click_overlay_number",
+            "ask_user",
+            "request_confirmation",
+            "stop_for_human"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "value": {},
+        "source": {
+          "type": "object",
+          "properties": {
+            "file_id": {
+              "type": "string"
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
+

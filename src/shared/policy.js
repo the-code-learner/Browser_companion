@@ -1,0 +1,102 @@
+import { ACTION_TYPES, RISK_LEVELS } from "./schemas.js";
+
+const LOW_RISK_ACTIONS = new Set([
+  ACTION_TYPES.OBSERVE_PAGE,
+  ACTION_TYPES.GET_VISIBLE_TEXT,
+  ACTION_TYPES.GET_DOM_SNAPSHOT,
+  ACTION_TYPES.GET_FORMS,
+  ACTION_TYPES.GET_LINKS,
+  ACTION_TYPES.GET_BUTTONS,
+  ACTION_TYPES.CAPTURE_VIEWPORT,
+  ACTION_TYPES.CAPTURE_NUMBERED_OVERLAY,
+  ACTION_TYPES.SCROLL_TO_ELEMENT,
+  ACTION_TYPES.SCROLL_BY,
+  ACTION_TYPES.HIGHLIGHT_ELEMENT,
+  ACTION_TYPES.CLEAR_HIGHLIGHTS,
+  ACTION_TYPES.ASK_USER,
+  ACTION_TYPES.STOP_FOR_HUMAN
+]);
+
+const MEDIUM_RISK_ACTIONS = new Set([
+  ACTION_TYPES.FOCUS_ELEMENT,
+  ACTION_TYPES.FILL_FIELD,
+  ACTION_TYPES.SELECT_OPTION,
+  ACTION_TYPES.TOGGLE_CHECKBOX,
+  ACTION_TYPES.SET_RADIO,
+  ACTION_TYPES.UPLOAD_FILE_TO_FIELD,
+  ACTION_TYPES.CLICK_ELEMENT,
+  ACTION_TYPES.CLICK_OVERLAY_NUMBER
+]);
+
+const SUBMIT_WORDS = /\b(submit|send|publish|delete|remove|buy|purchase|pay|accept|agree|sign|authorize|confirm order)\b/i;
+const SENSITIVE_WORDS = /\b(password|passcode|card|cvv|cvc|iban|ssn|social security|tax id|vat|passport|identity|health|medical|legal representative)\b/i;
+const BLOCKED_WORDS = /\b(captcha|2fa|mfa|one-time code|otp|bypass access|circumvent)\b/i;
+
+export function classifyAction(action) {
+  const text = JSON.stringify(action || {});
+
+  if (BLOCKED_WORDS.test(text)) {
+    return RISK_LEVELS.BLOCKED;
+  }
+
+  if (SENSITIVE_WORDS.test(text)) {
+    return RISK_LEVELS.SENSITIVE;
+  }
+
+  if (SUBMIT_WORDS.test(text)) {
+    return RISK_LEVELS.HIGH;
+  }
+
+  if (LOW_RISK_ACTIONS.has(action?.type)) {
+    return RISK_LEVELS.LOW;
+  }
+
+  if (MEDIUM_RISK_ACTIONS.has(action?.type)) {
+    return RISK_LEVELS.MEDIUM;
+  }
+
+  return RISK_LEVELS.BLOCKED;
+}
+
+export function validateActionPlan(plan) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const results = actions.map((action, index) => {
+    const risk = classifyAction(action);
+    return {
+      index,
+      actionType: action?.type || "unknown",
+      risk,
+      allowed: risk !== RISK_LEVELS.BLOCKED,
+      requiresConfirmation: risk !== RISK_LEVELS.LOW,
+      reason: getPolicyReason(risk)
+    };
+  });
+
+  return {
+    type: "policy_result",
+    allowed: results.every((result) => result.allowed),
+    requiresConfirmation: results.some((result) => result.requiresConfirmation),
+    results
+  };
+}
+
+function getPolicyReason(risk) {
+  if (risk === RISK_LEVELS.LOW) {
+    return "Read-only or reversible browser assistance.";
+  }
+
+  if (risk === RISK_LEVELS.MEDIUM) {
+    return "The action can change page state and needs user confirmation.";
+  }
+
+  if (risk === RISK_LEVELS.HIGH) {
+    return "The action may submit, publish, delete, pay, or accept something.";
+  }
+
+  if (risk === RISK_LEVELS.SENSITIVE) {
+    return "The action touches sensitive personal, financial, legal, or security data.";
+  }
+
+  return "The action is outside the allowed browser automation policy.";
+}
+

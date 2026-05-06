@@ -1,0 +1,10 @@
+{
+  "name": "com.browser_companion.codex_bridge",
+  "description": "Browser Companion local Codex bridge",
+  "path": "REPLACE_WITH_ABSOLUTE_PATH_TO_BRIDGE",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://REPLACE_WITH_EXTENSION_ID/"
+  ]
+}
+

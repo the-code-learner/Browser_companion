@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Companion",
+  "description": "A conversational browser companion with safe page observation and Codex connector readiness.",
+  "version": "0.1.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs",
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Browser Companion"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/content/overlay.css"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}
+
