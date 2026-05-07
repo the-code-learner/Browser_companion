@@ -1173,7 +1173,7 @@ function runCliAgentRequest(provider, payload = {}) {
     };
   }
 
-  const prompt = buildAgentPrompt(payload);
+  const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
   const result = runProviderPrompt(provider, prompt, payload.model, true);
   if (result.error || result.status !== 0) {
     return {
@@ -1298,18 +1298,22 @@ function summarizeProviderFailure(provider, result) {
   return combined.slice(-800) || `${provider.label} request failed.`;
 }
 
-function buildAgentPrompt(payload) {
+function buildAgentPrompt(payload, options = {}) {
   const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
-  const toolSchema = fs.readFileSync(path.join(projectRoot, "codex", "tool-schema.json"), "utf8");
+  const includeSchema = Boolean(options.includeSchema);
+  const compactContext = Boolean(options.compactContext);
+  const toolSchema = includeSchema ? fs.readFileSync(path.join(projectRoot, "codex", "tool-schema.json"), "utf8") : "";
+  const observation = compactContext ? compactObservationForPrompt(payload.observation) : payload.observation || {};
+  const attachments = compactContext ? compactAttachmentsForPrompt(payload.attachments) : payload.attachments || [];
 
   return [
     systemPrompt,
     "",
-    "Browser Companion strict response JSON schema:",
-    toolSchema,
-    "",
-    "Important for non-Codex providers: if any browser action is needed, return only one JSON object conforming to the schema above. Do not wrap it in Markdown. Do not explain outside JSON.",
-    "",
+    includeSchema ? "Browser Companion strict response JSON schema:" : "",
+    includeSchema ? toolSchema : "",
+    includeSchema ? "" : "",
+    includeSchema ? "Important for non-Codex providers: if any browser action is needed, return only one JSON object conforming to the schema above. Do not wrap it in Markdown. Do not explain outside JSON." : "",
+    includeSchema ? "" : "",
     "User goal:",
     payload.goal || "",
     "",
@@ -1317,16 +1321,52 @@ function buildAgentPrompt(payload) {
     payload.responseLanguage || "same language as the user",
     "",
     "Current page observation JSON:",
-    JSON.stringify(payload.observation || {}, null, 2),
+    JSON.stringify(observation, null, 2),
     "",
     "Local user memory JSON:",
     JSON.stringify(payload.userMemory || [], null, 2),
     "",
     "Local attachment context JSON:",
-    JSON.stringify(payload.attachments || [], null, 2),
+    JSON.stringify(attachments, null, 2),
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions are needed."
-  ].join("\n");
+  ].filter((line) => line !== "").join("\n");
+}
+
+function compactObservationForPrompt(observation = {}) {
+  return {
+    type: observation.type || "page_observation",
+    tab: observation.tab || {},
+    viewport: observation.viewport || {},
+    visible_text: String(observation.visible_text || "").slice(0, 6000),
+    headings: (observation.headings || []).slice(0, 20),
+    links: (observation.links || []).slice(0, 80).map(compactElementForPrompt),
+    buttons: (observation.buttons || []).slice(0, 80).map(compactElementForPrompt),
+    forms: (observation.forms || []).slice(0, 10),
+    interactive_elements: (observation.interactive_elements || []).slice(0, 120).map(compactElementForPrompt),
+    capturedAt: observation.capturedAt || ""
+  };
+}
+
+function compactElementForPrompt(element = {}) {
+  return {
+    agent_id: element.agent_id || "",
+    role: element.role || "",
+    name: element.name || "",
+    href: element.href || "",
+    type: element.type || "",
+    selector_candidates: (element.selector_candidates || []).slice(0, 3)
+  };
+}
+
+function compactAttachmentsForPrompt(attachments = []) {
+  return attachments.slice(0, 8).map((attachment) => ({
+    id: attachment.id || "",
+    name: attachment.name || "",
+    type: attachment.type || "",
+    status: attachment.status || "",
+    text: String(attachment.text || "").slice(0, 8000)
+  }));
 }
 
 function buildSynthesisPrompt(payload) {

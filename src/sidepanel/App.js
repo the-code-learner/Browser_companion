@@ -1379,16 +1379,21 @@ async function handleChatSubmit(event) {
   }
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
 
-  if (!state.page.observation) {
-    await observePage();
-  }
-
   const agentResult = await getAgentResult(text);
   handleAgentResult(agentResult);
 }
 
 async function getAgentResult(goal) {
   const responseLanguage = detectUserLanguage(goal);
+
+  if (isSimpleConversationalMessage(goal)) {
+    return buildSimpleConversationalResponse(goal, responseLanguage);
+  }
+
+  if (!state.page.observation) {
+    await observePage();
+  }
+
   const deterministicPlan = buildDeterministicActionPlan(goal, responseLanguage);
 
   if (deterministicPlan) {
@@ -1425,6 +1430,40 @@ async function getAgentResult(goal) {
   }
 
   return buildLocalAgentResult(goal, responseLanguage);
+}
+
+function isSimpleConversationalMessage(goal) {
+  const text = compact(goal).toLowerCase();
+  return /^(ciao|salve|hey|hello|hi|buongiorno|buonasera|funzioni\??|mi leggi\??|ci sei\??|chi sei\??|who are you\??|are you there\??)$/i.test(text);
+}
+
+function buildSimpleConversationalResponse(goal, responseLanguage) {
+  const text = compact(goal).toLowerCase();
+
+  if (/\b(chi sei|who are you)\b/i.test(text)) {
+    return {
+      type: "natural_response",
+      text: responseLanguage === "it"
+        ? "Sono Browser Companion, un assistente locale per il browser. Posso leggere la pagina osservata, cercare online e proporre azioni sicure da confermare prima dell'esecuzione."
+        : "I am Browser Companion, a local browser assistant. I can read the observed page, search online, and propose safe browser actions for confirmation before execution."
+    };
+  }
+
+  if (/\b(funzioni|mi leggi|ci sei|are you there)\b/i.test(text)) {
+    return {
+      type: "natural_response",
+      text: responseLanguage === "it"
+        ? "Si, ti leggo. Dimmi cosa vuoi fare nella pagina corrente."
+        : "Yes, I can read you. Tell me what you want to do on the current page."
+    };
+  }
+
+  return {
+    type: "natural_response",
+    text: responseLanguage === "it"
+      ? "Ciao. Dimmi cosa vuoi fare nella pagina corrente."
+      : "Hi. Tell me what you want to do on the current page."
+  };
 }
 
 function buildDeterministicActionPlan(goal, responseLanguage) {
