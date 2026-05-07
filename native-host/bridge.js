@@ -1229,24 +1229,17 @@ function runProviderPrompt(provider, prompt, model, needsJson) {
   }
 
   if (provider.id === "google-gemini-cli") {
-    const promptPath = writeTempPrompt(prompt);
-    const args = ["-p", `@${promptPath}`];
+    const args = [];
     const normalized = normalizeProviderModel(provider, model);
-    if (normalized !== "default") args.unshift("-m", normalized);
-    try {
-      return runCommand(provider.command, args, { timeout: 120000 });
-    } finally {
-      fs.rmSync(promptPath, { force: true });
-    }
+    if (normalized !== "default") args.push("-m", normalized);
+    if (needsJson) args.push("--output-format", "json");
+    return runCommand(provider.command, args, {
+      input: prompt,
+      timeout: 120000
+    });
   }
 
   return runCodex(["exec", "--model", normalizeModel(model), "-"], { input: prompt, timeout: 120000 });
-}
-
-function writeTempPrompt(prompt) {
-  const promptPath = path.join(os.tmpdir(), `browser-companion-prompt-${crypto.randomUUID()}.md`);
-  fs.writeFileSync(promptPath, prompt, "utf8");
-  return promptPath;
 }
 
 function normalizeProviderModel(provider, model) {
@@ -1254,13 +1247,36 @@ function normalizeProviderModel(provider, model) {
 }
 
 function compactProviderOutput(output) {
-  const text = String(output || "").trim();
+  const text = stripProviderNoise(String(output || "")).trim();
   try {
     const parsed = JSON.parse(text);
     return parsed.text || parsed.response || parsed.result || parsed.output || text;
   } catch {
     return text;
   }
+}
+
+function stripProviderNoise(output) {
+  return String(output || "")
+    .replace(/\bAttempt\s+\d+\s+failed:\s+You have exhausted your capacity on this model\..*?Retrying after \d+ms\.\.\./gi, "")
+    .replace(/\bYou have exhausted your capacity on this model\..*?Retrying after \d+ms\.\.\./gi, "")
+    .split(/\r?\n/)
+    .filter((line) => !isProviderNoiseLine(line))
+    .join("\n")
+    .trim();
+}
+
+function isProviderNoiseLine(line) {
+  return [
+    /\[DEP0190\]\s+DeprecationWarning/i,
+    /Use `node --trace-deprecation/i,
+    /^Attempt\s+\d+\s+failed:/i,
+    /Retrying after \d+ms/i,
+    /You have exhausted your capacity on this model/i,
+    /^Error executing tool /i,
+    /^austed your capacity on this model/i,
+    /^\(node:\d+\)/
+  ].some((pattern) => pattern.test(String(line || "")));
 }
 
 function extractJsonObject(text) {
@@ -1272,9 +1288,12 @@ function extractJsonObject(text) {
 }
 
 function summarizeProviderFailure(provider, result) {
-  const combined = compact(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`);
+  const combined = compact(stripProviderNoise(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`));
   if (/auth|login|sign in|unauthorized|permission/i.test(combined)) {
     return `${provider.label} appears to need sign-in. Open Connector and click Connect for this provider.`;
+  }
+  if (/quota|capacity|exhausted/i.test(combined)) {
+    return `${provider.label} is temporarily rate-limited or out of capacity. Try again shortly or switch provider.`;
   }
   return combined.slice(-800) || `${provider.label} request failed.`;
 }
