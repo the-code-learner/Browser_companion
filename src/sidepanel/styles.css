@@ -697,6 +697,23 @@ h2 {
   word-break: break-word;
 }
 
+.attachment-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.attachment-item strong,
+.attachment-item span {
+  display: block;
+}
+
+.remove-item-button {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
 .memory-list p,
 .memory-path {
   color: var(--muted);

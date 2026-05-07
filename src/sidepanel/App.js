@@ -241,6 +241,9 @@ function render() {
   });
   const clearAttachmentsButton = document.getElementById("clear-attachments");
   if (clearAttachmentsButton) clearAttachmentsButton.addEventListener("click", clearAttachments);
+  document.querySelectorAll("[data-remove-attachment]").forEach((button) => {
+    button.addEventListener("click", () => removeAttachment(button.dataset.removeAttachment));
+  });
   document.querySelectorAll("[data-memory-edit]").forEach((button) => {
     button.addEventListener("click", () => startMemoryEdit(button.dataset.memoryEdit));
   });
@@ -379,7 +382,7 @@ function renderAttachmentsSettings() {
     <ul class="compact-list">
       ${state.attachments.length ? state.attachments.map(renderAttachment).join("") : "<li>No files attached.</li>"}
     </ul>
-    <button id="clear-attachments" type="button" class="wide-button">Clear Attachments</button>
+    ${state.attachments.length ? `<button id="clear-attachments" type="button" class="wide-button">Clear Attachments</button>` : ""}
   `;
 }
 
@@ -732,10 +735,13 @@ function renderAttachment(file) {
     || (file.status === "error" ? "Attachment extraction failed. Reattach the file to retry with the current extractor." : "");
 
   return `
-    <li>
-      <strong>${escapeHtml(file.name)}</strong>
-      <span>${escapeHtml(file.status)} - ${formatBytes(file.size)}</span>
-      ${detail ? `<small class="attachment-detail">${escapeHtml(detail)}</small>` : ""}
+    <li class="attachment-item">
+      <div>
+        <strong>${escapeHtml(file.name)}</strong>
+        <span>${escapeHtml(file.status)} - ${formatBytes(file.size)}</span>
+        ${detail ? `<small class="attachment-detail">${escapeHtml(detail)}</small>` : ""}
+      </div>
+      <button type="button" class="remove-item-button" data-remove-attachment="${escapeHtml(file.id)}">Remove</button>
     </li>
   `;
 }
@@ -1683,7 +1689,10 @@ async function handleChatSubmit(event) {
 
   const memoryRequest = parseDirectMemoryRequest(text);
   if (memoryRequest) {
-    const saved = await saveUserMemory(memoryRequest);
+    const memoryItem = memoryRequest.synthesize
+      ? await synthesizeMemoryRequest(memoryRequest)
+      : memoryRequest;
+    const saved = await saveUserMemory(memoryItem);
     state.messages.push({
       role: "assistant",
       text: saved
@@ -2097,8 +2106,147 @@ function parseDirectMemoryRequest(text) {
   }
 
   return {
-    title: createMemoryTitle(content),
-    content
+    synthesize: true,
+    goal: raw,
+    requestedScope: content
+  };
+}
+
+async function synthesizeMemoryRequest(intent) {
+  const fallback = buildFallbackMemorySynthesis(intent);
+
+  if (state.connector.status !== "connected") {
+    return fallback;
+  }
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, {
+    task: "user_memory",
+    goal: intent.goal,
+    memoryRequest: intent.goal,
+    requestedScope: intent.requestedScope,
+    responseLanguage: detectUserLanguage(intent.goal),
+    provider: state.codex.provider,
+    model: state.codex.model,
+    httpProvider: getSelectedHttpProvider(),
+    conversationContext: getRecentConversationForMemory(intent.goal),
+    userMemory: state.userMemory.items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      content: item.content,
+      updatedAt: item.updatedAt
+    })),
+    attachments: state.attachments.map((file) => ({
+      id: file.id,
+      name: file.name,
+      type: file.type,
+      status: file.status,
+      textPreview: state.privacy.sendAttachmentsToCodex ? String(file.text || "").slice(0, 2000) : ""
+    }))
+  }));
+
+  if (!response.ok) {
+    state.activity.unshift(`Memory synthesis failed: ${response.error}`);
+    return fallback;
+  }
+
+  return parseMemorySynthesisResponse(response.envelope.payload?.text || "", intent, fallback);
+}
+
+function getRecentConversationForMemory(currentText) {
+  return state.messages
+    .filter((message) => message.text !== currentText)
+    .slice(-10)
+    .map((message) => ({
+      role: message.role,
+      text: String(message.text || "").slice(0, 4000),
+      createdAt: message.createdAt || 0
+    }));
+}
+
+function parseMemorySynthesisResponse(text, intent, fallback) {
+  const parsed = parseLooseJsonObject(text);
+  const title = parsed?.title || parsed?.name || parsed?.heading || "";
+  const content = parsed?.content || parsed?.body || parsed?.memory || parsed?.summary || parsed?.text || "";
+
+  if (title && content) {
+    return sanitizeMemoryItem({ title, content }, intent);
+  }
+
+  const plain = stripMarkdownJsonFence(text).trim();
+  if (plain.length > 20) {
+    const lines = plain.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    return sanitizeMemoryItem({
+      title: title || lines[0] || fallback.title,
+      content: content || lines.slice(1).join("\n") || plain
+    }, intent);
+  }
+
+  return fallback;
+}
+
+function parseLooseJsonObject(text) {
+  const candidates = [
+    stripMarkdownJsonFence(text),
+    extractJsonObjectLiteral(text)
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null;
+}
+
+function extractJsonObjectLiteral(text) {
+  const raw = String(text || "");
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return "";
+  return raw.slice(start, end + 1);
+}
+
+function stripMarkdownJsonFence(text) {
+  return String(text || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function sanitizeMemoryItem(item, intent) {
+  const title = compact(item.title || inferResearchMemoryTitle(intent.goal)).slice(0, 90) || "User memory";
+  const content = String(item.content || "")
+    .replace(/^content\s*:\s*/i, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 5000);
+
+  return {
+    title,
+    content: content || buildFallbackMemorySynthesis(intent).content
+  };
+}
+
+function buildFallbackMemorySynthesis(intent) {
+  const context = getRecentConversationForMemory(intent.goal)
+    .map((message) => `${message.role}: ${message.text}`)
+    .join("\n\n")
+    .slice(-6000);
+
+  return {
+    title: inferResearchMemoryTitle(`${intent.goal}\n${context}`),
+    content: [
+      "Memory request to synthesize later:",
+      compact(intent.requestedScope || intent.goal),
+      "",
+      "Recent context available when this was saved:",
+      context || "No recent conversation context was available.",
+      "",
+      "Reliability note: this fallback was saved because provider-based memory synthesis was unavailable or malformed."
+    ].join("\n").slice(0, 5000)
   };
 }
 
@@ -2107,8 +2255,7 @@ function isResearchIntent(text) {
 }
 
 function isDeferredMemoryIntent(text) {
-  return /\b(ricordati|remember|save|store|memorizza|salva|aggiungi|add)\b/i.test(text)
-    && /\b(sintesi|summary|profilo|profile|cv|chi sono|who i am|findings|risultati|results)\b/i.test(text);
+  return /\b(ricordati|remember|save|store|memorizza|salva|aggiungi|add)\b/i.test(text);
 }
 
 function parseDeferredMemoryIntent(text) {
@@ -2182,19 +2329,14 @@ function appendMemorySavedNote(text) {
 }
 
 function inferResearchMemoryTitle(goal) {
-  if (/\bchi sono\b/i.test(goal)) {
-    return "User profile and public work context";
-  }
-
-  if (/\bcv|curriculum|resume\b/i.test(goal)) {
-    return "User CV summary";
-  }
-
-  if (/\benti|istituzioni|ambasciate|consolati|ICE|ITA|camere di commercio|hotel|UAE|Hong Kong\b/i.test(goal)) {
-    return "User institutions and project context";
-  }
-
-  return "User research memory";
+  const words = String(goal || "")
+    .replace(/\b(remember|save|store|ricordati|salva|memorizza|aggiungi|add)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 6)
+    .join(" ");
+  return words ? `User memory: ${words}`.slice(0, 90) : "User memory";
 }
 
 function createMemoryTitle(content) {
@@ -2904,6 +3046,14 @@ function persistSession() {
 function clearAttachments() {
   state.attachments = [];
   state.activity.unshift("Attachments cleared from local session memory.");
+  persistSession();
+  render();
+}
+
+function removeAttachment(id) {
+  const file = state.attachments.find((attachment) => attachment.id === id);
+  state.attachments = state.attachments.filter((attachment) => attachment.id !== id);
+  state.activity.unshift(file ? `Removed attachment ${file.name}.` : "Removed attachment.");
   persistSession();
   render();
 }

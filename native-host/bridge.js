@@ -1722,6 +1722,39 @@ function compactAttachmentsForPrompt(attachments = []) {
 function buildSynthesisPrompt(payload) {
   const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
 
+  if (payload.task === "user_memory") {
+    return [
+      systemPrompt,
+      "",
+      "Task: Create a local user-memory entry from the user's explicit save request and recent conversation context.",
+      "Return only one JSON object. Do not wrap it in Markdown.",
+      "JSON shape: {\"title\":\"short stable title\",\"content\":\"clean memory body\"}",
+      "",
+      "Memory rules:",
+      "- Save a curated synthesis, not the raw user command.",
+      "- Keep only stable, future-useful facts and context.",
+      "- Use English for the saved title and content, even if the conversation is in another language.",
+      "- Distinguish source-backed facts from self-reported claims when relevant.",
+      "- Do not invent names, dates, organizations, titles, or achievements that are not present in the context.",
+      "- Keep the content concise but detailed enough to help future job-fit, writing, research, or browser tasks.",
+      "",
+      "User save request:",
+      payload.memoryRequest || payload.goal || "",
+      "",
+      "Requested memory scope:",
+      payload.requestedScope || "",
+      "",
+      "Recent conversation context JSON:",
+      JSON.stringify(payload.conversationContext || [], null, 2),
+      "",
+      "Existing local user memory JSON:",
+      JSON.stringify(payload.userMemory || [], null, 2),
+      "",
+      "Local attachment summaries JSON:",
+      JSON.stringify(payload.attachments || [], null, 2)
+    ].join("\n");
+  }
+
   return [
     systemPrompt,
     "",
