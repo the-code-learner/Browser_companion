@@ -578,7 +578,7 @@ function getProviderStatuses() {
 
 function getProviderStatus(provider) {
   const version = runCommand(provider.command, provider.versionArgs || ["--version"], { timeout: 10000 });
-  const installed = !version.error && version.status === 0;
+  const installed = (!version.error && version.status === 0) || commandExists(provider.command);
 
   if (!installed) {
     return {
@@ -596,18 +596,21 @@ function getProviderStatus(provider) {
   }
 
   if (provider.id !== "openai-codex") {
+    const ready = !version.error && version.status === 0;
     return {
       id: provider.id,
       label: provider.label,
       installed: true,
-      connected: true,
-      status: "ready",
+      connected: ready,
+      status: ready ? "ready" : "login_required",
       command: provider.command,
       version: compact(version.stdout || version.stderr),
       installCommand: provider.installCommand,
       models: provider.models,
       defaultModel: provider.defaultModel,
-      message: `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
+      message: ready
+        ? `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
+        : `${provider.label} CLI is installed, but Browser Companion could not confirm a ready login session. Click Connect to open it.`
     };
   }
 
@@ -698,6 +701,31 @@ function hasPackage(packageName) {
   }
 }
 
+function commandExists(command) {
+  if (!command) {
+    return false;
+  }
+
+  if (fs.existsSync(command)) {
+    return true;
+  }
+
+  if (process.platform === "win32") {
+    const result = spawnSync("where.exe", [command], {
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true
+    });
+    return !result.error && result.status === 0;
+  }
+
+  const result = spawnSync("command", ["-v", command], {
+    encoding: "utf8",
+    shell: true
+  });
+  return !result.error && result.status === 0;
+}
+
 function connectProvider(payload = {}) {
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
   if (provider.id !== "openai-codex") {
@@ -759,12 +787,7 @@ function installProvider(payload = {}) {
   }
 
   const runnableCommand = makeRunnableNpmCommand(command);
-  const child = spawnVisibleShell([
-    runnableCommand,
-    "echo.",
-    "echo Installation finished. Return to Browser Companion and click Check.",
-    "echo Then run the provider login/connect step if it appears as installed."
-  ].join("\r\n"));
+  const child = spawnVisibleShell(runnableCommand);
   child?.unref?.();
 
   return {
@@ -787,11 +810,7 @@ function installNodejs() {
   }
 
   if (hasWinget()) {
-    const command = [
-      "winget install --id OpenJS.NodeJS.LTS -e --source winget",
-      "echo.",
-      "echo Node.js installation finished. Restart Chrome, then check the connector again."
-    ].join("\r\n");
+    const command = "winget install --id OpenJS.NodeJS.LTS -e --source winget";
     const child = spawnVisibleShell(command);
     child?.unref?.();
 
@@ -987,6 +1006,11 @@ function writeVisibleCommandScript(command) {
 }
 
 function convertCmdLineToPowerShell(line) {
+  const echoMatch = String(line || "").match(/^echo(?:\s+(.+)|\.)?$/i);
+  if (echoMatch) {
+    return `Write-Host ${toPowerShellString(echoMatch[1] || "")}`;
+  }
+
   const npmMatch = String(line || "").match(/^call\s+"([^"]+)"\s+(.+)$/i);
   if (npmMatch) {
     return `& ${toPowerShellString(npmMatch[1])} ${npmMatch[2]}`;
