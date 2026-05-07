@@ -1279,7 +1279,8 @@ function runHttpProviderAgentRequest(provider, payload = {}) {
   return runHttpProviderCompletion(provider, prompt, true)
     .then((text) => {
       const output = compactProviderOutput(text);
-      return JSON.parse(extractJsonObject(output));
+      const parsed = parseAgentJsonOrNaturalResponse(output);
+      return parsed;
     })
     .catch((error) => ({
       type: "agent_error",
@@ -1305,28 +1306,49 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
 
 async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
-  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  const requestBody = {
+    model: provider.model,
+    messages: [
+      {
+        role: "user",
+        content: wantsJson
+          ? `${prompt}\n\nReturn only valid JSON.`
+          : prompt
+      }
+    ],
+    temperature: 0.2,
+    max_tokens: wantsJson ? 1200 : 1600,
+    stream: false
+  };
+
+  if (wantsJson) {
+    requestBody.response_format = { type: "json_object" };
+  }
+
+  let response = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       ...getHttpProviderHeaders(provider),
       "content-type": "application/json"
     },
-    body: JSON.stringify({
-      model: provider.model,
-      messages: [
-        {
-          role: "user",
-          content: wantsJson
-            ? `${prompt}\n\nReturn only valid JSON.`
-            : prompt
-        }
-      ],
-      temperature: 0.2,
-      stream: false
-    }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(120000)
   });
-  const text = await response.text();
+  let text = await response.text();
+
+  if (!response.ok && wantsJson && /response_format|json_object|unsupported/i.test(text)) {
+    delete requestBody.response_format;
+    response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        ...getHttpProviderHeaders(provider),
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(120000)
+    });
+    text = await response.text();
+  }
 
   if (!response.ok) {
     throw new Error(`HTTP provider returned ${response.status}: ${text.slice(0, 500)}`);
@@ -1420,6 +1442,36 @@ function extractJsonObject(text) {
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("No JSON object found.");
   return match[0];
+}
+
+function parseAgentJsonOrNaturalResponse(output) {
+  const text = compactProviderOutput(output);
+
+  try {
+    return JSON.parse(extractJsonObject(text));
+  } catch (error) {
+    if (text && !/^No JSON object found\.?$/i.test(text)) {
+      return {
+        type: "natural_response",
+        text,
+        question: "",
+        reason: "",
+        goal: "",
+        risk_level: "low",
+        summary_for_user: "",
+        needs_clarification: false,
+        requires_confirmation: false,
+        will_submit: false,
+        actions: [],
+        uncertain_fields: []
+      };
+    }
+
+    return {
+      type: "agent_error",
+      message: error.message || "HTTP provider response was not valid Browser Companion JSON."
+    };
+  }
 }
 
 function summarizeProviderFailure(provider, result) {
