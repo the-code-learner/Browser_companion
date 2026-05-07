@@ -115,8 +115,23 @@ button:hover {
   padding: 10px;
 }
 
-.topbar > div {
+.topbar > div:first-of-type {
   padding-left: 28px;
+}
+
+.top-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.top-action {
+  min-height: 24px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .theme-toggle {
@@ -477,6 +492,71 @@ h2 {
 .memory-form {
   display: grid;
   gap: 6px;
+}
+
+.settings-view,
+.memory-view {
+  position: fixed;
+  inset: 58px 10px 10px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg);
+}
+
+.settings-view[hidden],
+.memory-view[hidden] {
+  display: none;
+}
+
+.settings-view-header,
+.memory-view-header {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.settings-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.settings-menu button {
+  min-height: 26px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-menu button.selected {
+  color: #ffffff;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.settings-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-card {
+  display: grid;
+  gap: 4px;
+}
+
+.title-line {
+  display: block;
+  width: 42px;
+  height: 1px;
+  margin-top: 6px;
+  background: var(--line);
 }
 
 .memory-form input,

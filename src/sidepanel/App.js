@@ -1,6 +1,8 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
 
 const state = {
+  view: "chat",
+  settingsSection: "memory",
   theme: "system",
   connector: {
     status: "unknown",
@@ -63,9 +65,33 @@ function render() {
       <button id="theme-toggle" class="theme-toggle" type="button" title="${escapeHtml(getThemeTitle())}">${escapeHtml(getThemeIcon())}</button>
       <div>
         <h1>Browser Companion</h1>
-        <p class="muted">Chat with a local browser agent that observes before acting.</p>
+        <span class="title-line" aria-hidden="true"></span>
       </div>
-      <span class="status ${getConnectorClass()}">${escapeHtml(state.connector.status)}</span>
+      <div class="top-actions">
+        <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings">⚙</button>
+        <span class="status ${getConnectorClass()}">${escapeHtml(state.connector.status)}</span>
+      </div>
+    </section>
+
+    <section id="settings-view" class="settings-view" aria-label="Settings" ${state.view === "settings" ? "" : "hidden"}>
+      <div class="settings-view-header">
+        <button id="close-settings-view" class="top-action" type="button">Back</button>
+        <div>
+          <h2>Settings</h2>
+          <p>${escapeHtml(getSettingsSubtitle())}</p>
+        </div>
+      </div>
+      <nav class="settings-menu" aria-label="Settings sections">
+        ${renderSettingsButton("memory", `Memory ${state.userMemory.items.length}`)}
+        ${renderSettingsButton("attachments", `Attachments ${state.attachments.length}`)}
+        ${renderSettingsButton("currentPage", "Current Page")}
+        ${renderSettingsButton("connector", "Connector")}
+        ${renderSettingsButton("privacy", "Privacy")}
+        ${renderSettingsButton("activity", `Activity ${state.activity.length}`)}
+      </nav>
+      <section class="settings-panel">
+        ${renderSettingsPanel()}
+      </section>
     </section>
 
     <section class="page-strip" aria-label="Current page">
@@ -85,74 +111,32 @@ function render() {
     <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>↓</button>
 
     ${renderComposer()}
-
-    <section class="utility-drawer" aria-label="Additional controls">
-      <details>
-        <summary>Memory <span>${state.userMemory.items.length}</span></summary>
-        <p>${escapeHtml(state.userMemory.message)}</p>
-        ${state.userMemory.path ? `<p class="memory-path">${escapeHtml(state.userMemory.path)}</p>` : ""}
-        <form id="memory-form" class="memory-form">
-          <input id="memory-title" type="text" placeholder="Title" value="${escapeHtml(state.userMemory.draftTitle)}">
-          <textarea id="memory-content" rows="3" placeholder="Only save information the user explicitly asked to remember">${escapeHtml(state.userMemory.draftContent)}</textarea>
-          <button type="submit">Save Memory</button>
-        </form>
-        <ul class="memory-list">
-          ${state.userMemory.items.length ? state.userMemory.items.map(renderMemoryItem).join("") : "<li>No saved user memory.</li>"}
-        </ul>
-      </details>
-
-      <details>
-        <summary>Attachments <span>${state.attachments.length}</span></summary>
-        <ul class="compact-list">
-          ${state.attachments.length ? state.attachments.map(renderAttachment).join("") : "<li>No files attached.</li>"}
-        </ul>
-        <button id="clear-attachments" type="button" class="wide-button">Clear Attachments</button>
-      </details>
-
-      <details>
-        <summary>Connector <span>${escapeHtml(state.connector.status)}</span></summary>
-        <div class="button-row">
-          <button id="check-connector" type="button">Check</button>
-          <button id="connect-codex" type="button">Connect</button>
-        </div>
-        <p>${escapeHtml(state.connector.message)}</p>
-        <label class="field-stack">
-          <span>Codex model</span>
-          <select id="codex-model">
-            ${renderModelOptions()}
-          </select>
-        </label>
-        ${renderConnectorSetup()}
-      </details>
-
-      <details>
-        <summary>Privacy</summary>
-        <button id="clear-session" type="button">Clear Session</button>
-      <label class="toggle-row">
-        <input id="persist-session" type="checkbox" ${state.privacy.persistSession ? "checked" : ""}>
-        <span>Persist this local session in Chrome storage</span>
-      </label>
-      <label class="toggle-row">
-        <input id="send-attachments" type="checkbox" ${state.privacy.sendAttachmentsToCodex ? "checked" : ""}>
-        <span>Allow extracted attachment text in Codex requests</span>
-      </label>
-      </details>
-
-      <details>
-        <summary>Activity <span>${state.activity.length}</span></summary>
-        <button id="clear-activity" type="button">Clear</button>
-      <ol>
-        ${state.activity.length ? state.activity.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>No actions yet.</li>"}
-      </ol>
-      </details>
-    </section>
   `;
 
   document.getElementById("observe-page").addEventListener("click", observePage);
+  const observePageSettings = document.getElementById("observe-page-settings");
+  if (observePageSettings) observePageSettings.addEventListener("click", observePage);
   document.getElementById("theme-toggle").addEventListener("click", cycleTheme);
+  document.getElementById("open-settings-view").addEventListener("click", () => {
+    state.view = "settings";
+    render();
+  });
+  document.getElementById("close-settings-view").addEventListener("click", () => {
+    state.view = "chat";
+    render();
+  });
+  document.querySelectorAll("[data-settings-section]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.settingsSection = button.dataset.settingsSection;
+      state.view = "settings";
+      render();
+    });
+  });
   setupChatScrollControls();
-  document.getElementById("check-connector").addEventListener("click", checkConnector);
-  document.getElementById("connect-codex").addEventListener("click", connectCodex);
+  const checkConnectorButton = document.getElementById("check-connector");
+  if (checkConnectorButton) checkConnectorButton.addEventListener("click", checkConnector);
+  const connectCodexButton = document.getElementById("connect-codex");
+  if (connectCodexButton) connectCodexButton.addEventListener("click", connectCodex);
   const copyInstallCommand = document.getElementById("copy-install-command");
   if (copyInstallCommand) {
     copyInstallCommand.addEventListener("click", copyConnectorInstallCommand);
@@ -161,38 +145,47 @@ function render() {
   if (openExtensions) {
     openExtensions.addEventListener("click", () => chrome.tabs.create({ url: "chrome://extensions" }));
   }
-  document.getElementById("codex-model").addEventListener("change", (event) => {
+  const codexModel = document.getElementById("codex-model");
+  if (codexModel) codexModel.addEventListener("change", (event) => {
     state.codex.model = event.target.value;
     state.activity.unshift(`Codex model set to ${state.codex.model}.`);
     persistSession();
     render();
   });
-  document.getElementById("clear-activity").addEventListener("click", () => {
+  const clearActivityButton = document.getElementById("clear-activity");
+  if (clearActivityButton) clearActivityButton.addEventListener("click", () => {
     state.activity = [];
     persistSession();
     render();
   });
-  document.getElementById("clear-attachments").addEventListener("click", clearAttachments);
-  document.getElementById("memory-form").addEventListener("submit", saveMemoryFromForm);
-  document.getElementById("memory-title").addEventListener("input", (event) => {
-    state.userMemory.draftTitle = event.target.value;
-  });
-  document.getElementById("memory-content").addEventListener("input", (event) => {
-    state.userMemory.draftContent = event.target.value;
-  });
+  const clearAttachmentsButton = document.getElementById("clear-attachments");
+  if (clearAttachmentsButton) clearAttachmentsButton.addEventListener("click", clearAttachments);
   document.querySelectorAll("[data-memory-edit]").forEach((button) => {
     button.addEventListener("click", () => startMemoryEdit(button.dataset.memoryEdit));
   });
   document.querySelectorAll("[data-memory-delete]").forEach((button) => {
     button.addEventListener("click", () => deleteMemoryItem(button.dataset.memoryDelete));
   });
-  document.getElementById("clear-session").addEventListener("click", clearSession);
-  document.getElementById("persist-session").addEventListener("change", (event) => {
+  const memoryViewForm = document.getElementById("memory-view-form");
+  if (memoryViewForm) memoryViewForm.addEventListener("submit", saveMemoryFromViewForm);
+  const memoryViewTitle = document.getElementById("memory-view-title");
+  if (memoryViewTitle) memoryViewTitle.addEventListener("input", (event) => {
+    state.userMemory.draftTitle = event.target.value;
+  });
+  const memoryViewContent = document.getElementById("memory-view-content");
+  if (memoryViewContent) memoryViewContent.addEventListener("input", (event) => {
+    state.userMemory.draftContent = event.target.value;
+  });
+  const clearSessionButton = document.getElementById("clear-session");
+  if (clearSessionButton) clearSessionButton.addEventListener("click", clearSession);
+  const persistSessionInput = document.getElementById("persist-session");
+  if (persistSessionInput) persistSessionInput.addEventListener("change", (event) => {
     state.privacy.persistSession = event.target.checked;
     persistSession();
     render();
   });
-  document.getElementById("send-attachments").addEventListener("change", (event) => {
+  const sendAttachmentsInput = document.getElementById("send-attachments");
+  if (sendAttachmentsInput) sendAttachmentsInput.addEventListener("change", (event) => {
     state.privacy.sendAttachmentsToCodex = event.target.checked;
     persistSession();
   });
@@ -236,6 +229,109 @@ function getThemeTitle() {
   if (state.theme === "dark") return "Theme: dark";
   if (state.theme === "light") return "Theme: light";
   return "Theme: system";
+}
+
+function getSettingsSubtitle() {
+  const labels = {
+    memory: "Saved user context",
+    attachments: "Local files",
+    currentPage: "Observed page",
+    connector: "Local Codex connector",
+    privacy: "Session controls",
+    activity: "Recent events"
+  };
+
+  return labels[state.settingsSection] || "Settings";
+}
+
+function renderSettingsButton(section, label) {
+  const selected = state.settingsSection === section ? "selected" : "";
+  return `<button type="button" data-settings-section="${escapeHtml(section)}" class="${selected}">${escapeHtml(label)}</button>`;
+}
+
+function renderSettingsPanel() {
+  if (state.settingsSection === "attachments") return renderAttachmentsSettings();
+  if (state.settingsSection === "currentPage") return renderCurrentPageSettings();
+  if (state.settingsSection === "connector") return renderConnectorSettings();
+  if (state.settingsSection === "privacy") return renderPrivacySettings();
+  if (state.settingsSection === "activity") return renderActivitySettings();
+  return renderMemorySettings();
+}
+
+function renderMemorySettings() {
+  return `
+    <p>${escapeHtml(state.userMemory.message)}</p>
+    ${state.userMemory.path ? `<p class="memory-path">${escapeHtml(state.userMemory.path)}</p>` : ""}
+    <form id="memory-view-form" class="memory-form">
+      <input id="memory-view-title" type="text" placeholder="Title" value="${escapeHtml(state.userMemory.draftTitle)}">
+      <textarea id="memory-view-content" rows="7" placeholder="Only save information the user explicitly asked to remember">${escapeHtml(state.userMemory.draftContent)}</textarea>
+      <button type="submit">Save Memory</button>
+    </form>
+    <ul class="memory-list full">
+      ${state.userMemory.items.length ? state.userMemory.items.map(renderMemoryItem).join("") : "<li>No saved user memory.</li>"}
+    </ul>
+  `;
+}
+
+function renderAttachmentsSettings() {
+  return `
+    <ul class="compact-list">
+      ${state.attachments.length ? state.attachments.map(renderAttachment).join("") : "<li>No files attached.</li>"}
+    </ul>
+    <button id="clear-attachments" type="button" class="wide-button">Clear Attachments</button>
+  `;
+}
+
+function renderCurrentPageSettings() {
+  return `
+    <div class="settings-card">
+      <span class="eyebrow">Current page</span>
+      <strong>${escapeHtml(state.page.title)}</strong>
+      <p>${escapeHtml(state.page.summary)}</p>
+      ${state.page.url ? `<p class="memory-path">${escapeHtml(state.page.url)}</p>` : ""}
+    </div>
+    <button id="observe-page-settings" type="button">Observe</button>
+  `;
+}
+
+function renderConnectorSettings() {
+  return `
+    <div class="button-row">
+      <button id="check-connector" type="button">Check</button>
+      <button id="connect-codex" type="button">Connect</button>
+    </div>
+    <p>${escapeHtml(state.connector.message)}</p>
+    <label class="field-stack">
+      <span>Codex model</span>
+      <select id="codex-model">
+        ${renderModelOptions()}
+      </select>
+    </label>
+    ${renderConnectorSetup()}
+  `;
+}
+
+function renderPrivacySettings() {
+  return `
+    <button id="clear-session" type="button">Clear Session</button>
+    <label class="toggle-row">
+      <input id="persist-session" type="checkbox" ${state.privacy.persistSession ? "checked" : ""}>
+      <span>Persist this local session in Chrome storage</span>
+    </label>
+    <label class="toggle-row">
+      <input id="send-attachments" type="checkbox" ${state.privacy.sendAttachmentsToCodex ? "checked" : ""}>
+      <span>Allow extracted attachment text in Codex requests</span>
+    </label>
+  `;
+}
+
+function renderActivitySettings() {
+  return `
+    <button id="clear-activity" type="button">Clear</button>
+    <ol class="activity-list">
+      ${state.activity.length ? state.activity.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>No actions yet.</li>"}
+    </ol>
+  `;
 }
 
 function renderComposer() {
@@ -706,6 +802,24 @@ async function saveMemoryFromForm(event) {
   event.preventDefault();
   const title = document.getElementById("memory-title").value.trim() || "User note";
   const content = document.getElementById("memory-content").value.trim();
+
+  if (!content) {
+    state.userMemory.message = "Memory content is empty.";
+    render();
+    return;
+  }
+
+  await saveUserMemory({
+    id: state.userMemory.editingId || "",
+    title,
+    content
+  });
+}
+
+async function saveMemoryFromViewForm(event) {
+  event.preventDefault();
+  const title = document.getElementById("memory-view-title").value.trim() || "User note";
+  const content = document.getElementById("memory-view-content").value.trim();
 
   if (!content) {
     state.userMemory.message = "Memory content is empty.";
