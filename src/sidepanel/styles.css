@@ -109,10 +109,11 @@ button:hover {
 .topbar {
   position: relative;
   display: flex;
-  align-items: flex-start;
+  min-height: 36px;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px;
+  padding: 5px 8px;
 }
 
 .topbar > div:first-of-type {
@@ -136,8 +137,8 @@ button:hover {
 
 .theme-toggle {
   position: absolute;
-  top: 9px;
-  left: 9px;
+  top: 5px;
+  left: 8px;
   display: grid;
   width: 24px;
   min-height: 24px;
@@ -156,7 +157,7 @@ p {
 }
 
 h1 {
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.2;
 }
 
@@ -195,11 +196,31 @@ h2 {
 }
 
 .page-strip {
+  padding: 0;
+}
+
+.page-strip summary {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
+  min-height: 34px;
   align-items: center;
-  padding: 9px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.page-strip summary::-webkit-details-marker {
+  display: none;
+}
+
+.page-strip strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.page-strip > p {
+  margin: 0 8px 8px;
 }
 
 .eyebrow {
@@ -553,9 +574,9 @@ h2 {
 
 .title-line {
   display: block;
-  width: 42px;
+  width: 28px;
   height: 1px;
-  margin-top: 6px;
+  margin-top: 4px;
   background: var(--line);
 }
 

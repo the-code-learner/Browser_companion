@@ -94,14 +94,15 @@ function render() {
       </section>
     </section>
 
-    <section class="page-strip" aria-label="Current page">
-      <div>
+    <details class="page-strip" aria-label="Current page">
+      <summary>
         <span class="eyebrow">Current page</span>
         <strong>${escapeHtml(state.page.title)}</strong>
-        <p>${escapeHtml(state.page.summary)}</p>
-      </div>
-      <button id="observe-page" type="button">Observe</button>
-    </section>
+        <button id="observe-page" type="button">Observe</button>
+      </summary>
+      <p>${escapeHtml(state.page.summary)}</p>
+      ${state.page.url ? `<p class="memory-path">${escapeHtml(state.page.url)}</p>` : ""}
+    </details>
 
     ${state.pendingPlan ? renderActionPreview() : ""}
 
