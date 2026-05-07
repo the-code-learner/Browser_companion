@@ -1,6 +1,6 @@
 # Browser Companion
 
-Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser agent. The extension observes the active page through constrained tools, keeps risky browser actions behind policy checks and confirmations, and is designed to connect to Codex through a local ChatGPT/OAuth connector.
+Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser agent. The extension observes the active page through constrained tools, keeps risky browser actions behind policy checks and confirmations, and is designed to connect to local subscription-based CLI providers without API keys.
 
 ## Current state
 
@@ -9,7 +9,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - DOM, visible text, link, button, and form extraction
 - Attachment registration for local context
 - Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, TypeScript, PDF, DOCX, XLSX, and image OCR attachment extraction through the native connector
-- Native host health, sign-in start, and Codex request protocol
+- Native host health, sign-in start, and local provider request protocol
 - Safe action preview and confirmation for form filling and final submit or accept actions
 - Typed `SUBMIT` confirmation before high-risk submit, accept, send, publish, or finalize clicks
 - Constrained browser action executor for scroll, highlight, focus, fill, select, checkbox, radio, click, viewport screenshot, numbered overlay, wait, and back actions
@@ -22,9 +22,10 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Markdown rendering in chat, including Mermaid diagram blocks
 - Enter sends the chat message; Shift+Enter inserts a new line
 - Assistant responses follow the user's language unless the user asks otherwise
-- Side panel selector for the Codex model used by agent requests
+- Side panel connector for Codex, Claude Code, and Gemini CLI provider/model selection
+- Opt-in provider CLI installation buttons; missing CLIs are never installed automatically
 - Expandable one-line action notes inside the chat for approvals, executed actions, and results
-- Collapsible utility drawers for attachments, connector, privacy, and activity
+- Top-right settings menu for memory, attachments, current page, connector, privacy, and activity
 - Sticky chat composer pinned to the bottom of the side panel
 - System-aware light/dark theme with a small manual toggle
 - Shared message, schema, and policy modules
@@ -55,7 +56,7 @@ npm test
 
 ## Local connector
 
-Chrome extensions cannot start local processes directly. To connect Browser Companion to Codex, register the native messaging host after loading the unpacked extension.
+Chrome extensions cannot start local processes directly. To connect Browser Companion to local AI CLI tools, register the native messaging host after loading the unpacked extension.
 
 On Windows:
 
@@ -63,11 +64,19 @@ On Windows:
 powershell -ExecutionPolicy Bypass -File native-host/install-windows.ps1 -ExtensionId YOUR_EXTENSION_ID
 ```
 
-Then click Connect in the side panel. The connector starts the ChatGPT/Codex sign-in flow through `codex login --device-auth`.
+Then use the Connector settings in the side panel. Browser Companion detects these local providers:
+
+- Codex: install command `npm install -g @openai/codex`
+- Claude Code: install command `npm install -g @anthropic-ai/claude-code`
+- Gemini CLI: install command `npm install -g @google/gemini-cli`
+
+Missing providers show an explicit Install button only. Browser Companion does not install Claude Code, Gemini CLI, or Codex just because they are missing. Install opens a visible terminal so the user can see and control the command. Connect is separate from Install and starts the selected provider's local sign-in flow.
+
+Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector.
 
 The extension cannot run this PowerShell command before the native host is registered. When the connector is missing, the side panel shows a Copy Command button with the correct extension ID already filled in.
 
-Attachment extraction uses local Node dependencies in the native host. Extracted text stays local unless the privacy toggle allows it to be sent in a Codex request.
+Attachment extraction uses local Node dependencies in the native host. Extracted text stays local unless the privacy toggle allows it to be sent in a provider request.
 
 `LOCAL_CONTEXT.md` is the local project memory and is intentionally ignored by git.
 

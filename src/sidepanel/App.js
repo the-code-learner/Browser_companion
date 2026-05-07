@@ -6,7 +6,48 @@ const state = {
   theme: "system",
   connector: {
     status: "unknown",
-    message: "Connector status has not been checked."
+    message: "Connector status has not been checked.",
+    providers: [
+      {
+        id: "openai-codex",
+        label: "Codex",
+        status: "missing",
+        statusLabel: "Missing",
+        installed: false,
+        connected: false,
+        command: "codex",
+        installCommand: "npm install -g @openai/codex",
+        models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"],
+        defaultModel: "gpt-5.5",
+        message: "Codex CLI has not been detected."
+      },
+      {
+        id: "anthropic-claude-code",
+        label: "Claude Code",
+        status: "missing",
+        statusLabel: "Missing",
+        installed: false,
+        connected: false,
+        command: "claude.cmd",
+        installCommand: "npm install -g @anthropic-ai/claude-code",
+        models: ["default", "opus", "sonnet", "haiku"],
+        defaultModel: "default",
+        message: "Claude Code CLI has not been detected."
+      },
+      {
+        id: "google-gemini-cli",
+        label: "Gemini CLI",
+        status: "missing",
+        statusLabel: "Missing",
+        installed: false,
+        connected: false,
+        command: "gemini",
+        installCommand: "npm install -g @google/gemini-cli",
+        models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
+        defaultModel: "default",
+        message: "Gemini CLI has not been detected."
+      }
+    ]
   },
   page: {
     status: "idle",
@@ -32,6 +73,7 @@ const state = {
     sendAttachmentsToCodex: true
   },
   codex: {
+    provider: "openai-codex",
     model: "gpt-5.5"
   },
   userMemory: {
@@ -68,7 +110,7 @@ function render() {
         <span class="title-line" aria-hidden="true"></span>
       </div>
       <div class="top-actions">
-        <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings">⚙</button>
+        <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings" aria-label="Settings">&#9881;</button>
         <span class="status ${getConnectorClass()}">${escapeHtml(state.connector.status)}</span>
       </div>
     </section>
@@ -109,7 +151,7 @@ function render() {
     <section class="chat-log" aria-label="Chat messages">
       ${renderChatTimeline()}
     </section>
-    <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>↓</button>
+    <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" aria-label="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>&#8595;</button>
 
     ${renderComposer()}
   `;
@@ -137,7 +179,13 @@ function render() {
   const checkConnectorButton = document.getElementById("check-connector");
   if (checkConnectorButton) checkConnectorButton.addEventListener("click", checkConnector);
   const connectCodexButton = document.getElementById("connect-codex");
-  if (connectCodexButton) connectCodexButton.addEventListener("click", connectCodex);
+  if (connectCodexButton) connectCodexButton.addEventListener("click", () => connectProvider(state.codex.provider));
+  document.querySelectorAll("[data-connect-provider]").forEach((button) => {
+    button.addEventListener("click", () => connectProvider(button.dataset.connectProvider));
+  });
+  document.querySelectorAll("[data-install-provider]").forEach((button) => {
+    button.addEventListener("click", () => installProvider(button.dataset.installProvider));
+  });
   const copyInstallCommand = document.getElementById("copy-install-command");
   if (copyInstallCommand) {
     copyInstallCommand.addEventListener("click", copyConnectorInstallCommand);
@@ -149,7 +197,16 @@ function render() {
   const codexModel = document.getElementById("codex-model");
   if (codexModel) codexModel.addEventListener("change", (event) => {
     state.codex.model = event.target.value;
-    state.activity.unshift(`Codex model set to ${state.codex.model}.`);
+    state.activity.unshift(`Model set to ${state.codex.model}.`);
+    persistSession();
+    render();
+  });
+  const providerSelect = document.getElementById("provider-select");
+  if (providerSelect) providerSelect.addEventListener("change", (event) => {
+    state.codex.provider = event.target.value;
+    const provider = getSelectedProviderStatus();
+    state.codex.model = provider?.defaultModel || provider?.models?.[0] || "default";
+    state.activity.unshift(`Provider set to ${provider?.label || state.codex.provider}.`);
     persistSession();
     render();
   });
@@ -237,7 +294,7 @@ function getSettingsSubtitle() {
     memory: "Saved user context",
     attachments: "Local files",
     currentPage: "Observed page",
-    connector: "Local Codex connector",
+    connector: "Local provider connector",
     privacy: "Session controls",
     activity: "Recent events"
   };
@@ -299,15 +356,26 @@ function renderConnectorSettings() {
   return `
     <div class="button-row">
       <button id="check-connector" type="button">Check</button>
-      <button id="connect-codex" type="button">Connect</button>
+      <button id="connect-codex" type="button">Connect Selected</button>
     </div>
     <p>${escapeHtml(state.connector.message)}</p>
     <label class="field-stack">
-      <span>Codex model</span>
+      <span>Provider</span>
+      <select id="provider-select">
+        ${renderProviderOptions()}
+      </select>
+    </label>
+    <label class="field-stack">
+      <span>Model</span>
       <select id="codex-model">
         ${renderModelOptions()}
       </select>
     </label>
+    ${["missing", "error", "unknown"].includes(state.connector.status) ? "" : `
+      <div class="provider-list">
+        ${renderProviderCards()}
+      </div>
+    `}
     ${renderConnectorSetup()}
   `;
 }
@@ -321,7 +389,7 @@ function renderPrivacySettings() {
     </label>
     <label class="toggle-row">
       <input id="send-attachments" type="checkbox" ${state.privacy.sendAttachmentsToCodex ? "checked" : ""}>
-      <span>Allow extracted attachment text in Codex requests</span>
+      <span>Allow extracted attachment text in provider requests</span>
     </label>
   `;
 }
@@ -573,18 +641,148 @@ function renderMemoryItem(item) {
 }
 
 function renderModelOptions() {
-  const models = [
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.3-codex",
-    "gpt-5.2"
-  ];
+  const provider = getSelectedProviderStatus();
+  const models = provider?.models?.length ? provider.models : getDefaultProviderStatus("openai-codex").models;
 
   return models.map((model) => {
     const selected = model === state.codex.model ? "selected" : "";
     return `<option value="${escapeHtml(model)}" ${selected}>${escapeHtml(model)}</option>`;
   }).join("");
+}
+
+function renderProviderOptions() {
+  const connected = state.connector.providers.filter((provider) => provider.connected);
+  const providers = connected.length ? connected : state.connector.providers;
+
+  return providers.map((provider) => {
+    const selected = provider.id === state.codex.provider ? "selected" : "";
+    const disabled = provider.connected ? "" : "disabled";
+    const suffix = provider.connected ? "" : ` (${provider.statusLabel || "unavailable"})`;
+    return `<option value="${escapeHtml(provider.id)}" ${selected} ${disabled}>${escapeHtml(provider.label + suffix)}</option>`;
+  }).join("");
+}
+
+function renderProviderCards() {
+  return state.connector.providers.map((provider) => {
+    const status = provider.statusLabel || provider.status || "unknown";
+    const canConnect = provider.installed && !provider.connected;
+    const selected = provider.id === state.codex.provider ? " selected" : "";
+
+    return `
+      <article class="provider-card${selected}">
+        <div>
+          <strong>${escapeHtml(provider.label)}</strong>
+          <span class="provider-status">${escapeHtml(status)}</span>
+          <p>${escapeHtml(provider.message || "")}</p>
+          ${provider.installed ? "" : `<code>${escapeHtml(provider.installCommand || "")}</code>`}
+        </div>
+        <div class="provider-actions">
+          ${provider.installed ? `<button type="button" data-connect-provider="${escapeHtml(provider.id)}">${canConnect ? "Connect" : "Reconnect"}</button>` : ""}
+          ${provider.installed ? "" : `<button type="button" data-install-provider="${escapeHtml(provider.id)}">Install ${escapeHtml(provider.label)}</button>`}
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function normalizeProviderStatuses(providers = []) {
+  const byId = new Map((Array.isArray(providers) ? providers : []).map((provider) => [provider.id, provider]));
+
+  return getDefaultProviderStatuses().map((fallback) => {
+    const provider = {
+      ...fallback,
+      ...(byId.get(fallback.id) || {})
+    };
+    const installed = provider.installed || provider.status === "ready" || provider.status === "login_required" || provider.connected;
+    const connected = Boolean(provider.connected);
+
+    return {
+      ...provider,
+      installed,
+      connected,
+      statusLabel: getProviderStatusLabel({ ...provider, installed, connected })
+    };
+  });
+}
+
+function getDefaultProviderStatuses() {
+  return [
+    getDefaultProviderStatus("openai-codex"),
+    getDefaultProviderStatus("anthropic-claude-code"),
+    getDefaultProviderStatus("google-gemini-cli")
+  ];
+}
+
+function getDefaultProviderStatus(id) {
+  const defaults = {
+    "openai-codex": {
+      id: "openai-codex",
+      label: "Codex",
+      command: "codex",
+      installCommand: "npm install -g @openai/codex",
+      models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"],
+      defaultModel: "gpt-5.5"
+    },
+    "anthropic-claude-code": {
+      id: "anthropic-claude-code",
+      label: "Claude Code",
+      command: "claude.cmd",
+      installCommand: "npm install -g @anthropic-ai/claude-code",
+      models: ["default", "opus", "sonnet", "haiku"],
+      defaultModel: "default"
+    },
+    "google-gemini-cli": {
+      id: "google-gemini-cli",
+      label: "Gemini CLI",
+      command: "gemini",
+      installCommand: "npm install -g @google/gemini-cli",
+      models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
+      defaultModel: "default"
+    }
+  };
+
+  return {
+    status: "missing",
+    installed: false,
+    connected: false,
+    message: `${defaults[id]?.label || id} CLI has not been detected.`,
+    ...(defaults[id] || defaults["openai-codex"])
+  };
+}
+
+function getProviderStatusLabel(provider) {
+  if (provider.connected) return "Connected";
+  if (!provider.installed || provider.status === "missing") return "Missing";
+  if (provider.status === "login_required") return "Login required";
+  if (provider.status === "install_started") return "Installing";
+  if (provider.status === "login_started") return "Login started";
+  return "Installed";
+}
+
+function getSelectedProviderStatus() {
+  return state.connector.providers.find((provider) => provider.id === state.codex.provider)
+    || getDefaultProviderStatus(state.codex.provider)
+    || getDefaultProviderStatus("openai-codex");
+}
+
+function ensureSelectedProviderAvailable() {
+  if (!state.connector.providers.length) {
+    state.connector.providers = getDefaultProviderStatuses();
+  }
+
+  const selected = getSelectedProviderStatus();
+  const connectedProviders = state.connector.providers.filter((provider) => provider.connected);
+
+  if (!selected.connected && connectedProviders.length) {
+    const codex = connectedProviders.find((provider) => provider.id === "openai-codex");
+    state.codex.provider = (codex || connectedProviders[0]).id;
+  }
+
+  const provider = getSelectedProviderStatus();
+  const models = provider.models?.length ? provider.models : ["default"];
+  if (!models.includes(state.codex.model)) {
+    state.codex.model = provider.defaultModel || models[0];
+  }
 }
 
 function renderConnectorSetup() {
@@ -771,17 +969,21 @@ async function checkConnector() {
   if (!response.ok) {
     state.connector = {
       status: "error",
-      message: response.error
+      message: response.error,
+      providers: state.connector.providers
     };
     render();
     return;
   }
 
   const status = response.envelope.payload;
+  const providers = normalizeProviderStatuses(status.providers || []);
   state.connector = {
     status: status.connected ? "connected" : status.status,
-    message: status.message || "Local connector status received."
+    message: status.message || "Local connector status received.",
+    providers
   };
+  ensureSelectedProviderAvailable();
   render();
 }
 
@@ -901,17 +1103,23 @@ function applyUserMemoryPayload(payload = {}) {
   state.userMemory.items = Array.isArray(payload.items) ? payload.items : [];
 }
 
-async function connectCodex() {
+async function connectProvider(providerId = state.codex.provider) {
+  const provider = state.connector.providers.find((item) => item.id === providerId) || getDefaultProviderStatus(providerId);
+  state.codex.provider = provider.id;
   state.connector = {
+    ...state.connector,
     status: "connecting",
-    message: "Starting the local ChatGPT/Codex sign-in flow..."
+    message: `Starting the local ${provider.label} sign-in flow...`
   };
   render();
 
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.CONNECT_CODEX));
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.CONNECT_CODEX, {
+    provider: provider.id
+  }));
 
   if (!response.ok) {
     state.connector = {
+      ...state.connector,
       status: "missing",
       message: response.error
     };
@@ -920,10 +1128,51 @@ async function connectCodex() {
   }
 
   const status = response.envelope.payload;
+  const providers = normalizeProviderStatuses(status.providers || []);
   state.connector = {
     status: status.connected ? "connected" : status.status,
-    message: status.message || "Connector response received."
+    message: status.message || "Connector response received.",
+    providers
   };
+  ensureSelectedProviderAvailable();
+  persistSession();
+  render();
+}
+
+async function installProvider(providerId) {
+  const provider = state.connector.providers.find((item) => item.id === providerId) || getDefaultProviderStatus(providerId);
+  state.activity.unshift(`Requested opt-in install for ${provider.label}.`);
+  state.connector = {
+    ...state.connector,
+    status: "installing",
+    message: `Opening visible installer for ${provider.label}.`
+  };
+  render();
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.INSTALL_PROVIDER, {
+    provider: provider.id
+  }));
+
+  if (!response.ok) {
+    state.connector = {
+      ...state.connector,
+      status: "error",
+      message: response.error
+    };
+    state.activity.unshift(`Install request failed for ${provider.label}: ${response.error}`);
+    render();
+    return;
+  }
+
+  const payload = response.envelope.payload;
+  if (payload?.providers) {
+    state.connector.providers = normalizeProviderStatuses(payload.providers);
+    ensureSelectedProviderAvailable();
+  }
+  state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
+  state.connector.message = payload?.message || `Install request sent for ${provider.label}.`;
+  state.activity.unshift(state.connector.message);
+  persistSession();
   render();
 }
 
@@ -1068,6 +1317,7 @@ async function getAgentResult(goal) {
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
       goal,
       responseLanguage,
+      provider: state.codex.provider,
       model: state.codex.model,
       observation: state.page.observation,
       userMemory: state.userMemory.items.map((item) => ({
@@ -1089,7 +1339,7 @@ async function getAgentResult(goal) {
       return response.envelope.payload;
     }
 
-    state.activity.unshift(`Codex request failed: ${response.error}`);
+    state.activity.unshift(`Provider request failed: ${response.error}`);
   }
 
   return buildLocalAgentResult(goal, responseLanguage);
@@ -1143,7 +1393,7 @@ async function handleAgentResult(result) {
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
     state.messages.push({
       role: "assistant",
-      text: result.message || "The local Codex connector is not ready, so I used only local page context.",
+      text: result.message || "The selected local provider is not ready, so I used only local page context.",
       createdAt: Date.now()
     });
     state.activity.unshift("Codex agent was unavailable.");
@@ -1790,6 +2040,7 @@ async function maybeSynthesizeResults(plan, results) {
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, {
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
+    provider: state.codex.provider,
     model: state.codex.model,
     observation: state.page.observation,
     userMemory: state.userMemory.items.map((item) => ({
@@ -1953,7 +2204,11 @@ async function restoreSession() {
   }
 
   state.privacy = session.privacy;
-  state.codex = session.codex || state.codex;
+  state.codex = {
+    provider: "openai-codex",
+    model: "gpt-5.5",
+    ...(session.codex || {})
+  };
   state.attachments = session.attachments || [];
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];

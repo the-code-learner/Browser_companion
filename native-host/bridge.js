@@ -11,7 +11,8 @@ let inputBuffer = Buffer.alloc(0);
 const bridgeDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(bridgeDir, "..");
 const userMemoryPath = path.join(projectRoot, "USER_MEMORY.md");
-const codexBin = resolveCodexBin();
+const providerDefinitions = createProviderDefinitions();
+const codexBin = providerDefinitions["openai-codex"].command;
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -40,7 +41,12 @@ function handleMessage(message) {
   }
 
   if (message?.type === "connect") {
-    writeMessage(connectCodex());
+    writeMessage(connectProvider(message.payload));
+    return;
+  }
+
+  if (message?.type === "provider_install") {
+    writeMessage(installProvider(message.payload));
     return;
   }
 
@@ -541,14 +547,59 @@ function isTextLike(fileName, mimeType) {
 }
 
 function getHealth() {
-  const codexVersion = runCodex(["--version"]);
+  const providers = getProviderStatuses();
+  const codex = providers.find((provider) => provider.id === "openai-codex");
+  const connectedProviders = providers.filter((provider) => provider.connected);
+  const primary = codex?.connected ? codex : connectedProviders[0] || codex;
 
-  if (codexVersion.error || codexVersion.status !== 0) {
+  return {
+    connected: connectedProviders.length > 0,
+    status: primary?.status || "missing",
+    codexVersion: codex?.version || "",
+    codexPath: codex?.command || codexBin,
+    selectedProvider: primary?.id || "openai-codex",
+    providers,
+    capabilities: getCapabilities(),
+    message: summarizeProviders(providers)
+  };
+}
+
+function getProviderStatuses() {
+  return Object.values(providerDefinitions).map(getProviderStatus);
+}
+
+function getProviderStatus(provider) {
+  const version = runCommand(provider.command, provider.versionArgs || ["--version"], { timeout: 10000 });
+  const installed = !version.error && version.status === 0;
+
+  if (!installed) {
     return {
+      id: provider.id,
+      label: provider.label,
+      installed: false,
       connected: false,
-      status: "codex_missing",
-      codexPath: codexBin,
-      message: "Codex CLI was not found by the native connector. Re-run the connector install command from a terminal where codex works, or edit CODEX_BIN in native-host/bridge-launcher.cmd."
+      status: "missing",
+      command: provider.command,
+      installCommand: provider.installCommand,
+      models: provider.models,
+      defaultModel: provider.defaultModel,
+      message: `${provider.label} CLI was not found.`
+    };
+  }
+
+  if (provider.id !== "openai-codex") {
+    return {
+      id: provider.id,
+      label: provider.label,
+      installed: true,
+      connected: true,
+      status: "ready",
+      command: provider.command,
+      version: compact(version.stdout || version.stderr),
+      installCommand: provider.installCommand,
+      models: provider.models,
+      defaultModel: provider.defaultModel,
+      message: `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
     };
   }
 
@@ -557,19 +608,34 @@ function getHealth() {
   const loggedIn = loginStatus.status === 0 && !/not logged in|not authenticated|no login/i.test(loginText);
 
   return {
+    id: provider.id,
+    label: provider.label,
+    installed: true,
     connected: loggedIn,
     status: loggedIn ? "ready" : "login_required",
-    codexVersion: codexVersion.stdout.trim(),
-    codexPath: codexBin,
-    capabilities: getCapabilities(),
+    command: provider.command,
+    version: compact(version.stdout || version.stderr),
+    installCommand: provider.installCommand,
+    models: provider.models,
+    defaultModel: provider.defaultModel,
     message: loggedIn
-      ? "Local connector can reach Codex CLI and a login session appears to be available."
-      : "Codex CLI is installed, but ChatGPT/Codex sign-in is required."
+      ? "Codex CLI is installed and signed in."
+      : "Codex CLI is installed, but sign-in is required."
   };
+}
+
+function summarizeProviders(providers) {
+  const connected = providers.filter((provider) => provider.connected).map((provider) => provider.label);
+  if (connected.length) {
+    return `Connected providers: ${connected.join(", ")}.`;
+  }
+
+  return "No connected provider is ready yet.";
 }
 
 function getCapabilities() {
   return {
+    providers: Object.keys(providerDefinitions),
     codexExec: true,
     attachmentExtraction: {
       text: true,
@@ -582,6 +648,39 @@ function getCapabilities() {
   };
 }
 
+function createProviderDefinitions() {
+  return {
+    "openai-codex": {
+      id: "openai-codex",
+      label: "Codex",
+      command: resolveCodexBin(),
+      installCommand: "npm install -g @openai/codex",
+      models: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"],
+      defaultModel: "gpt-5.5"
+    },
+    "anthropic-claude-code": {
+      id: "anthropic-claude-code",
+      label: "Claude Code",
+      command: process.platform === "win32" ? "claude.cmd" : "claude",
+      installCommand: "npm install -g @anthropic-ai/claude-code",
+      models: ["default", "opus", "sonnet", "haiku"],
+      defaultModel: "default"
+    },
+    "google-gemini-cli": {
+      id: "google-gemini-cli",
+      label: "Gemini CLI",
+      command: process.platform === "win32" ? "gemini.cmd" : "gemini",
+      installCommand: "npm install -g @google/gemini-cli",
+      models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
+      defaultModel: "default"
+    }
+  };
+}
+
+function getProviderDefinition(providerId) {
+  return providerDefinitions[providerId] || providerDefinitions["openai-codex"];
+}
+
 function hasPackage(packageName) {
   try {
     import.meta.resolve(packageName);
@@ -591,14 +690,27 @@ function hasPackage(packageName) {
   }
 }
 
-function connectCodex() {
+function connectProvider(payload = {}) {
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  if (provider.id !== "openai-codex") {
+    const status = getProviderStatus(provider);
+    if (!status.installed) return status;
+    const child = spawnInteractiveProvider(provider);
+    child?.unref?.();
+    return {
+      ...getHealth(),
+      status: "login_started",
+      message: `${provider.label} was opened in a terminal. Complete the provider sign-in flow there, then check the connector again.`
+    };
+  }
+
   const health = getHealth();
 
   if (health.connected) {
     return health;
   }
 
-  if (health.status === "codex_missing") {
+  if (health.status === "missing") {
     return health;
   }
 
@@ -606,10 +718,76 @@ function connectCodex() {
   child.unref();
 
   return {
+    ...getHealth(),
     connected: false,
     status: "login_started",
     message: "Codex login was started. Complete the ChatGPT sign-in flow, then check the connector again."
   };
+}
+
+function installProvider(payload = {}) {
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  const command = provider.installCommand;
+
+  if (!command) {
+    return {
+      ...getHealth(),
+      status: "install_unavailable",
+      message: `${provider.label} does not have an install command configured.`
+    };
+  }
+
+  if (!hasNpm()) {
+    return {
+      ...getHealth(),
+      status: "install_blocked",
+      provider: provider.id,
+      installCommand: command,
+      message: "Node/npm was not found. Install Node.js first, then run the displayed install command manually."
+    };
+  }
+
+  const child = spawnVisibleShell(`${command} && echo. && echo Installation finished. Run the provider login/connect step next.`);
+  child?.unref?.();
+
+  return {
+    ...getHealth(),
+    status: "install_started",
+    provider: provider.id,
+    installCommand: command,
+    message: `Started opt-in installation for ${provider.label} in a visible terminal.`
+  };
+}
+
+function hasNpm() {
+  const result = runCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["--version"], { timeout: 10000 });
+  return !result.error && result.status === 0;
+}
+
+function spawnInteractiveProvider(provider) {
+  return spawnVisibleShell(provider.command);
+}
+
+function spawnVisibleShell(command) {
+  if (process.platform === "win32") {
+    return spawn("cmd.exe", ["/c", "start", "Browser Companion Provider Setup", "cmd.exe", "/k", command], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    });
+  }
+
+  if (process.platform === "darwin") {
+    return spawn("osascript", ["-e", `tell application "Terminal" to do script ${JSON.stringify(command)}`], {
+      detached: true,
+      stdio: "ignore"
+    });
+  }
+
+  return spawn("sh", ["-lc", `x-terminal-emulator -e ${JSON.stringify(command)} || gnome-terminal -- sh -lc ${JSON.stringify(`${command}; read -p "Press Enter"`)}`], {
+    detached: true,
+    stdio: "ignore"
+  });
 }
 
 function spawnLoginProcess() {
@@ -637,12 +815,20 @@ function spawnLoginProcess() {
 }
 
 function runAgentRequest(payload = {}) {
-  const health = getHealth();
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  if (provider.id !== "openai-codex") {
+    return runCliAgentRequest(provider, payload);
+  }
 
-  if (!health.connected) {
+  const health = getHealth();
+  const codexStatus = health.providers.find((item) => item.id === "openai-codex");
+
+  if (!codexStatus?.connected) {
     return {
       type: "agent_unavailable",
-      ...health
+      ...health,
+      status: codexStatus?.status || "missing",
+      message: codexStatus?.message || "Codex is not connected."
     };
   }
 
@@ -689,9 +875,15 @@ function runAgentRequest(payload = {}) {
 }
 
 function runSynthesisRequest(payload = {}) {
-  const health = getHealth();
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  if (provider.id !== "openai-codex") {
+    return runCliSynthesisRequest(provider, payload);
+  }
 
-  if (!health.connected) {
+  const health = getHealth();
+  const codexStatus = health.providers.find((item) => item.id === "openai-codex");
+
+  if (!codexStatus?.connected) {
     return {
       type: "natural_response",
       text: "I gathered tool results, but Codex is not available to synthesize them."
@@ -732,6 +924,107 @@ function runSynthesisRequest(payload = {}) {
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+function runCliAgentRequest(provider, payload = {}) {
+  const status = getProviderStatus(provider);
+  if (!status.installed) {
+    return {
+      type: "agent_unavailable",
+      ...status
+    };
+  }
+
+  const prompt = buildAgentPrompt(payload);
+  const result = runProviderPrompt(provider, prompt, payload.model, true);
+  if (result.error || result.status !== 0) {
+    return {
+      type: "agent_error",
+      message: summarizeProviderFailure(provider, result)
+    };
+  }
+
+  const output = compactProviderOutput(result.stdout || result.stderr || "");
+  try {
+    return JSON.parse(extractJsonObject(output));
+  } catch {
+    return {
+      type: "agent_error",
+      message: `${provider.label} responded, but the response was not valid Browser Companion JSON.`
+    };
+  }
+}
+
+function runCliSynthesisRequest(provider, payload = {}) {
+  const status = getProviderStatus(provider);
+  if (!status.installed) {
+    return {
+      type: "natural_response",
+      text: `${provider.label} is not installed.`
+    };
+  }
+
+  const prompt = buildSynthesisPrompt(payload);
+  const result = runProviderPrompt(provider, prompt, payload.model, false);
+  if (result.error || result.status !== 0) {
+    return {
+      type: "natural_response",
+      text: summarizeProviderFailure(provider, result)
+    };
+  }
+
+  return {
+    type: "natural_response",
+    text: compactProviderOutput(result.stdout || result.stderr || "")
+  };
+}
+
+function runProviderPrompt(provider, prompt, model, needsJson) {
+  if (provider.id === "anthropic-claude-code") {
+    const args = ["-p", prompt];
+    const normalized = normalizeProviderModel(provider, model);
+    if (normalized !== "default") args.unshift("--model", normalized);
+    return runCommand(provider.command, args, { timeout: 120000 });
+  }
+
+  if (provider.id === "google-gemini-cli") {
+    const args = ["-p", prompt];
+    const normalized = normalizeProviderModel(provider, model);
+    if (normalized !== "default") args.unshift("-m", normalized);
+    return runCommand(provider.command, args, { timeout: 120000 });
+  }
+
+  return runCodex(["exec", "--model", normalizeModel(model), "-"], { input: prompt, timeout: 120000 });
+}
+
+function normalizeProviderModel(provider, model) {
+  return provider.models.includes(model) ? model : provider.defaultModel;
+}
+
+function compactProviderOutput(output) {
+  const text = String(output || "").trim();
+  try {
+    const parsed = JSON.parse(text);
+    return parsed.text || parsed.response || parsed.result || parsed.output || text;
+  } catch {
+    return text;
+  }
+}
+
+function extractJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (raw.startsWith("{") && raw.endsWith("}")) return raw;
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("No JSON object found.");
+  return match[0];
+}
+
+function summarizeProviderFailure(provider, result) {
+  const combined = compact(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`);
+  if (/auth|login|sign in|unauthorized|permission/i.test(combined)) {
+    return `${provider.label} appears to need sign-in. Open Connector and click Connect for this provider.`;
+  }
+  return combined.slice(-800) || `${provider.label} request failed.`;
 }
 
 function buildAgentPrompt(payload) {
@@ -797,7 +1090,11 @@ function normalizeModel(model) {
 }
 
 function runCodex(args, options = {}) {
-  return spawnSync(codexBin, args, {
+  return runCommand(codexBin, args, options);
+}
+
+function runCommand(command, args, options = {}) {
+  return spawnSync(command, args, {
     encoding: "utf8",
     shell: false,
     maxBuffer: 1024 * 1024 * 12,

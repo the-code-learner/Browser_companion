@@ -37,7 +37,11 @@ async function handleMessage(message) {
   }
 
   if (message?.type === MESSAGE_TYPES.CONNECT_CODEX) {
-    return connectCodex();
+    return connectCodex(message.payload);
+  }
+
+  if (message?.type === MESSAGE_TYPES.INSTALL_PROVIDER) {
+    return installProvider(message.payload);
   }
 
   if (message?.type === MESSAGE_TYPES.EXTRACT_ATTACHMENT) {
@@ -145,9 +149,12 @@ async function checkNativeHealth() {
   }
 }
 
-async function connectCodex() {
+async function connectCodex(payload = {}) {
   try {
-    const response = await sendNativeMessage({ type: "connect" });
+    const response = await sendNativeMessage({
+      type: "connect",
+      payload
+    });
     return {
       ok: true,
       envelope: makeEnvelope(MESSAGE_TYPES.NATIVE_STATUS, response)
@@ -155,7 +162,25 @@ async function connectCodex() {
   } catch (error) {
     return {
       ok: false,
-      error: "Local connector is not installed or cannot start Codex login yet."
+      error: "Local connector is not installed or cannot start the selected provider login yet."
+    };
+  }
+}
+
+async function installProvider(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "provider_install",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.NATIVE_STATUS, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Provider install could not be started."
     };
   }
 }
@@ -173,7 +198,7 @@ async function requestAgent(payload) {
   } catch (error) {
     return {
       ok: false,
-      error: error.message || "Codex agent request failed."
+      error: error.message || "Provider agent request failed."
     };
   }
 }
@@ -191,7 +216,7 @@ async function requestSynthesis(payload) {
   } catch (error) {
     return {
       ok: false,
-      error: error.message || "Codex synthesis request failed."
+      error: error.message || "Provider synthesis request failed."
     };
   }
 }

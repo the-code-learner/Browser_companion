@@ -572,6 +572,70 @@ h2 {
   gap: 4px;
 }
 
+.provider-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.provider-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px;
+  background: var(--panel);
+}
+
+.provider-card.selected {
+  border-color: var(--accent);
+}
+
+.provider-card strong,
+.provider-card p,
+.provider-card code {
+  display: block;
+}
+
+.provider-card p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.provider-card code {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.provider-status {
+  display: inline-block;
+  margin-left: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.provider-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.provider-actions button {
+  min-height: 24px;
+  padding: 0 7px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 .title-line {
   display: block;
   width: 28px;
