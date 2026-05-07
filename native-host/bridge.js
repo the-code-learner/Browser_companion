@@ -749,7 +749,9 @@ function installProvider(payload = {}) {
       status: "install_blocked",
       provider: provider.id,
       installCommand: command,
-      message: "Node/npm was not found on the native host PATH. Install Node.js from https://nodejs.org/en/download, restart Chrome, then click Install again or run the displayed npm command manually."
+      npmPath: npmBin,
+      nodePath: process.execPath,
+      message: `Node/npm was not found by the native host. Checked npm at "${npmBin}" from Node "${process.execPath}". Install Node.js from https://nodejs.org/en/download, restart Chrome, then click Install again or run the displayed npm command manually.`
     };
   }
 
@@ -801,7 +803,21 @@ function installNodejs() {
 
 function hasNpm() {
   const result = runCommand(npmBin, ["--version"], { timeout: 10000 });
-  return !result.error && result.status === 0;
+  if (!result.error && result.status === 0) {
+    return true;
+  }
+
+  if (process.platform === "win32" && fs.existsSync(npmBin)) {
+    const cmdResult = spawnSync("cmd.exe", ["/d", "/s", "/c", `"${npmBin}" --version`], {
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true,
+      timeout: 10000
+    });
+    return !cmdResult.error && cmdResult.status === 0;
+  }
+
+  return false;
 }
 
 function makeRunnableNpmCommand(command) {
@@ -1181,12 +1197,32 @@ function runCodex(args, options = {}) {
 }
 
 function runCommand(command, args, options = {}) {
-  return spawnSync(command, args, {
+  const result = spawnSync(command, args, {
     encoding: "utf8",
     shell: false,
     maxBuffer: 1024 * 1024 * 12,
     ...options
   });
+
+  if (result.error && process.platform === "win32" && fs.existsSync(command)) {
+    const quoted = [quoteShellPath(command), ...args.map((arg) => quoteShellArg(arg))].join(" ");
+    return spawnSync("cmd.exe", ["/d", "/s", "/c", quoted], {
+      encoding: "utf8",
+      shell: false,
+      maxBuffer: 1024 * 1024 * 12,
+      ...options
+    });
+  }
+
+  return result;
+}
+
+function quoteShellArg(value) {
+  const raw = String(value ?? "");
+  if (!/[\s"&|<>^]/.test(raw)) {
+    return raw;
+  }
+  return `"${raw.replace(/"/g, '""')}"`;
 }
 
 function resolveCodexBin() {
@@ -1213,13 +1249,34 @@ function resolveCodexBin() {
 
 function resolveNpmBin() {
   const executableDir = path.dirname(process.execPath || "");
-  const localNpm = path.join(executableDir, process.platform === "win32" ? "npm.cmd" : "npm");
 
-  if (fs.existsSync(localNpm)) {
-    return localNpm;
+  if (process.platform !== "win32") {
+    const localNpm = path.join(executableDir, "npm");
+    return fs.existsSync(localNpm) ? localNpm : "npm";
   }
 
-  return process.platform === "win32" ? "npm.cmd" : "npm";
+  const candidates = [
+    path.join(executableDir, "npm.cmd"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "nodejs", "npm.cmd"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "nodejs", "npm.cmd"),
+    path.join(process.env.LOCALAPPDATA || "", "Programs", "nodejs", "npm.cmd"),
+    path.join(process.env.APPDATA || "", "npm", "npm.cmd")
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  const whereResult = spawnSync("where.exe", ["npm.cmd"], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true
+  });
+  const found = String(whereResult.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+
+  return found || "npm.cmd";
 }
 
 function findFile(root, fileName, maxDepth, depth = 0) {
