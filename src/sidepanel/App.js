@@ -95,7 +95,8 @@ const state = {
   },
   pendingMemoryIntent: null,
   chatAtBottom: true,
-  activity: []
+  activity: [],
+  debugLogs: []
 };
 
 const app = document.getElementById("app");
@@ -141,6 +142,7 @@ function render() {
         ${renderSettingsButton("connector", "Connector")}
         ${renderSettingsButton("privacy", "Privacy")}
         ${renderSettingsButton("activity", `Activity ${state.activity.length}`)}
+        ${renderSettingsButton("logs", `Logs ${state.debugLogs.length}`)}
       </nav>
       <section class="settings-panel">
         ${renderSettingsPanel()}
@@ -239,6 +241,10 @@ function render() {
     persistSession();
     render();
   });
+  const clearLogsButton = document.getElementById("clear-logs");
+  if (clearLogsButton) clearLogsButton.addEventListener("click", clearDebugLogs);
+  const copyLogsButton = document.getElementById("copy-logs");
+  if (copyLogsButton) copyLogsButton.addEventListener("click", copyDebugLogs);
   const clearAttachmentsButton = document.getElementById("clear-attachments");
   if (clearAttachmentsButton) clearAttachmentsButton.addEventListener("click", clearAttachments);
   document.querySelectorAll("[data-remove-attachment]").forEach((button) => {
@@ -322,7 +328,8 @@ function getSettingsSubtitle() {
     currentPage: "Observed page",
     connector: "Local provider connector",
     privacy: "Session controls",
-    activity: "Recent events"
+    activity: "Recent events",
+    logs: "Detailed diagnostics"
   };
 
   return labels[state.settingsSection] || "Settings";
@@ -359,6 +366,7 @@ function renderSettingsPanel() {
   if (state.settingsSection === "connector") return renderConnectorSettings();
   if (state.settingsSection === "privacy") return renderPrivacySettings();
   if (state.settingsSection === "activity") return renderActivitySettings();
+  if (state.settingsSection === "logs") return renderLogsSettings();
   return renderMemorySettings();
 }
 
@@ -517,6 +525,45 @@ function renderActivitySettings() {
       ${state.activity.length ? state.activity.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>No actions yet.</li>"}
     </ol>
   `;
+}
+
+function renderLogsSettings() {
+  return `
+    <div class="button-row">
+      <button id="copy-logs" type="button">Copy Logs</button>
+      <button id="clear-logs" type="button">Clear Logs</button>
+    </div>
+    <ol class="debug-log-list">
+      ${state.debugLogs.length ? state.debugLogs.map(renderDebugLog).join("") : "<li>No diagnostic logs yet.</li>"}
+    </ol>
+  `;
+}
+
+function renderDebugLog(entry) {
+  return `
+    <li>
+      <details>
+        <summary>
+          <span>${escapeHtml(entry.time || "")}</span>
+          <strong>${escapeHtml(entry.event || "event")}</strong>
+          ${entry.summary ? `<em>${escapeHtml(entry.summary)}</em>` : ""}
+        </summary>
+        <pre>${escapeHtml(JSON.stringify(entry.data || {}, null, 2))}</pre>
+      </details>
+    </li>
+  `;
+}
+
+function summarizeObservationForLog(observation = {}) {
+  return {
+    url: observation.tab?.url || "",
+    title: observation.tab?.title || "",
+    viewport: observation.viewport || {},
+    visibleTextLength: String(observation.visible_text || "").length,
+    links: observation.links?.length || 0,
+    buttons: observation.buttons?.length || 0,
+    forms: observation.forms?.length || 0
+  };
 }
 
 function renderComposer() {
@@ -1029,6 +1076,7 @@ async function observePage(options = {}) {
   const permission = await ensureCurrentSitePermission();
 
   if (!permission.ok) {
+    addDebugLog("observe.permission_blocked", { reason, permission }, permission.error);
     if (!silent) {
       state.page.status = "error";
       state.page.summary = permission.error;
@@ -1050,6 +1098,11 @@ async function observePage(options = {}) {
   }
 
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.OBSERVE_ACTIVE_TAB));
+  addDebugLog("observe.response", {
+    ok: response.ok,
+    error: response.error || "",
+    observation: response.envelope?.payload ? summarizeObservationForLog(response.envelope.payload) : null
+  }, response.ok ? "Observed active tab." : response.error);
 
   if (!response.ok) {
     if (!silent) {
@@ -1193,7 +1246,13 @@ async function checkConnector() {
   connectorCheckInFlight = true;
 
   try {
+    addDebugLog("connector.health.start", { selectedProvider: state.codex.provider, selectedModel: state.codex.model }, "Checking connector.");
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.NATIVE_HEALTH));
+    addDebugLog("connector.health.end", {
+      ok: response.ok,
+      error: response.error || "",
+      status: response.envelope?.payload || null
+    }, response.ok ? response.envelope?.payload?.message || "Connector status received." : response.error);
 
     if (!response.ok) {
       state.connector = {
@@ -1714,12 +1773,13 @@ async function getAgentResult(goal) {
   const navigationPlan = buildNavigationPlan(goal, responseLanguage);
 
   if (navigationPlan) {
+    addDebugLog("agent.local_navigation_plan", { goal, plan: navigationPlan }, navigationPlan.summary_for_user);
     return navigationPlan;
   }
 
   if (state.connector.status === "connected") {
     const selectedHttpProvider = getSelectedHttpProvider();
-    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
+    const payload = {
       goal,
       responseLanguage,
       provider: state.codex.provider,
@@ -1739,7 +1799,14 @@ async function getAgentResult(goal) {
         status: file.status,
         text: state.privacy.sendAttachmentsToCodex ? file.text : ""
       }))
-    }));
+    };
+    addDebugLog("provider.agent_request.start", payload, `${state.codex.provider} / ${state.codex.model}`);
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, payload));
+    addDebugLog("provider.agent_request.end", {
+      ok: response.ok,
+      error: response.error || "",
+      result: response.envelope?.payload || null
+    }, response.ok ? response.envelope?.payload?.type || "provider response" : response.error);
 
     if (response.ok) {
       return response.envelope.payload;
@@ -1820,8 +1887,16 @@ function buildDeterministicActionPlan(goal, responseLanguage) {
 }
 
 async function handleAgentResult(result) {
+  addDebugLog("agent.result", { result }, result?.type || "unknown result");
+
   if (result?.type === "agent_plan") {
     const policyResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.VALIDATE_ACTION_PLAN, { plan: result }));
+    addDebugLog("policy.validation", {
+      plan: result,
+      ok: policyResponse.ok,
+      policy: policyResponse.envelope?.payload || null,
+      error: policyResponse.error || ""
+    }, policyResponse.ok ? "Policy validated" : policyResponse.error);
     state.confirmationText = "";
     state.messages.push({
       role: "assistant",
@@ -1887,7 +1962,7 @@ async function handleAgentResult(result) {
 }
 
 function getAgentDisplayText(result) {
-  return compact(
+  const text = compact(
     result?.text
     || result?.answer
     || result?.response
@@ -1900,6 +1975,30 @@ function getAgentDisplayText(result) {
     || result?.reason
     || ""
   );
+
+  return extractNestedNaturalText(text);
+}
+
+function extractNestedNaturalText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+
+  const parsed = parseLooseJsonObject(raw);
+  const nested = parsed?.text
+    || parsed?.answer
+    || parsed?.response
+    || parsed?.message
+    || parsed?.result
+    || parsed?.output
+    || parsed?.summary
+    || "";
+
+  if (nested && typeof nested === "string") {
+    addDebugLog("agent.nested_json_text_unwrapped", { raw, parsed }, "Unwrapped JSON text returned as natural_response.");
+    return compact(nested);
+  }
+
+  return raw;
 }
 
 async function confirmPendingPlan() {
@@ -1944,9 +2043,15 @@ async function executeActionPlan(plan) {
 
   state.activity.unshift("Executing browser action plan...");
   addActionNote("Executing browser actions", actions.map(formatActionDetail));
+  addDebugLog("action.execute.start", { plan: normalizedPlan }, `${actions.length} action(s).`);
   render();
 
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan: normalizedPlan }));
+  addDebugLog("action.execute.end", {
+    ok: response.ok,
+    error: response.error || "",
+    result: response.envelope?.payload || null
+  }, response.ok ? "Action execution response received." : response.error);
 
   if (!response.ok) {
     state.messages.push({ role: "assistant", text: response.error, createdAt: Date.now() });
@@ -2088,6 +2193,57 @@ function formatActionDetail(action) {
   return `${action.type}${target}${value}${action.reason ? `: ${action.reason}` : ""}`;
 }
 
+function addDebugLog(event, data = {}, summary = "") {
+  state.debugLogs.unshift({
+    id: crypto.randomUUID(),
+    time: new Date().toISOString(),
+    event,
+    summary,
+    data: sanitizeDebugData(data)
+  });
+  state.debugLogs = state.debugLogs.slice(0, 200);
+  persistSession();
+}
+
+function sanitizeDebugData(value, depth = 0) {
+  if (depth > 6) return "[depth limit]";
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return redactSensitiveText(value).slice(0, 8000);
+  if (Array.isArray(value)) return value.slice(0, 80).map((item) => sanitizeDebugData(item, depth + 1));
+  if (typeof value !== "object") return String(value);
+
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (/password|authorization|token|secret|cookie|credential/i.test(key)) {
+      return [key, "[redacted]"];
+    }
+
+    if (/text|content|body|visible_text|bodyPreview/i.test(key) && typeof item === "string") {
+      return [key, redactSensitiveText(item).slice(0, 4000)];
+    }
+
+    return [key, sanitizeDebugData(item, depth + 1)];
+  }));
+}
+
+function redactSensitiveText(text) {
+  return String(text || "")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
+    .replace(/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, "[phone]");
+}
+
+async function copyDebugLogs() {
+  await navigator.clipboard.writeText(JSON.stringify(state.debugLogs, null, 2));
+  state.activity.unshift("Diagnostic logs copied.");
+  render();
+}
+
+function clearDebugLogs() {
+  state.debugLogs = [];
+  state.activity.unshift("Diagnostic logs cleared.");
+  persistSession();
+  render();
+}
+
 function parseDirectMemoryRequest(text) {
   const raw = String(text || "").trim();
   if (isResearchIntent(raw)) {
@@ -2119,7 +2275,7 @@ async function synthesizeMemoryRequest(intent) {
     return fallback;
   }
 
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, {
+  const payload = {
     task: "user_memory",
     goal: intent.goal,
     memoryRequest: intent.goal,
@@ -2142,7 +2298,14 @@ async function synthesizeMemoryRequest(intent) {
       status: file.status,
       textPreview: state.privacy.sendAttachmentsToCodex ? String(file.text || "").slice(0, 2000) : ""
     }))
-  }));
+  };
+  addDebugLog("provider.memory_synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}`);
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
+  addDebugLog("provider.memory_synthesis.end", {
+    ok: response.ok,
+    error: response.error || "",
+    result: response.envelope?.payload || null
+  }, response.ok ? "Memory synthesis response received." : response.error);
 
   if (!response.ok) {
     state.activity.unshift(`Memory synthesis failed: ${response.error}`);
@@ -2811,12 +2974,17 @@ async function maybeSynthesizeResults(plan, results) {
   const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation"].includes(result.artifact?.kind));
 
   if (!hasResearchArtifact || state.connector.status !== "connected") {
+    addDebugLog("provider.synthesis.skipped", {
+      hasResearchArtifact,
+      connectorStatus: state.connector.status,
+      resultKinds: results.map((result) => result.artifact?.kind || result.status)
+    }, "Synthesis skipped.");
     return "";
   }
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
   const selectedHttpProvider = getSelectedHttpProvider();
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, {
+  const payload = {
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
     provider: state.codex.provider,
@@ -2830,7 +2998,14 @@ async function maybeSynthesizeResults(plan, results) {
       updatedAt: item.updatedAt
     })),
     results: results.map(stripLargeArtifactsForSynthesis)
-  }));
+  };
+  addDebugLog("provider.synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}`);
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
+  addDebugLog("provider.synthesis.end", {
+    ok: response.ok,
+    error: response.error || "",
+    result: response.envelope?.payload || null
+  }, response.ok ? "Synthesis response received." : response.error);
 
   if (!response.ok) {
     state.activity.unshift(`Synthesis failed: ${response.error}`);
@@ -2994,6 +3169,7 @@ async function restoreSession() {
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];
   state.activity = session.activity || [];
+  state.debugLogs = session.debugLogs || [];
 }
 
 async function restoreProviderSettings() {
@@ -3038,7 +3214,8 @@ function persistSession() {
       attachments: state.attachments,
       messages: state.messages.slice(-30),
       actionNotes: state.actionNotes.slice(-80),
-      activity: state.activity.slice(0, 80)
+      activity: state.activity.slice(0, 80),
+      debugLogs: state.debugLogs.slice(0, 200)
     }
   });
 }
@@ -3071,6 +3248,7 @@ function clearSession() {
   state.pendingPolicy = null;
   state.confirmationText = "";
   state.actionNotes = [];
+  state.debugLogs = [];
   state.activity = ["Local session cleared."];
   chrome.storage.local.remove("browserCompanionSession");
   render();

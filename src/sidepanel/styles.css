@@ -510,6 +510,56 @@ h2 {
   display: block;
 }
 
+.debug-log-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.debug-log-list details {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+}
+
+.debug-log-list summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.debug-log-list summary span,
+.debug-log-list summary em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.debug-log-list summary em {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-log-list pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  padding: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .memory-form {
   display: grid;
   gap: 6px;
