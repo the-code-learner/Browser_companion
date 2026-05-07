@@ -1346,6 +1346,10 @@ function runCodex(args, options = {}) {
 }
 
 function runCommand(command, args, options = {}) {
+  if (process.platform === "win32" && /\.cmd$/i.test(command) && fs.existsSync(command)) {
+    return runWindowsCommandFile(command, args, options);
+  }
+
   const result = spawnSync(command, args, {
     encoding: "utf8",
     shell: false,
@@ -1354,24 +1358,32 @@ function runCommand(command, args, options = {}) {
   });
 
   if (result.error && process.platform === "win32" && fs.existsSync(command)) {
-    const quoted = [quoteShellPath(command), ...args.map((arg) => quoteShellArg(arg))].join(" ");
-    return spawnSync("cmd.exe", ["/d", "/s", "/c", quoted], {
-      encoding: "utf8",
-      shell: false,
-      maxBuffer: 1024 * 1024 * 12,
-      ...options
-    });
+    return runWindowsCommandFile(command, args, options);
   }
 
   return result;
 }
 
+function runWindowsCommandFile(command, args, options = {}) {
+  const line = ["call", quoteCmdArg(command), ...args.map((arg) => quoteCmdArg(arg))].join(" ");
+  return spawnSync("cmd.exe", ["/d", "/c", line], {
+    encoding: "utf8",
+    shell: false,
+    maxBuffer: 1024 * 1024 * 12,
+    ...options
+  });
+}
+
 function quoteShellArg(value) {
+  return quoteCmdArg(value);
+}
+
+function quoteCmdArg(value) {
   const raw = String(value ?? "");
   if (!/[\s"&|<>^]/.test(raw)) {
     return raw;
   }
-  return `"${raw.replace(/"/g, '""')}"`;
+  return `"${raw.replace(/"/g, '\\"')}"`;
 }
 
 function resolveCodexBin() {
