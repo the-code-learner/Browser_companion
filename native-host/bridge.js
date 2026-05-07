@@ -596,21 +596,20 @@ function getProviderStatus(provider) {
   }
 
   if (provider.id !== "openai-codex") {
-    const ready = !version.error && version.status === 0;
     return {
       id: provider.id,
       label: provider.label,
       installed: true,
-      connected: ready,
-      status: ready ? "ready" : "login_required",
+      connected: true,
+      status: "ready",
       command: provider.command,
       version: compact(version.stdout || version.stderr),
       installCommand: provider.installCommand,
       models: provider.models,
       defaultModel: provider.defaultModel,
-      message: ready
-        ? `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
-        : `${provider.label} CLI is installed, but Browser Companion could not confirm a ready login session. Click Connect to open it.`
+      message: version.error || version.status !== 0
+        ? `${provider.label} CLI is installed. Browser Companion will use its cached login when selected; if auth is missing, the request will report it clearly.`
+        : `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
     };
   }
 
@@ -939,7 +938,8 @@ function writeVisiblePowerShellScript(command) {
   const commandLines = String(command || "").split(/\r?\n/).filter(Boolean);
   const lines = [
     "$ErrorActionPreference = 'Continue'",
-    `Start-Transcript -LiteralPath ${toPowerShellString(providerInstallLogPath)} -Force | Out-Null`,
+    "$browserCompanionTranscriptStarted = $false",
+    `try { Start-Transcript -LiteralPath ${toPowerShellString(providerInstallLogPath)} -Force | Out-Null; $browserCompanionTranscriptStarted = $true } catch { Write-Host ('Transcript unavailable: ' + $_.Exception.Message) }`,
     "Write-Host 'Browser Companion provider setup'",
     "Write-Host ''",
     `Set-Location -LiteralPath ${toPowerShellString(bridgeDir)}`,
@@ -957,7 +957,7 @@ function writeVisiblePowerShellScript(command) {
     "Write-Host ''",
     "Write-Host ('Command finished with exit code ' + $status + '.')",
     "Write-Host 'Return to Browser Companion and click Check.'",
-    "Stop-Transcript | Out-Null"
+    "if ($browserCompanionTranscriptStarted) { Stop-Transcript | Out-Null }"
   ];
   fs.writeFileSync(scriptPath, lines.join("\r\n"), "utf8");
   return scriptPath;
