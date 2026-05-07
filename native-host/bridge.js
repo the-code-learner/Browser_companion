@@ -837,8 +837,8 @@ function makeRunnableNpmCommand(command) {
     return command;
   }
 
-  if (npmCliPath && fs.existsSync(npmCliPath)) {
-    return `${quoteShellPath(process.execPath)} ${quoteShellPath(npmCliPath)} ${command.replace(/^npm\s+/i, "")}`;
+  if (process.platform === "win32" && npmBin && fs.existsSync(npmBin)) {
+    return `call ${quoteShellPath(npmBin)} ${command.replace(/^npm\s+/i, "")}`;
   }
 
   return `${quoteShellPath(npmBin)} ${command.replace(/^npm\s+/i, "")}`;
@@ -915,10 +915,23 @@ function writeVisibleCommandScript(command) {
   const scriptPath = path.join(os.tmpdir(), `browser-companion-${crypto.randomUUID()}.cmd`);
   const lines = [
     "@echo off",
-    `cd /d "${bridgeDir}"`,
-    ...String(command || "").split(/\r?\n/),
+    "echo Browser Companion provider setup",
     "echo.",
-    "echo Command finished. You can close this window after checking the output."
+    `cd /d "${bridgeDir}"`,
+    "echo Working directory: %CD%",
+    `echo Node: "${process.execPath}"`,
+    `echo npm: "${npmBin}"`,
+    npmCliPath ? `echo npm CLI: "${npmCliPath}"` : "echo npm CLI: not found",
+    "echo.",
+    "echo Running:",
+    ...String(command || "").split(/\r?\n/).map((line) => `echo   ${line}`),
+    "echo.",
+    ...String(command || "").split(/\r?\n/),
+    "set COMMAND_STATUS=%ERRORLEVEL%",
+    "echo.",
+    "echo Command finished with exit code %COMMAND_STATUS%.",
+    "echo You can close this window after checking the output.",
+    "exit /b %COMMAND_STATUS%"
   ];
   fs.writeFileSync(scriptPath, lines.join("\r\n"), "utf8");
   return scriptPath;
