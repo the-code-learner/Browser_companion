@@ -366,19 +366,21 @@ async function executeActionPlan(plan) {
 
   assertSupportedTab(tab);
 
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ["src/content/actions.js"]
-  });
-  await chrome.scripting.insertCSS({
-    target: { tabId: tab.id },
-    files: ["src/content/overlay.css"]
-  });
-
   const results = [];
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
 
   for (const action of actions) {
+    if (needsTabScript(action)) {
+      const permission = await ensureTabOriginPermission(tab);
+      if (!permission.ok) {
+        return {
+          ok: false,
+          error: permission.error
+        };
+      }
+      await ensureActionScripts(tab.id);
+    }
+
     const browserLevelResult = await executeBrowserLevelAction(tab, action);
     if (browserLevelResult) {
       results.push(browserLevelResult);
@@ -400,6 +402,69 @@ async function executeActionPlan(plan) {
       results
     })
   };
+}
+
+async function ensureActionScripts(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["src/content/actions.js"]
+  });
+  await chrome.scripting.insertCSS({
+    target: { tabId },
+    files: ["src/content/overlay.css"]
+  });
+}
+
+function needsTabScript(action) {
+  return ![
+    "open_url",
+    "http_request",
+    "web_search",
+    "go_back",
+    "wait_for_page_change"
+  ].includes(action?.type);
+}
+
+async function ensureTabOriginPermission(tab) {
+  if (!tab?.url) {
+    return {
+      ok: false,
+      error: "No active tab URL is available."
+    };
+  }
+
+  let originPattern;
+  try {
+    const url = new URL(tab.url);
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return { ok: true };
+    }
+    originPattern = `${url.origin}/*`;
+  } catch {
+    return {
+      ok: false,
+      error: "The current page URL cannot be accessed."
+    };
+  }
+
+  const hasPermission = await chrome.permissions.contains({
+    origins: [originPattern]
+  });
+
+  if (hasPermission) {
+    return { ok: true };
+  }
+
+  const granted = await chrome.permissions.request({
+    origins: [originPattern]
+  });
+
+  return granted
+    ? { ok: true }
+    : {
+        ok: false,
+        error: `Site access was not granted for ${originPattern}.`
+      };
 }
 
 async function executeBrowserLevelAction(tab, action) {

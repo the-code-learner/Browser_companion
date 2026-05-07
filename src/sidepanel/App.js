@@ -854,10 +854,16 @@ function getConnectorInstallCommand() {
 
 async function observePage(options = {}) {
   const silent = Boolean(options.silent);
+  const reason = options.reason || "read the current page";
 
-  if (!silent) {
+  if (!silent && !options.skipWaitingMessage) {
     state.page.status = "observing";
     state.page.summary = "Observing the active tab...";
+    state.messages.push({
+      role: "assistant",
+      text: `I need permission to ${reason}. Please approve the site access prompt, then I will continue with the page content.`,
+      createdAt: Date.now()
+    });
     render();
   }
 
@@ -1391,7 +1397,15 @@ async function getAgentResult(goal) {
   }
 
   if (!state.page.observation) {
-    await observePage();
+    const observed = await observePage({ reason: "read this page for your request" });
+    if (!observed) {
+      return {
+        type: "ask_user",
+        question: responseLanguage === "it"
+          ? "Ho bisogno del permesso di accesso al sito per leggere questa pagina. Approva il prompt del browser, poi riprova."
+          : "I need site access permission to read this page. Approve the browser prompt, then try again."
+      };
+    }
   }
 
   const deterministicPlan = buildDeterministicActionPlan(goal, responseLanguage);
@@ -1568,6 +1582,18 @@ async function confirmPendingPlan() {
 async function executeActionPlan(plan) {
   const normalizedPlan = normalizePlan(plan);
   const actions = normalizedPlan?.actions || [];
+  const permission = await ensurePermissionForActionPlan(actions);
+
+  if (!permission.ok) {
+    state.messages.push({
+      role: "assistant",
+      text: permission.error,
+      createdAt: Date.now()
+    });
+    state.activity.unshift(`Execution blocked: ${permission.error}`);
+    render();
+    return;
+  }
 
   state.activity.unshift("Executing browser action plan...");
   addActionNote("Executing browser actions", actions.map(formatActionDetail));
@@ -1605,6 +1631,48 @@ async function executeActionPlan(plan) {
     createdAt: Date.now()
   });
   await refreshPageAfterAction();
+}
+
+async function ensurePermissionForActionPlan(actions) {
+  if (!actions.some(needsActiveTabReadPermission)) {
+    return { ok: true };
+  }
+
+  const observed = await observePage({
+    reason: "read the current page for this browser action",
+    skipWaitingMessage: false
+  });
+
+  if (observed) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    error: "I need site access permission before I can read or act on this page. Approve the browser prompt, then try again."
+  };
+}
+
+function needsActiveTabReadPermission(action) {
+  return [
+    "observe_page",
+    "get_visible_text",
+    "get_links",
+    "get_buttons",
+    "get_forms",
+    "get_dom_snapshot",
+    "capture_viewport",
+    "capture_numbered_overlay",
+    "click_element",
+    "focus_element",
+    "highlight_element",
+    "fill_field",
+    "select_option",
+    "toggle_checkbox",
+    "set_radio",
+    "upload_file_to_field",
+    "click_overlay_number"
+  ].includes(action?.type);
 }
 
 async function refreshPageAfterAction() {
