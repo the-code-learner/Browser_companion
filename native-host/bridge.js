@@ -1438,7 +1438,10 @@ function buildAgentPrompt(payload, options = {}) {
   const includeSchema = Boolean(options.includeSchema);
   const compactContext = Boolean(options.compactContext);
   const toolSchema = includeSchema ? fs.readFileSync(path.join(projectRoot, "codex", "tool-schema.json"), "utf8") : "";
-  const observation = compactContext ? compactObservationForPrompt(payload.observation) : payload.observation || {};
+  const hasObservation = Boolean(payload.observation);
+  const observation = hasObservation
+    ? (compactContext ? compactObservationForPrompt(payload.observation) : payload.observation)
+    : null;
   const attachments = compactContext ? compactAttachmentsForPrompt(payload.attachments) : payload.attachments || [];
 
   return [
@@ -1454,6 +1457,9 @@ function buildAgentPrompt(payload, options = {}) {
     "",
     "Response language:",
     payload.responseLanguage || "same language as the user",
+    "",
+    "Current page observation available:",
+    hasObservation ? "yes" : "no",
     "",
     "Current page observation JSON:",
     JSON.stringify(observation, null, 2),

@@ -1669,6 +1669,42 @@ async function handleChatSubmit(event) {
 
 async function getAgentResult(goal) {
   const responseLanguage = detectUserLanguage(goal);
+  const navigationPlan = buildNavigationPlan(goal, responseLanguage);
+
+  if (navigationPlan) {
+    return navigationPlan;
+  }
+
+  if (state.connector.status === "connected") {
+    const selectedHttpProvider = getSelectedHttpProvider();
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
+      goal,
+      responseLanguage,
+      provider: state.codex.provider,
+      model: state.codex.model,
+      httpProvider: selectedHttpProvider,
+      observation: state.page.observation || null,
+      userMemory: state.userMemory.items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        content: item.content,
+        updatedAt: item.updatedAt
+      })),
+      attachments: state.attachments.map((file) => ({
+        id: file.id,
+        name: file.name,
+        type: file.type,
+        status: file.status,
+        text: state.privacy.sendAttachmentsToCodex ? file.text : ""
+      }))
+    }));
+
+    if (response.ok) {
+      return response.envelope.payload;
+    }
+
+    state.activity.unshift(`Provider request failed: ${response.error}`);
+  }
 
   if (isSimpleConversationalMessage(goal)) {
     return buildSimpleConversationalResponse(goal, responseLanguage);
@@ -1690,37 +1726,6 @@ async function getAgentResult(goal) {
 
   if (deterministicPlan) {
     return deterministicPlan;
-  }
-
-  if (state.connector.status === "connected") {
-    const selectedHttpProvider = getSelectedHttpProvider();
-    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
-      goal,
-      responseLanguage,
-      provider: state.codex.provider,
-      model: state.codex.model,
-      httpProvider: selectedHttpProvider,
-      observation: state.page.observation,
-      userMemory: state.userMemory.items.map((item) => ({
-        id: item.id,
-        title: item.title,
-        content: item.content,
-        updatedAt: item.updatedAt
-      })),
-      attachments: state.attachments.map((file) => ({
-        id: file.id,
-        name: file.name,
-        type: file.type,
-        status: file.status,
-        text: state.privacy.sendAttachmentsToCodex ? file.text : ""
-      }))
-    }));
-
-    if (response.ok) {
-      return response.envelope.payload;
-    }
-
-    state.activity.unshift(`Provider request failed: ${response.error}`);
   }
 
   return buildLocalAgentResult(goal, responseLanguage);
