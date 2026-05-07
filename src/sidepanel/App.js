@@ -1833,7 +1833,7 @@ async function handleAgentResult(result) {
     return;
   }
 
-  const responseText = result?.text || "I could not produce a safe browser action from that request yet.";
+  const responseText = getAgentDisplayText(result) || "I could not produce a safe browser action from that request yet.";
   const memorySaved = await maybeSaveDeferredMemory(responseText);
   state.messages.push({
     role: "assistant",
@@ -1841,6 +1841,22 @@ async function handleAgentResult(result) {
     createdAt: Date.now()
   });
   render();
+}
+
+function getAgentDisplayText(result) {
+  return compact(
+    result?.text
+    || result?.answer
+    || result?.response
+    || result?.message
+    || result?.result
+    || result?.output
+    || result?.summary
+    || result?.summary_for_user
+    || result?.question
+    || result?.reason
+    || ""
+  );
 }
 
 async function confirmPendingPlan() {

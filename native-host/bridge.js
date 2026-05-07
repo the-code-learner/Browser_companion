@@ -1448,23 +1448,10 @@ function parseAgentJsonOrNaturalResponse(output) {
   const text = compactProviderOutput(output);
 
   try {
-    return JSON.parse(extractJsonObject(text));
+    return normalizeAgentResponse(JSON.parse(extractJsonObject(text)));
   } catch (error) {
     if (text && !/^No JSON object found\.?$/i.test(text)) {
-      return {
-        type: "natural_response",
-        text,
-        question: "",
-        reason: "",
-        goal: "",
-        risk_level: "low",
-        summary_for_user: "",
-        needs_clarification: false,
-        requires_confirmation: false,
-        will_submit: false,
-        actions: [],
-        uncertain_fields: []
-      };
+      return makeNaturalAgentResponse(text);
     }
 
     return {
@@ -1472,6 +1459,73 @@ function parseAgentJsonOrNaturalResponse(output) {
       message: error.message || "HTTP provider response was not valid Browser Companion JSON."
     };
   }
+}
+
+function normalizeAgentResponse(response) {
+  if (!response || typeof response !== "object") {
+    return makeNaturalAgentResponse(String(response || ""));
+  }
+
+  if (!response.type) {
+    const text = pickResponseText(response);
+    return text ? makeNaturalAgentResponse(text) : response;
+  }
+
+  if (response.type === "natural_response") {
+    return {
+      ...response,
+      text: pickResponseText(response)
+    };
+  }
+
+  if (response.type === "ask_user") {
+    return {
+      ...response,
+      question: response.question || pickResponseText(response)
+    };
+  }
+
+  if (response.type === "stop_for_human") {
+    return {
+      ...response,
+      reason: response.reason || pickResponseText(response)
+    };
+  }
+
+  return response;
+}
+
+function pickResponseText(response) {
+  return compact(
+    response?.text
+    || response?.answer
+    || response?.response
+    || response?.message
+    || response?.result
+    || response?.output
+    || response?.summary
+    || response?.summary_for_user
+    || response?.question
+    || response?.reason
+    || ""
+  );
+}
+
+function makeNaturalAgentResponse(text) {
+  return {
+    type: "natural_response",
+    text,
+    question: "",
+    reason: "",
+    goal: "",
+    risk_level: "low",
+    summary_for_user: "",
+    needs_clarification: false,
+    requires_confirmation: false,
+    will_submit: false,
+    actions: [],
+    uncertain_fields: []
+  };
 }
 
 function summarizeProviderFailure(provider, result) {
