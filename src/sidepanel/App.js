@@ -111,7 +111,7 @@ function render() {
       </div>
       <div class="top-actions">
         <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-        <span class="status ${getConnectorClass()}">${escapeHtml(state.connector.status)}</span>
+        <span class="status ${getConnectorClass()}">${escapeHtml(getConnectorStatusLabel())}</span>
       </div>
     </section>
 
@@ -2343,6 +2343,16 @@ function getConnectorClass() {
   if (state.connector.status === "connected") return "ok";
   if (state.connector.status === "unknown" || state.connector.status === "connecting") return "neutral";
   return "warn";
+}
+
+function getConnectorStatusLabel() {
+  if (state.connector.status !== "connected") {
+    return state.connector.status;
+  }
+
+  const provider = getSelectedProviderStatus();
+  const name = provider?.label || "Provider";
+  return `${name} connected`;
 }
 
 function getHighestRisk(policy) {

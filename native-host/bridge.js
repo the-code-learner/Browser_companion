@@ -1219,20 +1219,34 @@ function runCliSynthesisRequest(provider, payload = {}) {
 
 function runProviderPrompt(provider, prompt, model, needsJson) {
   if (provider.id === "anthropic-claude-code") {
-    const args = ["-p", prompt];
+    const args = ["-p", "-"];
     const normalized = normalizeProviderModel(provider, model);
     if (normalized !== "default") args.unshift("--model", normalized);
-    return runCommand(provider.command, args, { timeout: 120000 });
+    return runCommand(provider.command, args, {
+      input: prompt,
+      timeout: 120000
+    });
   }
 
   if (provider.id === "google-gemini-cli") {
-    const args = ["-p", prompt];
+    const promptPath = writeTempPrompt(prompt);
+    const args = ["-p", `@${promptPath}`];
     const normalized = normalizeProviderModel(provider, model);
     if (normalized !== "default") args.unshift("-m", normalized);
-    return runCommand(provider.command, args, { timeout: 120000 });
+    try {
+      return runCommand(provider.command, args, { timeout: 120000 });
+    } finally {
+      fs.rmSync(promptPath, { force: true });
+    }
   }
 
   return runCodex(["exec", "--model", normalizeModel(model), "-"], { input: prompt, timeout: 120000 });
+}
+
+function writeTempPrompt(prompt) {
+  const promptPath = path.join(os.tmpdir(), `browser-companion-prompt-${crypto.randomUUID()}.md`);
+  fs.writeFileSync(promptPath, prompt, "utf8");
+  return promptPath;
 }
 
 function normalizeProviderModel(provider, model) {
