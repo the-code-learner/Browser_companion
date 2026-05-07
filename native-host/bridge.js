@@ -14,6 +14,7 @@ const userMemoryPath = path.join(projectRoot, "USER_MEMORY.md");
 const providerDefinitions = createProviderDefinitions();
 const codexBin = providerDefinitions["openai-codex"].command;
 const npmBin = resolveNpmBin();
+const npmCliPath = resolveNpmCliPath();
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -750,8 +751,9 @@ function installProvider(payload = {}) {
       provider: provider.id,
       installCommand: command,
       npmPath: npmBin,
+      npmCliPath,
       nodePath: process.execPath,
-      message: `Node/npm was not found by the native host. Checked npm at "${npmBin}" from Node "${process.execPath}". Install Node.js from https://nodejs.org/en/download, restart Chrome, then click Install again or run the displayed npm command manually.`
+      message: `Node/npm was not usable by the native host. Checked npm at "${npmBin}" and npm CLI at "${npmCliPath || "not found"}" from Node "${process.execPath}". Install Node.js from https://nodejs.org/en/download, restart Chrome, then click Install again or run the displayed npm command manually.`
     };
   }
 
@@ -802,6 +804,11 @@ function installNodejs() {
 }
 
 function hasNpm() {
+  if (npmCliPath && fs.existsSync(npmCliPath)) {
+    const cliResult = runCommand(process.execPath, [npmCliPath, "--version"], { timeout: 10000 });
+    return !cliResult.error && cliResult.status === 0;
+  }
+
   const result = runCommand(npmBin, ["--version"], { timeout: 10000 });
   if (!result.error && result.status === 0) {
     return true;
@@ -823,6 +830,10 @@ function hasNpm() {
 function makeRunnableNpmCommand(command) {
   if (!/^npm\s+/i.test(command)) {
     return command;
+  }
+
+  if (npmCliPath && fs.existsSync(npmCliPath)) {
+    return `${quoteShellPath(process.execPath)} ${quoteShellPath(npmCliPath)} ${command.replace(/^npm\s+/i, "")}`;
   }
 
   return `${quoteShellPath(npmBin)} ${command.replace(/^npm\s+/i, "")}`;
@@ -1277,6 +1288,19 @@ function resolveNpmBin() {
   const found = String(whereResult.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
 
   return found || "npm.cmd";
+}
+
+function resolveNpmCliPath() {
+  const npmDir = path.dirname(npmBin || "");
+  const candidates = [
+    path.join(npmDir, "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(path.dirname(process.execPath || ""), "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "nodejs", "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "nodejs", "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(process.env.LOCALAPPDATA || "", "Programs", "nodejs", "node_modules", "npm", "bin", "npm-cli.js")
+  ];
+
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
 }
 
 function findFile(root, fileName, maxDepth, depth = 0) {
