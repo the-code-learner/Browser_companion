@@ -44,6 +44,10 @@ async function handleMessage(message) {
     return installProvider(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.INSTALL_NODEJS) {
+    return installNodejs();
+  }
+
   if (message?.type === MESSAGE_TYPES.EXTRACT_ATTACHMENT) {
     return extractAttachment(message.payload);
   }
@@ -181,6 +185,23 @@ async function installProvider(payload) {
     return {
       ok: false,
       error: error.message || "Provider install could not be started."
+    };
+  }
+}
+
+async function installNodejs() {
+  try {
+    const response = await sendNativeMessage({
+      type: "nodejs_install"
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.NATIVE_STATUS, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Node.js/npm install could not be started."
     };
   }
 }

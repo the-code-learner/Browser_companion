@@ -10,6 +10,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BridgePath = Join-Path $ScriptDir "bridge.js"
 $ManifestPath = Join-Path $ScriptDir "host-manifest.generated.json"
 $NodePath = (Get-Command node).Source
+$NodeDir = Split-Path -Parent $NodePath
 $CodexCommand = Get-Command codex -ErrorAction SilentlyContinue
 
 if (-not $CodexCommand) {
@@ -23,6 +24,7 @@ $LauncherPath = Join-Path $ScriptDir "bridge-launcher.cmd"
 @"
 @echo off
 set "CODEX_BIN=$CodexPath"
+set "PATH=$NodeDir;%PATH%"
 "$NodePath" "$BridgePath"
 "@ | Set-Content -Encoding ASCII $LauncherPath
 

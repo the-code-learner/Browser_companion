@@ -186,6 +186,11 @@ function render() {
   document.querySelectorAll("[data-install-provider]").forEach((button) => {
     button.addEventListener("click", () => installProvider(button.dataset.installProvider));
   });
+  document.querySelectorAll("[data-copy-provider-command]").forEach((button) => {
+    button.addEventListener("click", () => copyProviderInstallCommand(button.dataset.copyProviderCommand));
+  });
+  const installNodejsButton = document.getElementById("install-nodejs");
+  if (installNodejsButton) installNodejsButton.addEventListener("click", installNodejs);
   const copyInstallCommand = document.getElementById("copy-install-command");
   if (copyInstallCommand) {
     copyInstallCommand.addEventListener("click", copyConnectorInstallCommand);
@@ -376,6 +381,7 @@ function renderConnectorSettings() {
         ${renderProviderCards()}
       </div>
     `}
+    ${renderProviderPrerequisites()}
     ${renderConnectorSetup()}
   `;
 }
@@ -678,11 +684,30 @@ function renderProviderCards() {
         </div>
         <div class="provider-actions">
           ${provider.installed ? `<button type="button" data-connect-provider="${escapeHtml(provider.id)}">${canConnect ? "Connect" : "Reconnect"}</button>` : ""}
+          ${provider.installed ? "" : `<button type="button" data-copy-provider-command="${escapeHtml(provider.id)}">Copy Command</button>`}
           ${provider.installed ? "" : `<button type="button" data-install-provider="${escapeHtml(provider.id)}">Install ${escapeHtml(provider.label)}</button>`}
         </div>
       </article>
     `;
   }).join("");
+}
+
+function renderProviderPrerequisites() {
+  const missingProviders = state.connector.providers.filter((provider) => !provider.installed);
+  if (!missingProviders.length) {
+    return "";
+  }
+
+  return `
+    <div class="connector-help">
+      <strong>CLI install requirements</strong>
+      <p>Provider installs require Node.js with npm available on PATH. If npm is missing, install Node.js, restart Chrome, then click Install again or run the command shown above.</p>
+      <div class="button-row">
+        <button id="install-nodejs" type="button">Install Node.js/npm</button>
+        <a href="https://nodejs.org/en/download" target="_blank" rel="noreferrer">Download Node.js</a>
+      </div>
+    </div>
+  `;
 }
 
 function normalizeProviderStatuses(providers = []) {
@@ -808,6 +833,18 @@ async function copyConnectorInstallCommand() {
   const command = getConnectorInstallCommand();
   await navigator.clipboard.writeText(command);
   state.activity.unshift("Connector install command copied.");
+  render();
+}
+
+async function copyProviderInstallCommand(providerId) {
+  const provider = state.connector.providers.find((item) => item.id === providerId) || getDefaultProviderStatus(providerId);
+  const command = provider.installCommand || "";
+  if (!command) {
+    return;
+  }
+
+  await navigator.clipboard.writeText(command);
+  state.activity.unshift(`${provider.label} install command copied.`);
   render();
 }
 
@@ -1171,6 +1208,40 @@ async function installProvider(providerId) {
   }
   state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
   state.connector.message = payload?.message || `Install request sent for ${provider.label}.`;
+  state.activity.unshift(state.connector.message);
+  persistSession();
+  render();
+}
+
+async function installNodejs() {
+  state.connector = {
+    ...state.connector,
+    status: "installing",
+    message: "Starting opt-in Node.js/npm installation."
+  };
+  state.activity.unshift("Requested opt-in Node.js/npm installation.");
+  render();
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.INSTALL_NODEJS));
+
+  if (!response.ok) {
+    state.connector = {
+      ...state.connector,
+      status: "error",
+      message: response.error
+    };
+    state.activity.unshift(`Node.js/npm install request failed: ${response.error}`);
+    render();
+    return;
+  }
+
+  const payload = response.envelope.payload;
+  if (payload?.providers) {
+    state.connector.providers = normalizeProviderStatuses(payload.providers);
+    ensureSelectedProviderAvailable();
+  }
+  state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
+  state.connector.message = payload?.message || "Node.js/npm install request sent.";
   state.activity.unshift(state.connector.message);
   persistSession();
   render();

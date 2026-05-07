@@ -5,6 +5,7 @@ export const MESSAGE_TYPES = Object.freeze({
   NATIVE_STATUS: "native_status",
   CONNECT_CODEX: "connect_codex",
   INSTALL_PROVIDER: "install_provider",
+  INSTALL_NODEJS: "install_nodejs",
   EXTRACT_ATTACHMENT: "extract_attachment",
   HTTP_REQUEST: "http_request",
   WEB_SEARCH: "web_search",

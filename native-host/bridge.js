@@ -13,6 +13,7 @@ const projectRoot = path.resolve(bridgeDir, "..");
 const userMemoryPath = path.join(projectRoot, "USER_MEMORY.md");
 const providerDefinitions = createProviderDefinitions();
 const codexBin = providerDefinitions["openai-codex"].command;
+const npmBin = resolveNpmBin();
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -47,6 +48,11 @@ function handleMessage(message) {
 
   if (message?.type === "provider_install") {
     writeMessage(installProvider(message.payload));
+    return;
+  }
+
+  if (message?.type === "nodejs_install") {
+    writeMessage(installNodejs());
     return;
   }
 
@@ -743,11 +749,12 @@ function installProvider(payload = {}) {
       status: "install_blocked",
       provider: provider.id,
       installCommand: command,
-      message: "Node/npm was not found. Install Node.js first, then run the displayed install command manually."
+      message: "Node/npm was not found on the native host PATH. Install Node.js from https://nodejs.org/en/download, restart Chrome, then click Install again or run the displayed npm command manually."
     };
   }
 
-  const child = spawnVisibleShell(`${command} && echo. && echo Installation finished. Run the provider login/connect step next.`);
+  const runnableCommand = makeRunnableNpmCommand(command);
+  const child = spawnVisibleShell(`${runnableCommand} && echo. && echo Installation finished. Run the provider login/connect step next.`);
   child?.unref?.();
 
   return {
@@ -759,9 +766,89 @@ function installProvider(payload = {}) {
   };
 }
 
+function installNodejs() {
+  if (hasNpm()) {
+    return {
+      ...getHealth(),
+      status: "ready",
+      message: "Node.js/npm is already available to the native host."
+    };
+  }
+
+  if (hasWinget()) {
+    const command = [
+      "winget install --id OpenJS.NodeJS.LTS -e --source winget",
+      "echo.",
+      "echo Node.js installation finished. Restart Chrome, then check the connector again."
+    ].join(" && ");
+    const child = spawnVisibleShell(command);
+    child?.unref?.();
+
+    return {
+      ...getHealth(),
+      status: "nodejs_install_started",
+      message: "Started Node.js/npm installation in a visible terminal. Approve any Windows prompts, then restart Chrome."
+    };
+  }
+
+  openExternalUrl("https://nodejs.org/en/download");
+  return {
+    ...getHealth(),
+    status: "nodejs_download_opened",
+    message: "Winget was not found, so the official Node.js download page was opened. Install Node.js, restart Chrome, then check the connector again."
+  };
+}
+
 function hasNpm() {
-  const result = runCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["--version"], { timeout: 10000 });
+  const result = runCommand(npmBin, ["--version"], { timeout: 10000 });
   return !result.error && result.status === 0;
+}
+
+function makeRunnableNpmCommand(command) {
+  if (!/^npm\s+/i.test(command)) {
+    return command;
+  }
+
+  return `${quoteShellPath(npmBin)} ${command.replace(/^npm\s+/i, "")}`;
+}
+
+function quoteShellPath(value) {
+  const raw = String(value || "");
+  if (process.platform === "win32") {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return `'${raw.replace(/'/g, "'\\''")}'`;
+}
+
+function hasWinget() {
+  if (process.platform !== "win32") {
+    return false;
+  }
+
+  const result = runCommand("winget.exe", ["--version"], { timeout: 10000 });
+  return !result.error && result.status === 0;
+}
+
+function openExternalUrl(url) {
+  if (process.platform === "win32") {
+    return spawn("cmd.exe", ["/c", "start", "", url], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    });
+  }
+
+  if (process.platform === "darwin") {
+    return spawn("open", [url], {
+      detached: true,
+      stdio: "ignore"
+    });
+  }
+
+  return spawn("xdg-open", [url], {
+    detached: true,
+    stdio: "ignore"
+  });
 }
 
 function spawnInteractiveProvider(provider) {
@@ -1122,6 +1209,17 @@ function resolveCodexBin() {
   }
 
   return "codex";
+}
+
+function resolveNpmBin() {
+  const executableDir = path.dirname(process.execPath || "");
+  const localNpm = path.join(executableDir, process.platform === "win32" ? "npm.cmd" : "npm");
+
+  if (fs.existsSync(localNpm)) {
+    return localNpm;
+  }
+
+  return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
 function findFile(root, fileName, maxDepth, depth = 0) {
