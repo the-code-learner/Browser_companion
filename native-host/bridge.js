@@ -16,6 +16,7 @@ const codexBin = providerDefinitions["openai-codex"].command;
 const npmBin = resolveNpmBin();
 const npmCliPath = resolveNpmCliPath();
 const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
+const providerModelCache = new Map();
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -601,6 +602,7 @@ function getProviderStatuses() {
 function getProviderStatus(provider) {
   const version = runCommand(provider.command, provider.versionArgs || ["--version"], { timeout: 10000 });
   const installed = (!version.error && version.status === 0) || commandExists(provider.command);
+  const modelInfo = getProviderModelInfo(provider, installed);
 
   if (!installed) {
     return {
@@ -611,8 +613,9 @@ function getProviderStatus(provider) {
       status: "missing",
       command: provider.command,
       installCommand: provider.installCommand,
-      models: provider.models,
-      defaultModel: provider.defaultModel,
+      models: modelInfo.models,
+      defaultModel: modelInfo.defaultModel,
+      modelDiscovery: modelInfo.discovery,
       message: `${provider.label} CLI was not found.`
     };
   }
@@ -627,8 +630,9 @@ function getProviderStatus(provider) {
       command: provider.command,
       version: compact(version.stdout || version.stderr),
       installCommand: provider.installCommand,
-      models: provider.models,
-      defaultModel: provider.defaultModel,
+      models: modelInfo.models,
+      defaultModel: modelInfo.defaultModel,
+      modelDiscovery: modelInfo.discovery,
       message: version.error || version.status !== 0
         ? `${provider.label} CLI is installed. Browser Companion will use its cached login when selected; if auth is missing, the request will report it clearly.`
         : `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
@@ -648,12 +652,62 @@ function getProviderStatus(provider) {
     command: provider.command,
     version: compact(version.stdout || version.stderr),
     installCommand: provider.installCommand,
-    models: provider.models,
-    defaultModel: provider.defaultModel,
+    models: modelInfo.models,
+    defaultModel: modelInfo.defaultModel,
+    modelDiscovery: modelInfo.discovery,
     message: loggedIn
       ? "Codex CLI is installed and signed in."
       : "Codex CLI is installed, but sign-in is required."
   };
+}
+
+function getProviderModelInfo(provider, installed) {
+  const fallback = {
+    models: provider.models,
+    defaultModel: provider.defaultModel,
+    discovery: {
+      status: "static",
+      message: "Using the provider's built-in model list."
+    }
+  };
+
+  if (!installed) {
+    return fallback;
+  }
+
+  if (provider.id === "google-gemini-cli") {
+    return getGeminiModelInfo(provider);
+  }
+
+  return fallback;
+}
+
+function getGeminiModelInfo(provider) {
+  const cached = providerModelCache.get(provider.id);
+  const now = Date.now();
+
+  if (cached && now - cached.checkedAt < 5 * 60 * 1000) {
+    return cached.value;
+  }
+
+  const help = runCommand(provider.command, ["--help"], { timeout: 8000 });
+  const output = compact(`${help.stdout || ""}\n${help.stderr || ""}`);
+  const cliCanRun = !help.error && help.status === 0;
+  const hasModelFlag = /\b-m,\s*--model\b|--model\b/i.test(output);
+  const discovery = {
+    status: cliCanRun ? "default_only" : "unavailable",
+    message: cliCanRun && hasModelFlag
+      ? "Gemini CLI supports choosing a model, but does not expose an account-specific model list through a stable command. Use default unless you know this account can access a specific model."
+      : "Gemini CLI model discovery is unavailable, so Browser Companion will use the provider default model."
+  };
+
+  const value = {
+    models: provider.models,
+    defaultModel: provider.defaultModel,
+    discovery
+  };
+  providerModelCache.set(provider.id, { checkedAt: now, value });
+  return value;
 }
 
 function summarizeProviders(providers) {
@@ -703,7 +757,7 @@ function createProviderDefinitions() {
       label: "Gemini CLI",
       command: resolveProviderCliBin("gemini"),
       installCommand: "npm install -g @google/gemini-cli",
-      models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
+      models: ["default"],
       defaultModel: "default"
     }
   };
@@ -1204,7 +1258,7 @@ function runCliAgentRequest(provider, payload = {}) {
   }
 
   const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
-  const result = runProviderPrompt(provider, prompt, payload.model, true);
+  const result = runProviderPromptWithModelFallback(provider, prompt, payload.model, true);
   if (result.error || result.status !== 0) {
     return {
       type: "agent_error",
@@ -1223,6 +1277,28 @@ function runCliAgentRequest(provider, payload = {}) {
   }
 }
 
+function runProviderPromptWithModelFallback(provider, prompt, model, needsJson) {
+  const result = runProviderPrompt(provider, prompt, model, needsJson);
+  if (!shouldRetryWithDefaultModel(provider, model, result)) {
+    return result;
+  }
+
+  const retry = runProviderPrompt(provider, prompt, provider.defaultModel, needsJson);
+  if (!retry.error && retry.status === 0) {
+    retry.stderr = compact(`${retry.stderr || ""}\nRetried with ${provider.label} default model after the selected model was unavailable.`);
+  }
+  return retry;
+}
+
+function shouldRetryWithDefaultModel(provider, model, result) {
+  if (provider.id !== "google-gemini-cli") return false;
+  if (!model || model === provider.defaultModel) return false;
+  if (!result?.error && result?.status === 0) return false;
+
+  const combined = compact(`${result?.error?.message || ""} ${result?.stderr || ""} ${result?.stdout || ""}`);
+  return /Requested entity was not found|code:\s*404|"\s*code\s*"\s*:\s*404|model.*not found|not found.*model/i.test(combined);
+}
+
 function runCliSynthesisRequest(provider, payload = {}) {
   const status = getProviderStatus(provider);
   if (!status.installed) {
@@ -1233,7 +1309,7 @@ function runCliSynthesisRequest(provider, payload = {}) {
   }
 
   const prompt = buildSynthesisPrompt(payload);
-  const result = runProviderPrompt(provider, prompt, payload.model, false);
+  const result = runProviderPromptWithModelFallback(provider, prompt, payload.model, false);
   if (result.error || result.status !== 0) {
     return {
       type: "natural_response",

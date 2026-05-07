@@ -43,7 +43,7 @@ const state = {
         connected: false,
         command: "gemini",
         installCommand: "npm install -g @google/gemini-cli",
-        models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
+        models: ["default"],
         defaultModel: "default",
         message: "Gemini CLI has not been detected."
       }
@@ -99,6 +99,7 @@ const state = {
 };
 
 const app = document.getElementById("app");
+let connectorCheckInFlight = false;
 
 initialize();
 
@@ -171,8 +172,7 @@ function render() {
   if (observePageSettings) observePageSettings.addEventListener("click", observePage);
   document.getElementById("theme-toggle").addEventListener("click", cycleTheme);
   document.getElementById("open-settings-view").addEventListener("click", () => {
-    state.view = "settings";
-    render();
+    openSettingsSection(state.settingsSection);
   });
   document.getElementById("close-settings-view").addEventListener("click", () => {
     state.view = "chat";
@@ -180,9 +180,7 @@ function render() {
   });
   document.querySelectorAll("[data-settings-section]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.settingsSection = button.dataset.settingsSection;
-      state.view = "settings";
-      render();
+      openSettingsSection(button.dataset.settingsSection);
     });
   });
   setupChatScrollControls();
@@ -223,7 +221,7 @@ function render() {
   if (codexModel) codexModel.addEventListener("change", (event) => {
     state.codex.model = event.target.value;
     state.activity.unshift(`Model set to ${state.codex.model}.`);
-    persistSession();
+    persistConnectorSelection();
     render();
   });
   const providerSelect = document.getElementById("provider-select");
@@ -232,7 +230,7 @@ function render() {
     const provider = getSelectedProviderStatus();
     state.codex.model = provider?.defaultModel || provider?.models?.[0] || "default";
     state.activity.unshift(`Provider set to ${provider?.label || state.codex.provider}.`);
-    persistSession();
+    persistConnectorSelection();
     render();
   });
   const clearActivityButton = document.getElementById("clear-activity");
@@ -325,6 +323,26 @@ function getSettingsSubtitle() {
   };
 
   return labels[state.settingsSection] || "Settings";
+}
+
+function openSettingsSection(section) {
+  state.settingsSection = section || state.settingsSection || "memory";
+  state.view = "settings";
+  render();
+
+  if (state.settingsSection === "connector") {
+    queueConnectorRefresh();
+  }
+}
+
+function queueConnectorRefresh() {
+  if (connectorCheckInFlight) {
+    return;
+  }
+
+  setTimeout(() => {
+    checkConnector();
+  }, 0);
 }
 
 function renderSettingsButton(section, label) {
@@ -769,6 +787,8 @@ function renderProviderCards() {
           <strong>${escapeHtml(provider.label)}</strong>
           <span class="provider-status">${escapeHtml(status)}</span>
           <p>${escapeHtml(provider.message || "")}</p>
+          ${provider.modelDiscovery?.message ? `<p class="memory-path">${escapeHtml(provider.modelDiscovery.message)}</p>` : ""}
+          ${provider.models?.length ? `<p class="memory-path">Models: ${escapeHtml(provider.models.join(", "))}</p>` : ""}
           ${provider.installed ? "" : `<code>${escapeHtml(provider.installCommand || "")}</code>`}
         </div>
         <div class="provider-actions">
@@ -899,7 +919,7 @@ function getDefaultProviderStatus(id) {
       label: "Gemini CLI",
       command: "gemini.cmd",
       installCommand: "npm install -g @google/gemini-cli",
-      models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
+      models: ["default"],
       defaultModel: "default"
     }
   };
@@ -1160,28 +1180,38 @@ async function ensureCurrentSitePermission() {
 }
 
 async function checkConnector() {
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.NATIVE_HEALTH));
-
-  if (!response.ok) {
-    state.connector = {
-      status: "error",
-      message: response.error,
-      providers: state.connector.providers
-    };
-    render();
+  if (connectorCheckInFlight) {
     return;
   }
 
-  const status = response.envelope.payload;
-  const providers = normalizeProviderStatuses(status.providers || []);
-  const connected = Boolean(status.connected) || providers.some((provider) => provider.connected);
-  state.connector = {
-    status: connected ? "connected" : status.status,
-    message: status.message || "Local connector status received.",
-    providers
-  };
-  ensureSelectedProviderAvailable();
-  render();
+  connectorCheckInFlight = true;
+
+  try {
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.NATIVE_HEALTH));
+
+    if (!response.ok) {
+      state.connector = {
+        status: "error",
+        message: response.error,
+        providers: state.connector.providers
+      };
+      render();
+      return;
+    }
+
+    const status = response.envelope.payload;
+    const providers = normalizeProviderStatuses(status.providers || []);
+    const connected = Boolean(status.connected) || providers.some((provider) => provider.connected);
+    state.connector = {
+      status: connected ? "connected" : status.status,
+      message: status.message || "Local connector status received.",
+      providers
+    };
+    ensureSelectedProviderAvailable();
+    render();
+  } finally {
+    connectorCheckInFlight = false;
+  }
 }
 
 async function loadUserMemory() {
@@ -1333,7 +1363,7 @@ async function connectProvider(providerId = state.codex.provider) {
     providers
   };
   ensureSelectedProviderAvailable();
-  persistSession();
+  persistConnectorSelection();
   render();
 }
 
@@ -1451,6 +1481,7 @@ async function testHttpProviderFromForm() {
   state.codex.model = selectedModel || "default";
   state.connector.message = `${state.httpProviderDraft.lastMessage} Select a model above, then Save HTTP Provider to keep it.`;
   state.activity.unshift(`HTTP provider ${state.httpProviderDraft.name} found ${models.length} model${models.length === 1 ? "" : "s"}.`);
+  persistConnectorSelection();
   render();
 }
 
@@ -1477,6 +1508,7 @@ async function saveHttpProviderFromForm(event) {
   }
   ensureSelectedProviderAvailable();
   await persistProviderSettings();
+  persistSession();
   state.connector.message = `Saved HTTP provider ${provider.name}.`;
   render();
 }
@@ -1519,6 +1551,7 @@ async function deleteHttpProvider(id) {
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
   ensureSelectedProviderAvailable();
   await persistProviderSettings();
+  persistSession();
   render();
 }
 
@@ -2825,14 +2858,28 @@ async function restoreProviderSettings() {
   const stored = await chrome.storage.local.get(["browserCompanionProviderSettings"]);
   const settings = stored.browserCompanionProviderSettings || {};
   state.httpProviders = Array.isArray(settings.httpProviders) ? settings.httpProviders : [];
+  state.codex = {
+    ...state.codex,
+    ...(settings.selectedProvider ? { provider: settings.selectedProvider } : {}),
+    ...(settings.selectedModel ? { model: settings.selectedModel } : {})
+  };
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
 }
 
 async function persistProviderSettings() {
   await chrome.storage.local.set({
     browserCompanionProviderSettings: {
-      httpProviders: state.httpProviders
+      httpProviders: state.httpProviders,
+      selectedProvider: state.codex.provider,
+      selectedModel: state.codex.model
     }
+  });
+}
+
+function persistConnectorSelection() {
+  persistSession();
+  persistProviderSettings().catch((error) => {
+    state.activity.unshift(`Provider selection could not be saved: ${error.message || error}`);
   });
 }
 

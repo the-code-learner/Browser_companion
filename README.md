@@ -73,7 +73,7 @@ Then use the Connector settings in the side panel. Browser Companion detects the
 
 Missing providers show an explicit Install button only. Browser Companion does not install Claude Code, Gemini CLI, or Codex just because they are missing. Install opens a visible terminal so the user can see and control the command. Connect is separate from Install and starts the selected provider's local sign-in flow.
 
-Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector.
+Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector. Opening the Connector settings section refreshes provider status and model metadata automatically; the Check button does the same on demand. The selected provider and model are saved as Connector settings and restored on the next side panel session. Gemini CLI is shown with the provider default model unless the CLI exposes reliable account-specific model discovery.
 
 If provider install says Node/npm is missing but Node is already installed, reload Chrome after re-registering the native host. The Windows installer now writes the Node.js directory into `native-host/bridge-launcher.cmd` so the bridge can find `npm.cmd` even when Chrome starts with a reduced PATH.
 
