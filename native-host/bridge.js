@@ -889,8 +889,8 @@ function spawnInteractiveProvider(provider) {
 
 function spawnVisibleShell(command) {
   if (process.platform === "win32") {
-    const scriptPath = writeVisibleCommandScript(command);
-    return spawn("cmd.exe", ["/k", scriptPath], {
+    const scriptPath = writeVisiblePowerShellScript(command);
+    return spawn("powershell.exe", ["-NoExit", "-ExecutionPolicy", "Bypass", "-File", scriptPath], {
       detached: true,
       stdio: "ignore",
       windowsHide: false,
@@ -909,6 +909,33 @@ function spawnVisibleShell(command) {
     detached: true,
     stdio: "ignore"
   });
+}
+
+function writeVisiblePowerShellScript(command) {
+  const scriptPath = path.join(os.tmpdir(), `browser-companion-${crypto.randomUUID()}.ps1`);
+  const commandLines = String(command || "").split(/\r?\n/).filter(Boolean);
+  const lines = [
+    "$ErrorActionPreference = 'Continue'",
+    "Write-Host 'Browser Companion provider setup'",
+    "Write-Host ''",
+    `Set-Location -LiteralPath ${toPowerShellString(bridgeDir)}`,
+    "Write-Host ('Working directory: ' + (Get-Location).Path)",
+    `Write-Host ${toPowerShellString(`Node: ${process.execPath}`)}`,
+    `Write-Host ${toPowerShellString(`npm: ${npmBin}`)}`,
+    `Write-Host ${toPowerShellString(`npm CLI: ${npmCliPath || "not found"}`)}`,
+    "Write-Host ''",
+    "Write-Host 'Running:'",
+    ...commandLines.map((line) => `Write-Host ${toPowerShellString(`  ${line}`)}`),
+    "Write-Host ''",
+    ...commandLines.map((line) => convertCmdLineToPowerShell(line)),
+    "$status = $LASTEXITCODE",
+    "if ($null -eq $status) { $status = 0 }",
+    "Write-Host ''",
+    "Write-Host ('Command finished with exit code ' + $status + '.')",
+    "Write-Host 'Return to Browser Companion and click Check.'"
+  ];
+  fs.writeFileSync(scriptPath, lines.join("\r\n"), "utf8");
+  return scriptPath;
 }
 
 function writeVisibleCommandScript(command) {
@@ -935,6 +962,24 @@ function writeVisibleCommandScript(command) {
   ];
   fs.writeFileSync(scriptPath, lines.join("\r\n"), "utf8");
   return scriptPath;
+}
+
+function convertCmdLineToPowerShell(line) {
+  const npmMatch = String(line || "").match(/^call\s+"([^"]+)"\s+(.+)$/i);
+  if (npmMatch) {
+    return `& ${toPowerShellString(npmMatch[1])} ${npmMatch[2]}`;
+  }
+
+  const quotedExeMatch = String(line || "").match(/^"([^"]+)"\s+(.+)$/);
+  if (quotedExeMatch) {
+    return `& ${toPowerShellString(quotedExeMatch[1])} ${quotedExeMatch[2]}`;
+  }
+
+  return line;
+}
+
+function toPowerShellString(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
 }
 
 function spawnLoginProcess() {
