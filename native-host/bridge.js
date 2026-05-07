@@ -889,10 +889,11 @@ function spawnInteractiveProvider(provider) {
 function spawnVisibleShell(command) {
   if (process.platform === "win32") {
     const scriptPath = writeVisibleCommandScript(command);
-    return spawn("cmd.exe", ["/c", `start "Browser Companion Provider Setup" cmd.exe /k "${scriptPath}"`], {
+    return spawn("cmd.exe", ["/k", scriptPath], {
       detached: true,
       stdio: "ignore",
-      windowsHide: false
+      windowsHide: false,
+      cwd: bridgeDir
     });
   }
 
