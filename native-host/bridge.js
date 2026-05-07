@@ -1300,9 +1300,15 @@ function summarizeProviderFailure(provider, result) {
 
 function buildAgentPrompt(payload) {
   const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
+  const toolSchema = fs.readFileSync(path.join(projectRoot, "codex", "tool-schema.json"), "utf8");
 
   return [
     systemPrompt,
+    "",
+    "Browser Companion strict response JSON schema:",
+    toolSchema,
+    "",
+    "Important for non-Codex providers: if any browser action is needed, return only one JSON object conforming to the schema above. Do not wrap it in Markdown. Do not explain outside JSON.",
     "",
     "User goal:",
     payload.goal || "",

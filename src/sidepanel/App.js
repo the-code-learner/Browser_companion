@@ -1389,6 +1389,11 @@ async function handleChatSubmit(event) {
 
 async function getAgentResult(goal) {
   const responseLanguage = detectUserLanguage(goal);
+  const deterministicPlan = buildDeterministicActionPlan(goal, responseLanguage);
+
+  if (deterministicPlan) {
+    return deterministicPlan;
+  }
 
   if (state.connector.status === "connected") {
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
@@ -1420,6 +1425,15 @@ async function getAgentResult(goal) {
   }
 
   return buildLocalAgentResult(goal, responseLanguage);
+}
+
+function buildDeterministicActionPlan(goal, responseLanguage) {
+  if (!state.page.observation) {
+    return null;
+  }
+
+  return buildNavigationPlan(goal, responseLanguage)
+    || buildRequestedClickPlan(goal, state.page.observation, responseLanguage);
 }
 
 async function handleAgentResult(result) {
@@ -1766,6 +1780,11 @@ function buildLocalAgentResult(goal, responseLanguage) {
     return navigationPlan;
   }
 
+  const clickPlan = buildRequestedClickPlan(goal, observation, responseLanguage);
+  if (clickPlan) {
+    return clickPlan;
+  }
+
   if (/\b(submit|send|accept|agree|invia|accetta|conferma|procedi)\b/i.test(lowerGoal)) {
     const finalPlan = buildFinalClickPlan(goal, observation, responseLanguage);
     if (finalPlan.actions.length > 0) {
@@ -1881,6 +1900,101 @@ function buildSearchUrl(engine, query) {
 function normalizeUrlValue(value) {
   const raw = String(value || "").trim();
   return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+}
+
+function buildRequestedClickPlan(goal, observation, responseLanguage) {
+  if (!/\b(click|clicca|press|premi|open|apri)\b/i.test(goal)) {
+    return null;
+  }
+
+  const wanted = extractRequestedElementName(goal);
+  if (!wanted) {
+    return null;
+  }
+
+  const candidates = [
+    ...(observation.links || []),
+    ...(observation.buttons || []),
+    ...(observation.interactive_elements || []).filter((item) => ["button", "link", "textbox"].includes(item.role))
+  ].filter((item) => item.agent_id && item.name);
+
+  const target = findNamedElement(candidates, wanted);
+  if (!target) {
+    return null;
+  }
+
+  return {
+    type: "agent_plan",
+    goal,
+    risk_level: "low",
+    summary_for_user: responseLanguage === "it"
+      ? `Apro l'elemento "${target.name}".`
+      : `I will open "${target.name}".`,
+    needs_clarification: false,
+    requires_confirmation: false,
+    will_submit: false,
+    actions: [
+      {
+        id: "act_click_named_001",
+        type: "click_element",
+        target: {
+          agent_id: target.agent_id,
+          role: target.role || "",
+          name: target.name || "",
+          selector_candidates: target.selector_candidates || []
+        },
+        value: "",
+        source: {
+          file_id: "current_page_observation",
+          confidence: 0.86
+        },
+        reason: responseLanguage === "it"
+          ? "L'utente ha chiesto esplicitamente di cliccare questo elemento visibile."
+          : "The user explicitly asked to click this visible element."
+      }
+    ],
+    uncertain_fields: []
+  };
+}
+
+function extractRequestedElementName(goal) {
+  const text = String(goal || "").trim();
+  const quoted = text.match(/["'“”](.+?)["'“”]/)?.[1];
+  if (quoted) return quoted.trim();
+
+  const patterns = [
+    /\b(?:link|button|pulsante|elemento)\s+(?:di|con scritto|named|called|labeled|etichettato)\s+(.+)$/i,
+    /\b(?:click|clicca|press|premi|open|apri)\s+(?:on|su|il|la|lo|l'|the)?\s*(.+)$/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return match[1].replace(/\b(link|button|pulsante|elemento)$/i, "").trim();
+    }
+  }
+
+  return "";
+}
+
+function findNamedElement(candidates, wanted) {
+  const normalizedWanted = normalizeElementName(wanted);
+  if (!normalizedWanted) {
+    return null;
+  }
+
+  return candidates.find((item) => normalizeElementName(item.name) === normalizedWanted)
+    || candidates.find((item) => normalizeElementName(item.name).includes(normalizedWanted))
+    || candidates.find((item) => normalizedWanted.includes(normalizeElementName(item.name)));
+}
+
+function normalizeElementName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function buildFinalClickPlan(goal, observation, responseLanguage) {
