@@ -668,7 +668,7 @@ function createProviderDefinitions() {
     "anthropic-claude-code": {
       id: "anthropic-claude-code",
       label: "Claude Code",
-      command: process.platform === "win32" ? "claude.cmd" : "claude",
+      command: resolveProviderCliBin("claude"),
       installCommand: "npm install -g @anthropic-ai/claude-code",
       models: ["default", "opus", "sonnet", "haiku"],
       defaultModel: "default"
@@ -676,7 +676,7 @@ function createProviderDefinitions() {
     "google-gemini-cli": {
       id: "google-gemini-cli",
       label: "Gemini CLI",
-      command: process.platform === "win32" ? "gemini.cmd" : "gemini",
+      command: resolveProviderCliBin("gemini"),
       installCommand: "npm install -g @google/gemini-cli",
       models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
       defaultModel: "default"
@@ -761,7 +761,8 @@ function installProvider(payload = {}) {
   const child = spawnVisibleShell([
     runnableCommand,
     "echo.",
-    "echo Installation finished. Run the provider login/connect step next."
+    "echo Installation finished. Return to Browser Companion and click Check.",
+    "echo Then run the provider login/connect step if it appears as installed."
   ].join("\r\n"));
   child?.unref?.();
 
@@ -1320,6 +1321,36 @@ function resolveNpmCliPath() {
   ];
 
   return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
+}
+
+function resolveProviderCliBin(commandName) {
+  if (process.platform !== "win32") {
+    return commandName;
+  }
+
+  const fileName = `${commandName}.cmd`;
+  const candidates = [
+    path.join(process.env.APPDATA || "", "npm", fileName),
+    path.join(process.env.LOCALAPPDATA || "", "npm", fileName),
+    path.join(process.env.USERPROFILE || "", "AppData", "Roaming", "npm", fileName),
+    path.join(path.dirname(process.execPath || ""), fileName),
+    fileName
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && candidate !== fileName && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  const whereResult = spawnSync("where.exe", [fileName], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true
+  });
+  const found = String(whereResult.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+
+  return found || fileName;
 }
 
 function findFile(root, fileName, maxDepth, depth = 0) {

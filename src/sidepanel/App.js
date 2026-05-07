@@ -759,7 +759,7 @@ function getDefaultProviderStatus(id) {
     "google-gemini-cli": {
       id: "google-gemini-cli",
       label: "Gemini CLI",
-      command: "gemini",
+      command: "gemini.cmd",
       installCommand: "npm install -g @google/gemini-cli",
       models: ["default", "gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"],
       defaultModel: "default"
@@ -1208,7 +1208,7 @@ async function installProvider(providerId) {
   }
   state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
   state.connector.message = payload?.message || `Install request sent for ${provider.label}.`;
-  state.activity.unshift(state.connector.message);
+  state.activity.unshift(`${state.connector.message} Wait for the terminal to finish, then click Check.`);
   persistSession();
   render();
 }
