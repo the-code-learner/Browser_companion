@@ -1208,6 +1208,9 @@ async function installProvider(providerId) {
   }
   state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
   state.connector.message = payload?.message || `Install request sent for ${provider.label}.`;
+  if (payload?.logPath) {
+    state.connector.message = `${state.connector.message} Log: ${payload.logPath}`;
+  }
   state.activity.unshift(`${state.connector.message} Wait for the terminal to finish, then click Check.`);
   persistSession();
   render();
@@ -1242,6 +1245,9 @@ async function installNodejs() {
   }
   state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
   state.connector.message = payload?.message || "Node.js/npm install request sent.";
+  if (payload?.logPath) {
+    state.connector.message = `${state.connector.message} Log: ${payload.logPath}`;
+  }
   state.activity.unshift(state.connector.message);
   persistSession();
   render();

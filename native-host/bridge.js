@@ -15,6 +15,7 @@ const providerDefinitions = createProviderDefinitions();
 const codexBin = providerDefinitions["openai-codex"].command;
 const npmBin = resolveNpmBin();
 const npmCliPath = resolveNpmCliPath();
+const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -771,7 +772,8 @@ function installProvider(payload = {}) {
     status: "install_started",
     provider: provider.id,
     installCommand: command,
-    message: `Started opt-in installation for ${provider.label} in a visible terminal.`
+    logPath: providerInstallLogPath,
+    message: `Started opt-in installation for ${provider.label}. A visible terminal should open; if it does not, check ${providerInstallLogPath}.`
   };
 }
 
@@ -796,7 +798,8 @@ function installNodejs() {
     return {
       ...getHealth(),
       status: "nodejs_install_started",
-      message: "Started Node.js/npm installation in a visible terminal. Approve any Windows prompts, then restart Chrome."
+      logPath: providerInstallLogPath,
+      message: `Started Node.js/npm installation. A visible terminal should open; if it does not, check ${providerInstallLogPath}. Approve any Windows prompts, then restart Chrome.`
     };
   }
 
@@ -890,7 +893,8 @@ function spawnInteractiveProvider(provider) {
 function spawnVisibleShell(command) {
   if (process.platform === "win32") {
     const scriptPath = writeVisiblePowerShellScript(command);
-    return spawn("powershell.exe", ["-NoExit", "-ExecutionPolicy", "Bypass", "-File", scriptPath], {
+    const launcherPath = writeVisiblePowerShellLauncher(scriptPath);
+    return spawn("cmd.exe", ["/k", launcherPath], {
       detached: true,
       stdio: "ignore",
       windowsHide: false,
@@ -916,6 +920,7 @@ function writeVisiblePowerShellScript(command) {
   const commandLines = String(command || "").split(/\r?\n/).filter(Boolean);
   const lines = [
     "$ErrorActionPreference = 'Continue'",
+    `Start-Transcript -LiteralPath ${toPowerShellString(providerInstallLogPath)} -Force | Out-Null`,
     "Write-Host 'Browser Companion provider setup'",
     "Write-Host ''",
     `Set-Location -LiteralPath ${toPowerShellString(bridgeDir)}`,
@@ -932,10 +937,27 @@ function writeVisiblePowerShellScript(command) {
     "if ($null -eq $status) { $status = 0 }",
     "Write-Host ''",
     "Write-Host ('Command finished with exit code ' + $status + '.')",
-    "Write-Host 'Return to Browser Companion and click Check.'"
+    "Write-Host 'Return to Browser Companion and click Check.'",
+    "Stop-Transcript | Out-Null"
   ];
   fs.writeFileSync(scriptPath, lines.join("\r\n"), "utf8");
   return scriptPath;
+}
+
+function writeVisiblePowerShellLauncher(scriptPath) {
+  const launcherPath = path.join(os.tmpdir(), `browser-companion-launch-${crypto.randomUUID()}.cmd`);
+  const lines = [
+    "@echo off",
+    "echo Browser Companion provider setup launcher",
+    `echo Log: ${providerInstallLogPath}`,
+    "echo.",
+    `powershell.exe -NoExit -ExecutionPolicy Bypass -File "${scriptPath}"`,
+    "echo.",
+    "echo PowerShell exited or could not start. Check the log path above.",
+    "pause"
+  ];
+  fs.writeFileSync(launcherPath, lines.join("\r\n"), "utf8");
+  return launcherPath;
 }
 
 function writeVisibleCommandScript(command) {
