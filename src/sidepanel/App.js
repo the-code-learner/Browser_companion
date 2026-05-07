@@ -69,7 +69,7 @@ const state = {
   pendingPolicy: null,
   confirmationText: "",
   privacy: {
-    persistSession: false,
+    persistSession: true,
     sendAttachmentsToCodex: true
   },
   codex: {
@@ -1823,12 +1823,13 @@ async function handleAgentResult(result) {
   }
 
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
+    const provider = getSelectedProviderStatus();
     state.messages.push({
       role: "assistant",
       text: result.message || "The selected local provider is not ready, so I used only local page context.",
       createdAt: Date.now()
     });
-    state.activity.unshift("Codex agent was unavailable.");
+    state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
     render();
     return;
   }
@@ -2804,6 +2805,7 @@ async function restoreSession() {
   state.theme = stored.browserCompanionTheme || "system";
 
   if (!session?.privacy?.persistSession) {
+    state.privacy.persistSession = true;
     return;
   }
 

@@ -1530,13 +1530,40 @@ function makeNaturalAgentResponse(text) {
 
 function summarizeProviderFailure(provider, result) {
   const combined = compact(stripProviderNoise(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`));
+  const parsedError = parseProviderErrorMessage(combined);
+  const message = parsedError || combined;
+
+  if (/Requested entity was not found|code:\s*404|"\s*code\s*"\s*:\s*404|model.*not found|not found.*model/i.test(message)) {
+    return `${provider.label} could not find the requested model. Open Connector, choose a model this account can use, or select the provider default model and try again.`;
+  }
+
   if (/auth|login|sign in|unauthorized|permission/i.test(combined)) {
     return `${provider.label} appears to need sign-in. Open Connector and click Connect for this provider.`;
   }
   if (/quota|capacity|exhausted/i.test(combined)) {
     return `${provider.label} is temporarily rate-limited or out of capacity. Try again shortly or switch provider.`;
   }
-  return combined.slice(-800) || `${provider.label} request failed.`;
+  return message.slice(-800) || `${provider.label} request failed.`;
+}
+
+function parseProviderErrorMessage(text) {
+  const raw = String(text || "");
+  const jsonMatches = raw.match(/\{[\s\S]*?\}/g) || [];
+
+  for (const candidate of jsonMatches.reverse()) {
+    try {
+      const parsed = JSON.parse(candidate);
+      const message = parsed.error?.message || parsed.message || parsed.error?.type || "";
+      if (message) return compact(message);
+    } catch {
+      // Continue scanning smaller embedded JSON snippets.
+    }
+  }
+
+  const requestedEntity = raw.match(/Requested entity was not found\.?/i)?.[0];
+  if (requestedEntity) return requestedEntity;
+
+  return "";
 }
 
 function buildAgentPrompt(payload, options = {}) {
