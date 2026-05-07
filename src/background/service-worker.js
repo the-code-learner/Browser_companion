@@ -48,6 +48,10 @@ async function handleMessage(message) {
     return installNodejs();
   }
 
+  if (message?.type === MESSAGE_TYPES.HTTP_PROVIDER_TEST) {
+    return testHttpProvider(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.EXTRACT_ATTACHMENT) {
     return extractAttachment(message.payload);
   }
@@ -202,6 +206,24 @@ async function installNodejs() {
     return {
       ok: false,
       error: error.message || "Node.js/npm install could not be started."
+    };
+  }
+}
+
+async function testHttpProvider(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "http_provider_test",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.HTTP_PROVIDER_TEST, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "HTTP provider test failed."
     };
   }
 }

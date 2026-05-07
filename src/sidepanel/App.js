@@ -76,6 +76,15 @@ const state = {
     provider: "openai-codex",
     model: "gpt-5.5"
   },
+  httpProviders: [],
+  httpProviderDraft: {
+    id: "",
+    name: "",
+    baseUrl: "",
+    username: "",
+    password: "",
+    model: ""
+  },
   userMemory: {
     status: "unknown",
     message: "User memory has not been loaded.",
@@ -94,6 +103,7 @@ const app = document.getElementById("app");
 initialize();
 
 async function initialize() {
+  await restoreProviderSettings();
   await restoreSession();
   applyTheme();
   render();
@@ -191,6 +201,16 @@ function render() {
   });
   const installNodejsButton = document.getElementById("install-nodejs");
   if (installNodejsButton) installNodejsButton.addEventListener("click", installNodejs);
+  const httpProviderForm = document.getElementById("http-provider-form");
+  if (httpProviderForm) httpProviderForm.addEventListener("submit", saveHttpProviderFromForm);
+  const testHttpProviderButton = document.getElementById("test-http-provider");
+  if (testHttpProviderButton) testHttpProviderButton.addEventListener("click", testHttpProviderFromForm);
+  document.querySelectorAll("[data-http-provider-edit]").forEach((button) => {
+    button.addEventListener("click", () => editHttpProvider(button.dataset.httpProviderEdit));
+  });
+  document.querySelectorAll("[data-http-provider-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteHttpProvider(button.dataset.httpProviderDelete));
+  });
   const copyInstallCommand = document.getElementById("copy-install-command");
   if (copyInstallCommand) {
     copyInstallCommand.addEventListener("click", copyConnectorInstallCommand);
@@ -381,8 +401,45 @@ function renderConnectorSettings() {
         ${renderProviderCards()}
       </div>
     `}
+    ${renderHttpProviderSettings()}
     ${renderProviderPrerequisites()}
     ${renderConnectorSetup()}
+  `;
+}
+
+function renderHttpProviderSettings() {
+  return `
+    <div class="connector-help">
+      <strong>OpenAI-compatible HTTP provider</strong>
+      <p>Use this for a local or private server such as llama.cpp, LocalAI, LiteLLM, vLLM, or a custom OpenAI-compatible proxy. Observed page content can be sent to this URL when selected.</p>
+      <form id="http-provider-form" class="memory-form">
+        <input id="http-provider-name" type="text" placeholder="Name" value="${escapeHtml(state.httpProviderDraft.name)}">
+        <input id="http-provider-base-url" type="url" placeholder="Base URL, e.g. http://192.168.0.10:8080" value="${escapeHtml(state.httpProviderDraft.baseUrl)}">
+        <input id="http-provider-username" type="text" placeholder="Basic auth username" value="${escapeHtml(state.httpProviderDraft.username)}">
+        <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password)}">
+        <input id="http-provider-model" type="text" placeholder="Model, filled by Test if available" value="${escapeHtml(state.httpProviderDraft.model)}">
+        <div class="button-row">
+          <button id="test-http-provider" type="button">Test</button>
+          <button type="submit">Save HTTP Provider</button>
+        </div>
+      </form>
+      <ul class="compact-list">
+        ${state.httpProviders.length ? state.httpProviders.map(renderHttpProviderItem).join("") : "<li>No HTTP providers saved.</li>"}
+      </ul>
+    </div>
+  `;
+}
+
+function renderHttpProviderItem(provider) {
+  return `
+    <li>
+      <strong>${escapeHtml(provider.name)}</strong>
+      <span>${escapeHtml(provider.baseUrl)} - ${escapeHtml(provider.model || "No model selected")}</span>
+      <div class="button-row">
+        <button type="button" data-http-provider-edit="${escapeHtml(provider.id)}">Edit</button>
+        <button type="button" data-http-provider-delete="${escapeHtml(provider.id)}">Delete</button>
+      </div>
+    </li>
   `;
 }
 
@@ -713,7 +770,7 @@ function renderProviderPrerequisites() {
 function normalizeProviderStatuses(providers = []) {
   const byId = new Map((Array.isArray(providers) ? providers : []).map((provider) => [provider.id, provider]));
 
-  return getDefaultProviderStatuses().map((fallback) => {
+  const cliProviders = getDefaultProviderStatuses().map((fallback) => {
     const provider = {
       ...fallback,
       ...(byId.get(fallback.id) || {})
@@ -728,6 +785,27 @@ function normalizeProviderStatuses(providers = []) {
       statusLabel: getProviderStatusLabel({ ...provider, installed, connected })
     };
   });
+
+  return [
+    ...cliProviders,
+    ...state.httpProviders.map(httpProviderToStatus)
+  ];
+}
+
+function httpProviderToStatus(provider) {
+  return {
+    id: `http:${provider.id}`,
+    label: provider.name || "HTTP Provider",
+    status: provider.lastStatus || "ready",
+    statusLabel: provider.lastStatus === "error" ? "Error" : "Connected",
+    installed: true,
+    connected: provider.lastStatus !== "error",
+    command: provider.baseUrl,
+    installCommand: "",
+    models: provider.models?.length ? provider.models : [provider.model || "default"],
+    defaultModel: provider.model || provider.models?.[0] || "default",
+    message: provider.lastMessage || "OpenAI-compatible HTTP provider is configured."
+  };
 }
 
 function getDefaultProviderStatuses() {
@@ -1021,8 +1099,9 @@ async function checkConnector() {
 
   const status = response.envelope.payload;
   const providers = normalizeProviderStatuses(status.providers || []);
+  const connected = Boolean(status.connected) || providers.some((provider) => provider.connected);
   state.connector = {
-    status: status.connected ? "connected" : status.status,
+    status: connected ? "connected" : status.status,
     message: status.message || "Local connector status received.",
     providers
   };
@@ -1172,8 +1251,9 @@ async function connectProvider(providerId = state.codex.provider) {
 
   const status = response.envelope.payload;
   const providers = normalizeProviderStatuses(status.providers || []);
+  const connected = Boolean(status.connected) || providers.some((provider) => provider.connected);
   state.connector = {
-    status: status.connected ? "connected" : status.status,
+    status: connected ? "connected" : status.status,
     message: status.message || "Connector response received.",
     providers
   };
@@ -1212,7 +1292,9 @@ async function installProvider(providerId) {
     state.connector.providers = normalizeProviderStatuses(payload.providers);
     ensureSelectedProviderAvailable();
   }
-  state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
+  state.connector.status = payload?.connected || state.connector.providers.some((provider) => provider.connected)
+    ? "connected"
+    : (payload?.status || state.connector.status);
   state.connector.message = payload?.message || `Install request sent for ${provider.label}.`;
   if (payload?.logPath) {
     state.connector.message = `${state.connector.message} Log: ${payload.logPath}`;
@@ -1249,7 +1331,9 @@ async function installNodejs() {
     state.connector.providers = normalizeProviderStatuses(payload.providers);
     ensureSelectedProviderAvailable();
   }
-  state.connector.status = payload?.connected ? "connected" : (payload?.status || state.connector.status);
+  state.connector.status = payload?.connected || state.connector.providers.some((provider) => provider.connected)
+    ? "connected"
+    : (payload?.status || state.connector.status);
   state.connector.message = payload?.message || "Node.js/npm install request sent.";
   if (payload?.logPath) {
     state.connector.message = `${state.connector.message} Log: ${payload.logPath}`;
@@ -1257,6 +1341,115 @@ async function installNodejs() {
   state.activity.unshift(state.connector.message);
   persistSession();
   render();
+}
+
+async function testHttpProviderFromForm() {
+  const provider = readHttpProviderDraft();
+  if (!provider.baseUrl) {
+    state.connector.message = "HTTP provider Base URL is required.";
+    render();
+    return;
+  }
+
+  state.connector.message = `Testing ${provider.name || provider.baseUrl}...`;
+  render();
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.HTTP_PROVIDER_TEST, provider));
+  if (!response.ok) {
+    state.connector.message = response.error;
+    render();
+    return;
+  }
+
+  const payload = response.envelope.payload;
+  const models = payload.models || [];
+  state.httpProviderDraft = {
+    ...provider,
+    model: provider.model || models[0] || "",
+    models,
+    lastStatus: payload.status || "ready",
+    lastMessage: payload.message || "HTTP provider test completed."
+  };
+  state.connector.message = state.httpProviderDraft.lastMessage;
+  render();
+}
+
+async function saveHttpProviderFromForm(event) {
+  event.preventDefault();
+  const provider = readHttpProviderDraft();
+  if (!provider.baseUrl) {
+    state.connector.message = "HTTP provider Base URL is required.";
+    render();
+    return;
+  }
+
+  const existingIndex = state.httpProviders.findIndex((item) => item.id === provider.id);
+  if (existingIndex >= 0) {
+    state.httpProviders[existingIndex] = provider;
+  } else {
+    state.httpProviders.push(provider);
+  }
+  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "" };
+  state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+  ensureSelectedProviderAvailable();
+  await persistProviderSettings();
+  state.connector.message = `Saved HTTP provider ${provider.name}.`;
+  render();
+}
+
+function readHttpProviderDraft() {
+  const existingId = state.httpProviderDraft.id || "";
+  const name = document.getElementById("http-provider-name")?.value.trim() || "Local LLM";
+  const baseUrl = document.getElementById("http-provider-base-url")?.value.trim().replace(/\/+$/, "") || "";
+  const username = document.getElementById("http-provider-username")?.value.trim() || "";
+  const password = document.getElementById("http-provider-password")?.value || "";
+  const model = document.getElementById("http-provider-model")?.value.trim() || "";
+  return {
+    ...state.httpProviderDraft,
+    id: existingId || crypto.randomUUID(),
+    name,
+    baseUrl,
+    username,
+    password,
+    authType: username || password ? "basic" : "none",
+    model,
+    models: state.httpProviderDraft.models || (model ? [model] : []),
+    lastStatus: state.httpProviderDraft.lastStatus || "ready",
+    lastMessage: state.httpProviderDraft.lastMessage || "OpenAI-compatible HTTP provider is configured."
+  };
+}
+
+function editHttpProvider(id) {
+  const provider = state.httpProviders.find((item) => item.id === id);
+  if (!provider) return;
+  state.httpProviderDraft = { ...provider };
+  render();
+}
+
+async function deleteHttpProvider(id) {
+  state.httpProviders = state.httpProviders.filter((provider) => provider.id !== id);
+  if (state.codex.provider === `http:${id}`) {
+    state.codex.provider = "openai-codex";
+    state.codex.model = "gpt-5.5";
+  }
+  state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+  ensureSelectedProviderAvailable();
+  await persistProviderSettings();
+  render();
+}
+
+function getSelectedHttpProvider() {
+  if (!state.codex.provider.startsWith("http:")) {
+    return null;
+  }
+
+  const id = state.codex.provider.slice("http:".length);
+  const provider = state.httpProviders.find((item) => item.id === id);
+  if (!provider) return null;
+  return {
+    ...provider,
+    model: state.codex.model || provider.model
+  };
 }
 
 async function handleAttachments(event) {
@@ -1415,11 +1608,13 @@ async function getAgentResult(goal) {
   }
 
   if (state.connector.status === "connected") {
+    const selectedHttpProvider = getSelectedHttpProvider();
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, {
       goal,
       responseLanguage,
       provider: state.codex.provider,
       model: state.codex.model,
+      httpProvider: selectedHttpProvider,
       observation: state.page.observation,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
@@ -2335,11 +2530,13 @@ async function maybeSynthesizeResults(plan, results) {
   }
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
+  const selectedHttpProvider = getSelectedHttpProvider();
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, {
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
     provider: state.codex.provider,
     model: state.codex.model,
+    httpProvider: selectedHttpProvider,
     observation: state.page.observation,
     userMemory: state.userMemory.items.map((item) => ({
       id: item.id,
@@ -2511,6 +2708,21 @@ async function restoreSession() {
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];
   state.activity = session.activity || [];
+}
+
+async function restoreProviderSettings() {
+  const stored = await chrome.storage.local.get(["browserCompanionProviderSettings"]);
+  const settings = stored.browserCompanionProviderSettings || {};
+  state.httpProviders = Array.isArray(settings.httpProviders) ? settings.httpProviders : [];
+  state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+}
+
+async function persistProviderSettings() {
+  await chrome.storage.local.set({
+    browserCompanionProviderSettings: {
+      httpProviders: state.httpProviders
+    }
+  });
 }
 
 function persistSession() {

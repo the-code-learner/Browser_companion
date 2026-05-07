@@ -53,18 +53,40 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "http_provider_test") {
+    testHttpProvider(message.payload)
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "http_provider_test",
+        status: "error",
+        models: [],
+        message: error.message || "HTTP provider test failed."
+      }));
+    return;
+  }
+
   if (message?.type === "nodejs_install") {
     writeMessage(installNodejs());
     return;
   }
 
   if (message?.type === "agent_request") {
-    writeMessage(runAgentRequest(message.payload));
+    Promise.resolve(runAgentRequest(message.payload))
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "agent_error",
+        message: error.message || "Agent request failed."
+      }));
     return;
   }
 
   if (message?.type === "synthesis_request") {
-    writeMessage(runSynthesisRequest(message.payload));
+    Promise.resolve(runSynthesisRequest(message.payload))
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "natural_response",
+        text: error.message || "Synthesis request failed."
+      }));
     return;
   }
 
@@ -1053,6 +1075,10 @@ function spawnLoginProcess() {
 }
 
 function runAgentRequest(payload = {}) {
+  if (payload.httpProvider) {
+    return runHttpProviderAgentRequest(payload.httpProvider, payload);
+  }
+
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
   if (provider.id !== "openai-codex") {
     return runCliAgentRequest(provider, payload);
@@ -1113,6 +1139,10 @@ function runAgentRequest(payload = {}) {
 }
 
 function runSynthesisRequest(payload = {}) {
+  if (payload.httpProvider) {
+    return runHttpProviderSynthesisRequest(payload.httpProvider, payload);
+  }
+
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
   if (provider.id !== "openai-codex") {
     return runCliSynthesisRequest(provider, payload);
@@ -1215,6 +1245,111 @@ function runCliSynthesisRequest(provider, payload = {}) {
     type: "natural_response",
     text: compactProviderOutput(result.stdout || result.stderr || "")
   };
+}
+
+async function testHttpProvider(provider = {}) {
+  const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
+  const response = await fetch(`${baseUrl}/v1/models`, {
+    method: "GET",
+    headers: getHttpProviderHeaders(provider)
+  });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} while reading /v1/models: ${text.slice(0, 300)}`);
+  }
+
+  const json = JSON.parse(text);
+  const models = Array.isArray(json.data)
+    ? json.data.map((item) => item.id).filter(Boolean)
+    : [];
+
+  return {
+    type: "http_provider_test",
+    status: "ready",
+    models,
+    message: models.length
+      ? `HTTP provider is reachable. Found ${models.length} model${models.length === 1 ? "" : "s"}.`
+      : "HTTP provider is reachable, but no models were returned."
+  };
+}
+
+function runHttpProviderAgentRequest(provider, payload = {}) {
+  const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
+  return runHttpProviderCompletion(provider, prompt, true)
+    .then((text) => {
+      const output = compactProviderOutput(text);
+      return JSON.parse(extractJsonObject(output));
+    })
+    .catch((error) => ({
+      type: "agent_error",
+      message: error.message || "HTTP provider request failed."
+    }));
+}
+
+function runHttpProviderSynthesisRequest(provider, payload = {}) {
+  const prompt = buildSynthesisPrompt({
+    ...payload,
+    observation: compactObservationForPrompt(payload.observation)
+  });
+  return runHttpProviderCompletion(provider, prompt, false)
+    .then((text) => ({
+      type: "natural_response",
+      text: compactProviderOutput(text)
+    }))
+    .catch((error) => ({
+      type: "natural_response",
+      text: error.message || "HTTP provider synthesis failed."
+    }));
+}
+
+async function runHttpProviderCompletion(provider, prompt, wantsJson) {
+  const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      ...getHttpProviderHeaders(provider),
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: provider.model,
+      messages: [
+        {
+          role: "user",
+          content: wantsJson
+            ? `${prompt}\n\nReturn only valid JSON.`
+            : prompt
+        }
+      ],
+      temperature: 0.2,
+      stream: false
+    }),
+    signal: AbortSignal.timeout(120000)
+  });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`HTTP provider returned ${response.status}: ${text.slice(0, 500)}`);
+  }
+
+  const json = JSON.parse(text);
+  return json.choices?.[0]?.message?.content || json.choices?.[0]?.text || text;
+}
+
+function normalizeHttpProviderBaseUrl(baseUrl) {
+  const value = String(baseUrl || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(value)) {
+    throw new Error("HTTP provider Base URL must start with http:// or https://.");
+  }
+  return value;
+}
+
+function getHttpProviderHeaders(provider = {}) {
+  const headers = {};
+  if (provider.authType === "basic" && (provider.username || provider.password)) {
+    headers.authorization = `Basic ${Buffer.from(`${provider.username || ""}:${provider.password || ""}`).toString("base64")}`;
+  }
+  return headers;
 }
 
 function runProviderPrompt(provider, prompt, model, needsJson) {
