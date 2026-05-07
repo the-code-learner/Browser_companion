@@ -150,7 +150,7 @@ function render() {
       <summary>
         <span class="eyebrow">Current page</span>
         <strong>${escapeHtml(state.page.title)}</strong>
-        <button id="observe-page" type="button">Observe</button>
+        <button id="observe-page" type="button">${escapeHtml(getObserveButtonText())}</button>
       </summary>
       <p>${escapeHtml(state.page.summary)}</p>
       ${state.page.url ? `<p class="memory-path">${escapeHtml(state.page.url)}</p>` : ""}
@@ -373,8 +373,21 @@ function renderCurrentPageSettings() {
       <p>${escapeHtml(state.page.summary)}</p>
       ${state.page.url ? `<p class="memory-path">${escapeHtml(state.page.url)}</p>` : ""}
     </div>
-    <button id="observe-page-settings" type="button">Observe</button>
+    <button id="observe-page-settings" type="button">${escapeHtml(getObserveButtonText())}</button>
   `;
+}
+
+function getObserveButtonText() {
+  const summary = String(state.page.summary || "");
+  if (state.page.status === "error" && /site access|Chrome could not show|not granted/i.test(summary)) {
+    return "Grant Site Access";
+  }
+
+  if (state.page.status === "observing") {
+    return "Observing...";
+  }
+
+  return "Observe";
 }
 
 function renderConnectorSettings() {
@@ -417,7 +430,7 @@ function renderHttpProviderSettings() {
         <input id="http-provider-base-url" type="url" placeholder="Base URL, e.g. http://192.168.0.10:8080" value="${escapeHtml(state.httpProviderDraft.baseUrl)}">
         <input id="http-provider-username" type="text" placeholder="Basic auth username" value="${escapeHtml(state.httpProviderDraft.username)}">
         <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password)}">
-        <input id="http-provider-model" type="text" placeholder="Model, filled by Test if available" value="${escapeHtml(state.httpProviderDraft.model)}">
+        ${renderHttpProviderModelControl()}
         <div class="button-row">
           <button id="test-http-provider" type="button">Test</button>
           <button type="submit">Save HTTP Provider</button>
@@ -427,6 +440,25 @@ function renderHttpProviderSettings() {
         ${state.httpProviders.length ? state.httpProviders.map(renderHttpProviderItem).join("") : "<li>No HTTP providers saved.</li>"}
       </ul>
     </div>
+  `;
+}
+
+function renderHttpProviderModelControl() {
+  const models = state.httpProviderDraft.models || [];
+  if (!models.length) {
+    return `<input id="http-provider-model" type="text" placeholder="Model, filled by Test if available" value="${escapeHtml(state.httpProviderDraft.model)}">`;
+  }
+
+  const options = models.map((model) => {
+    const selected = model === state.httpProviderDraft.model ? "selected" : "";
+    return `<option value="${escapeHtml(model)}" ${selected}>${escapeHtml(model)}</option>`;
+  }).join("");
+
+  return `
+    <label class="field-stack compact-field">
+      <span>HTTP model</span>
+      <select id="http-provider-model">${options}</select>
+    </label>
   `;
 }
 
@@ -788,14 +820,42 @@ function normalizeProviderStatuses(providers = []) {
 
   return [
     ...cliProviders,
-    ...state.httpProviders.map(httpProviderToStatus)
+    ...getHttpProviderStatusSources().map(httpProviderToStatus)
   ];
 }
 
+function getHttpProviderStatusSources() {
+  const providers = [...state.httpProviders];
+  const draft = state.httpProviderDraft;
+  const hasTestedDraft = draft?.id && draft.baseUrl && (draft.models?.length || draft.lastStatus);
+
+  if (!hasTestedDraft) {
+    return providers;
+  }
+
+  const existingIndex = providers.findIndex((provider) => provider.id === draft.id);
+  const testedDraft = {
+    ...draft,
+    temporary: existingIndex < 0
+  };
+
+  if (existingIndex >= 0) {
+    providers[existingIndex] = {
+      ...providers[existingIndex],
+      ...testedDraft
+    };
+  } else {
+    providers.push(testedDraft);
+  }
+
+  return providers;
+}
+
 function httpProviderToStatus(provider) {
+  const label = provider.name || "HTTP Provider";
   return {
     id: `http:${provider.id}`,
-    label: provider.name || "HTTP Provider",
+    label: provider.temporary ? `${label} (unsaved)` : label,
     status: provider.lastStatus || "ready",
     statusLabel: provider.lastStatus === "error" ? "Error" : "Connected",
     installed: true,
@@ -936,12 +996,7 @@ async function observePage(options = {}) {
 
   if (!silent && !options.skipWaitingMessage) {
     state.page.status = "observing";
-    state.page.summary = "Observing the active tab...";
-    state.messages.push({
-      role: "assistant",
-      text: `I need permission to ${reason}. Please approve the site access prompt, then I will continue with the page content.`,
-      createdAt: Date.now()
-    });
+    state.page.summary = `Requesting site access to ${reason}...`;
     render();
   }
 
@@ -951,10 +1006,21 @@ async function observePage(options = {}) {
     if (!silent) {
       state.page.status = "error";
       state.page.summary = permission.error;
+      state.messages.push({
+        role: "assistant",
+        text: permission.error,
+        createdAt: Date.now()
+      });
     }
     state.activity.unshift(`Observation blocked: ${permission.error}`);
     render();
     return null;
+  }
+
+  if (!silent) {
+    state.page.status = "observing";
+    state.page.summary = "Observing the active tab...";
+    render();
   }
 
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.OBSERVE_ACTIVE_TAB));
@@ -1069,18 +1135,27 @@ async function ensureCurrentSitePermission() {
   });
 
   if (hasPermission) {
-    return { ok: true };
+    return { ok: true, requested: false };
   }
 
-  const granted = await chrome.permissions.request({
-    origins: [originPattern]
-  });
+  let granted = false;
+
+  try {
+    granted = await chrome.permissions.request({
+      origins: [originPattern]
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Chrome could not show the site access prompt for ${originPattern}. Click Observe or retry from the side panel, then approve site access when Chrome shows the prompt.`
+    };
+  }
 
   return granted
-    ? { ok: true }
+    ? { ok: true, requested: true }
     : {
         ok: false,
-        error: `Site access was not granted for ${originPattern}.`
+        error: `Site access was not granted for ${originPattern}. Click Observe or retry the request, then approve site access if Chrome shows the prompt.`
       };
 }
 
@@ -1363,14 +1438,19 @@ async function testHttpProviderFromForm() {
 
   const payload = response.envelope.payload;
   const models = payload.models || [];
+  const selectedModel = models.includes(provider.model) ? provider.model : (models[0] || provider.model || "");
   state.httpProviderDraft = {
     ...provider,
-    model: provider.model || models[0] || "",
+    model: selectedModel,
     models,
     lastStatus: payload.status || "ready",
     lastMessage: payload.message || "HTTP provider test completed."
   };
-  state.connector.message = state.httpProviderDraft.lastMessage;
+  state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+  state.codex.provider = `http:${state.httpProviderDraft.id}`;
+  state.codex.model = selectedModel || "default";
+  state.connector.message = `${state.httpProviderDraft.lastMessage} Select a model above, then Save HTTP Provider to keep it.`;
+  state.activity.unshift(`HTTP provider ${state.httpProviderDraft.name} found ${models.length} model${models.length === 1 ? "" : "s"}.`);
   render();
 }
 
@@ -1391,6 +1471,10 @@ async function saveHttpProviderFromForm(event) {
   }
   state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "" };
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+  if (state.codex.provider === `http:${provider.id}` || existingIndex < 0) {
+    state.codex.provider = `http:${provider.id}`;
+    state.codex.model = provider.model || provider.models?.[0] || "default";
+  }
   ensureSelectedProviderAvailable();
   await persistProviderSettings();
   state.connector.message = `Saved HTTP provider ${provider.name}.`;
@@ -1403,7 +1487,7 @@ function readHttpProviderDraft() {
   const baseUrl = document.getElementById("http-provider-base-url")?.value.trim().replace(/\/+$/, "") || "";
   const username = document.getElementById("http-provider-username")?.value.trim() || "";
   const password = document.getElementById("http-provider-password")?.value || "";
-  const model = document.getElementById("http-provider-model")?.value.trim() || "";
+  const model = document.getElementById("http-provider-model")?.value.trim() || state.httpProviderDraft.model || "";
   return {
     ...state.httpProviderDraft,
     id: existingId || crypto.randomUUID(),
@@ -1413,7 +1497,7 @@ function readHttpProviderDraft() {
     password,
     authType: username || password ? "basic" : "none",
     model,
-    models: state.httpProviderDraft.models || (model ? [model] : []),
+    models: state.httpProviderDraft.models?.length ? state.httpProviderDraft.models : (model ? [model] : []),
     lastStatus: state.httpProviderDraft.lastStatus || "ready",
     lastMessage: state.httpProviderDraft.lastMessage || "OpenAI-compatible HTTP provider is configured."
   };
@@ -1444,7 +1528,8 @@ function getSelectedHttpProvider() {
   }
 
   const id = state.codex.provider.slice("http:".length);
-  const provider = state.httpProviders.find((item) => item.id === id);
+  const provider = state.httpProviders.find((item) => item.id === id)
+    || (state.httpProviderDraft.id === id ? state.httpProviderDraft : null);
   if (!provider) return null;
   return {
     ...provider,
@@ -1595,8 +1680,8 @@ async function getAgentResult(goal) {
       return {
         type: "ask_user",
         question: responseLanguage === "it"
-          ? "Ho bisogno del permesso di accesso al sito per leggere questa pagina. Approva il prompt del browser, poi riprova."
-          : "I need site access permission to read this page. Approve the browser prompt, then try again."
+          ? "Ho bisogno del permesso di accesso al sito per leggere questa pagina. Clicca Observe o riprova la richiesta; se Chrome mostra il prompt, approva l'accesso al sito."
+          : "I need site access permission to read this page. Click Observe or retry the request; if Chrome shows the prompt, approve site access."
       };
     }
   }
@@ -1642,12 +1727,15 @@ async function getAgentResult(goal) {
 }
 
 function isSimpleConversationalMessage(goal) {
-  const text = compact(goal).toLowerCase();
-  return /^(ciao|salve|hey|hello|hi|buongiorno|buonasera|funzioni\??|mi leggi\??|ci sei\??|chi sei\??|who are you\??|are you there\??)$/i.test(text);
+  const text = normalizeKey(goal);
+  return /^(ciao|salve|hey|hello|hi|buongiorno|buonasera)$/.test(text)
+    || /^(funzioni|mi leggi|ci sei|are you there)$/.test(text)
+    || /^(chi sei|who are you)$/.test(text)
+    || /^(ciao|salve|hey|hello|hi|buongiorno|buonasera) (chi sei|who are you|funzioni|mi leggi|ci sei|are you there)$/.test(text);
 }
 
 function buildSimpleConversationalResponse(goal, responseLanguage) {
-  const text = compact(goal).toLowerCase();
+  const text = normalizeKey(goal);
 
   if (/\b(chi sei|who are you)\b/i.test(text)) {
     return {
@@ -1844,7 +1932,7 @@ async function ensurePermissionForActionPlan(actions) {
 
   return {
     ok: false,
-    error: "I need site access permission before I can read or act on this page. Approve the browser prompt, then try again."
+    error: "I need site access permission before I can read or act on this page. Click Observe or retry the request; if Chrome shows the prompt, approve site access."
   };
 }
 
@@ -2836,7 +2924,7 @@ function normalizeKey(value) {
 }
 
 function detectUserLanguage(text) {
-  if (/\b(cosa|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza)\b/i.test(text)) {
+  if (/\b(cosa|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
     return "it";
   }
 
