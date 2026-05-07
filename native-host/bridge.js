@@ -758,7 +758,11 @@ function installProvider(payload = {}) {
   }
 
   const runnableCommand = makeRunnableNpmCommand(command);
-  const child = spawnVisibleShell(`${runnableCommand} && echo. && echo Installation finished. Run the provider login/connect step next.`);
+  const child = spawnVisibleShell([
+    runnableCommand,
+    "echo.",
+    "echo Installation finished. Run the provider login/connect step next."
+  ].join("\r\n"));
   child?.unref?.();
 
   return {
@@ -784,7 +788,7 @@ function installNodejs() {
       "winget install --id OpenJS.NodeJS.LTS -e --source winget",
       "echo.",
       "echo Node.js installation finished. Restart Chrome, then check the connector again."
-    ].join(" && ");
+    ].join("\r\n");
     const child = spawnVisibleShell(command);
     child?.unref?.();
 
@@ -884,7 +888,8 @@ function spawnInteractiveProvider(provider) {
 
 function spawnVisibleShell(command) {
   if (process.platform === "win32") {
-    return spawn("cmd.exe", ["/c", "start", "Browser Companion Provider Setup", "cmd.exe", "/k", command], {
+    const scriptPath = writeVisibleCommandScript(command);
+    return spawn("cmd.exe", ["/c", `start "Browser Companion Provider Setup" cmd.exe /k "${scriptPath}"`], {
       detached: true,
       stdio: "ignore",
       windowsHide: false
@@ -902,6 +907,19 @@ function spawnVisibleShell(command) {
     detached: true,
     stdio: "ignore"
   });
+}
+
+function writeVisibleCommandScript(command) {
+  const scriptPath = path.join(os.tmpdir(), `browser-companion-${crypto.randomUUID()}.cmd`);
+  const lines = [
+    "@echo off",
+    `cd /d "${bridgeDir}"`,
+    ...String(command || "").split(/\r?\n/),
+    "echo.",
+    "echo Command finished. You can close this window after checking the output."
+  ];
+  fs.writeFileSync(scriptPath, lines.join("\r\n"), "utf8");
+  return scriptPath;
 }
 
 function spawnLoginProcess() {
