@@ -224,12 +224,22 @@
 
     const selectorMatches = [];
     for (const selector of target.selector_candidates || []) {
-      selectorMatches.push(...document.querySelectorAll(selector));
+      if (!isCssSelectorCandidate(selector)) {
+        continue;
+      }
+
+      try {
+        selectorMatches.push(...document.querySelectorAll(selector));
+      } catch {
+        // Model-proposed selector candidates can contain non-CSS hints such as
+        // text=Label. Ignore them and fall back to role/name matching.
+      }
     }
 
     const candidates = [
       ...selectorMatches,
-      ...document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[role='link'],[contenteditable='true']")
+      ...document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[role='link'],[contenteditable='true']"),
+      ...findElementsByVisibleText(target.name)
     ];
     const wantedRole = String(target.role || "").toLowerCase();
     const wantedName = normalize(target.name);
@@ -276,11 +286,47 @@
     return score;
   }
 
+  function isCssSelectorCandidate(selector) {
+    const value = String(selector || "").trim();
+    return Boolean(value) && !/^(text|xpath|aria|role)\s*=/i.test(value);
+  }
+
+  function findElementsByVisibleText(name) {
+    const wanted = normalize(name);
+    if (!wanted) {
+      return [];
+    }
+
+    const textNodes = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    const matches = [];
+    let node = textNodes.nextNode();
+
+    while (node && matches.length < 20) {
+      const text = normalize(node.textContent);
+      if (text && (text === wanted || text.includes(wanted) || wanted.includes(text))) {
+        const element = closestClickable(node.parentElement) || node.parentElement;
+        if (element) matches.push(element);
+      }
+      node = textNodes.nextNode();
+    }
+
+    return matches;
+  }
+
+  function closestClickable(element) {
+    return element?.closest?.("a[href],button,[role='button'],[role='link'],[contenteditable='true']");
+  }
+
   function verifyElement(element, target = {}) {
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
 
-    if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none") {
+    const hasVisibleText = Boolean(target.name && normalize(element.innerText || element.textContent).includes(normalize(target.name)));
+    if ((rect.width <= 0 || rect.height <= 0) && !hasVisibleText) {
+      throw new Error("Target element is not visible.");
+    }
+
+    if (style.visibility === "hidden" || style.display === "none") {
       throw new Error("Target element is not visible.");
     }
 
