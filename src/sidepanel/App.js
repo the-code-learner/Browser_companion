@@ -65,7 +65,9 @@ const state = {
     }
   ],
   actionNotes: [],
+  accessibleTabs: {},
   pendingPlan: null,
+  pendingPlanContext: null,
   pendingPolicy: null,
   confirmationText: "",
   privacy: {
@@ -1116,6 +1118,7 @@ async function observePage(options = {}) {
   }
 
   const observation = response.envelope.payload;
+  rememberObservedTab(observation, "observe");
   state.page = {
     status: "ready",
     title: observation.tab.title || "Untitled page",
@@ -1124,6 +1127,7 @@ async function observePage(options = {}) {
     observation
   };
   await enrichGoogleDocObservation();
+  rememberObservedTab(state.page.observation, "observe");
   state.activity.unshift(`Observed ${state.page.title}.`);
   render();
   return observation;
@@ -1764,8 +1768,12 @@ async function handleChatSubmit(event) {
   }
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
 
-  const agentResult = await getAgentResult(text);
-  await handleAgentResult(agentResult);
+  const questionTab = await getCurrentActiveTab();
+  const questionContext = tabToPageContext(questionTab);
+  rememberActiveTab(questionTab);
+
+  const agentResult = await getAgentResult(text, { planContext: questionContext });
+  await handleAgentResult(agentResult, { planContext: questionContext });
 }
 
 async function getAgentResult(goal, options = {}) {
@@ -1779,14 +1787,16 @@ async function getAgentResult(goal, options = {}) {
 
   if (state.connector.status === "connected") {
     const selectedHttpProvider = getSelectedHttpProvider();
+    const runtimeContext = await buildRuntimeContext(goal, options);
+    const observationForRequest = getObservationForContext(options.planContext);
     const payload = {
       goal,
       responseLanguage,
       provider: state.codex.provider,
       model: state.codex.model,
       httpProvider: selectedHttpProvider,
-      runtimeContext: options.continuationReason || "",
-      observation: state.page.observation || null,
+      runtimeContext,
+      observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
         title: item.title,
@@ -1820,7 +1830,10 @@ async function getAgentResult(goal, options = {}) {
     return buildSimpleConversationalResponse(goal, responseLanguage);
   }
 
-  if (!state.page.observation) {
+  if (!getObservationForContext(options.planContext)) {
+    if (options.planContext) {
+      await restoreExpectedTab(options.planContext);
+    }
     const observed = await observePage({ reason: "read this page for your request" });
     if (!observed) {
       return {
@@ -1839,6 +1852,64 @@ async function getAgentResult(goal, options = {}) {
   }
 
   return buildLocalAgentResult(goal, responseLanguage);
+}
+
+async function buildRuntimeContext(goal, options = {}) {
+  const lines = [];
+  const continuationReason = compact(options.continuationReason || "");
+  const currentTab = await getCurrentActiveTab();
+  const questionContext = options.planContext || getObservedPageContext();
+
+  if (continuationReason) {
+    lines.push(continuationReason);
+  }
+
+  if (questionContext?.url || questionContext?.title || questionContext?.tabId) {
+    lines.push(`Question context tab: ${formatTabContextForPrompt(questionContext)}.`);
+  }
+
+  if (currentTab?.url || currentTab?.title || currentTab?.id) {
+    lines.push(`Current active tab now: ${formatTabContextForPrompt({
+      tabId: currentTab.id,
+      url: currentTab.url,
+      title: currentTab.title
+    })}.`);
+    rememberActiveTab(currentTab);
+  }
+
+  const recentTabs = getRecentAccessibleTabs(currentTab?.id);
+  if (recentTabs.length) {
+    lines.push(`Recently known tabs (observed tabs have page access; active-only tabs may need permission): ${recentTabs.map(formatTabContextForPrompt).join(" | ")}.`);
+  }
+
+  lines.push("Tab rule: bind page-specific questions and actions to the question context tab. If the user changes tabs while you are thinking, do not reinterpret the request as referring to the new active tab unless the user explicitly says so. If a page-bound action would target a different tab, ask for clarification or use the original tab context.");
+
+  return lines.filter(Boolean).join("\n");
+}
+
+function formatTabContextForPrompt(tab) {
+  const parts = [];
+  if (tab.tabId || tab.id) parts.push(`id=${tab.tabId || tab.id}`);
+  if (tab.isCurrent) parts.push("current=true");
+  if (tab.title) parts.push(`title="${String(tab.title).slice(0, 120)}"`);
+  if (tab.url) parts.push(`url=${String(tab.url).slice(0, 220)}`);
+  if (tab.source) parts.push(`source=${tab.source}`);
+  if (tab.lastObservedAt) parts.push(`lastObservedAt=${tab.lastObservedAt}`);
+  if (tab.lastActiveAt) parts.push(`lastActiveAt=${tab.lastActiveAt}`);
+  return parts.join(", ");
+}
+
+function getObservationForContext(context) {
+  const observation = state.page.observation || null;
+  if (!observation || !context) {
+    return observation;
+  }
+
+  const observedTab = observation.tab || {};
+  const sameTab = context.tabId && observedTab.id && context.tabId === observedTab.id;
+  const sameUrl = normalizeUrlForContext(context.url) === normalizeUrlForContext(observedTab.url || state.page.url);
+
+  return sameTab || sameUrl ? observation : null;
 }
 
 function isSimpleConversationalMessage(goal) {
@@ -1892,6 +1963,8 @@ async function handleAgentResult(result, options = {}) {
   addDebugLog("agent.result", { result }, result?.type || "unknown result");
 
   if (result?.type === "agent_plan") {
+    const hasPageBoundActions = (result.actions || []).some(isPageBoundAction);
+    const planContext = hasPageBoundActions ? (options.planContext || createPlanPageContext(result)) : null;
     const policyResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.VALIDATE_ACTION_PLAN, { plan: result }));
     addDebugLog("policy.validation", {
       plan: result,
@@ -1912,11 +1985,12 @@ async function handleAgentResult(result, options = {}) {
       state.activity.unshift("Executing low-risk action plan.");
       addActionNote("Executed low-risk action plan", result.actions.map(formatActionDetail));
       render();
-      await executeActionPlan(result, options);
+      await executeActionPlan(result, { ...options, planContext });
       return;
     }
 
     state.pendingPlan = result;
+    state.pendingPlanContext = planContext;
     state.pendingPolicy = policy;
     state.activity.unshift("Action plan prepared for confirmation.");
     addActionNote("Asked for action approval", [
@@ -2109,11 +2183,13 @@ async function confirmPendingPlan() {
   }
 
   state.pendingPlan = null;
+  const planContext = state.pendingPlanContext;
+  state.pendingPlanContext = null;
   state.pendingPolicy = null;
   state.confirmationText = "";
 
   try {
-    await executeActionPlan(plan);
+    await executeActionPlan(plan, { planContext });
   } catch (error) {
     state.messages.push({
       role: "assistant",
@@ -2128,6 +2204,24 @@ async function confirmPendingPlan() {
 async function executeActionPlan(plan, options = {}) {
   const normalizedPlan = normalizePlan(plan);
   const actions = normalizedPlan?.actions || [];
+  const pageMatch = await verifyActionPlanPageContext(actions, options.planContext);
+
+  if (!pageMatch.ok) {
+    state.messages.push({
+      role: "assistant",
+      text: pageMatch.error,
+      createdAt: Date.now()
+    });
+    state.activity.unshift(`Execution blocked: ${pageMatch.error}`);
+    addDebugLog("action.stale_page_blocked", {
+      expected: options.planContext || null,
+      current: pageMatch.current || null,
+      actions
+    }, "Blocked stale page-bound action plan.");
+    render();
+    return;
+  }
+
   const permission = await ensurePermissionForActionPlan(actions);
 
   if (!permission.ok) {
@@ -2161,6 +2255,7 @@ async function executeActionPlan(plan, options = {}) {
   }
 
   const results = response.envelope.payload.results || [];
+  rememberActionResultTabs(results);
   results.forEach((result) => state.activity.unshift(result.log_message));
   addActionNote("Browser action result", results.map((result) => `${result.status}: ${result.log_message}`));
   const httpArtifacts = results
@@ -2188,9 +2283,13 @@ async function executeActionPlan(plan, options = {}) {
     render();
     const followUpResult = await getAgentResult(goal, {
       continuationDepth,
-      continuationReason: "A read-only browser action was just executed to gather context. Use the updated page observation to answer the user's original request now if possible. Only request another read-only action if essential."
+      continuationReason: "A read-only browser action was just executed to gather context. Use the updated page observation to answer the user's original request now if possible. Only request another read-only action if essential.",
+      planContext: options.planContext || getObservedPageContext()
     });
-    await handleAgentResult(followUpResult, { continuationDepth });
+    await handleAgentResult(followUpResult, {
+      continuationDepth,
+      planContext: options.planContext || getObservedPageContext()
+    });
     return;
   }
 
@@ -2238,6 +2337,238 @@ function shouldAutoContinueAfterReadOnlyAction(plan, results, options = {}) {
 
 function getLastUserMessageText() {
   return [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
+}
+
+async function getCurrentActiveTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab || null;
+  } catch {
+    return null;
+  }
+}
+
+function createPlanPageContext(plan) {
+  const actions = plan?.actions || [];
+
+  if (!actions.some(isPageBoundAction)) {
+    return null;
+  }
+
+  return getObservedPageContext();
+}
+
+function getObservedPageContext() {
+  const tab = state.page.observation?.tab || {};
+  if (!tab.id && !tab.url && !tab.title && !state.page.url && !state.page.title) {
+    return null;
+  }
+
+  return {
+    tabId: tab.id || null,
+    url: tab.url || state.page.url || "",
+    title: tab.title || state.page.title || "",
+    capturedAt: state.page.observation?.capturedAt || ""
+  };
+}
+
+function tabToPageContext(tab) {
+  if (!tab?.id && !tab?.url && !tab?.title) {
+    return null;
+  }
+
+  return {
+    tabId: tab?.id || null,
+    url: tab?.url || "",
+    title: tab?.title || "",
+    capturedAt: new Date().toISOString()
+  };
+}
+
+async function verifyActionPlanPageContext(actions, expectedContext) {
+  if (!actions.some(isPageBoundAction) || !expectedContext) {
+    return { ok: true };
+  }
+
+  const tab = await getCurrentActiveTab();
+  const current = {
+    tabId: tab?.id || null,
+    url: tab?.url || "",
+    title: tab?.title || ""
+  };
+  const sameTab = !expectedContext.tabId || !current.tabId || expectedContext.tabId === current.tabId;
+  const sameUrl = normalizeUrlForContext(expectedContext.url) === normalizeUrlForContext(current.url);
+
+  if (sameTab && sameUrl) {
+    return { ok: true, current };
+  }
+
+  const restored = await restoreExpectedTab(expectedContext);
+
+  if (restored.ok) {
+    addDebugLog("action.plan_tab_restored", {
+      expected: expectedContext,
+      previous: current,
+      restored: restored.current
+    }, "Restored the tab bound to the action plan.");
+    return restored;
+  }
+
+  return {
+    ok: false,
+    current: restored.current || current,
+    error: getStalePageContextMessage(detectUserLanguage(getLastUserMessageText()))
+  };
+}
+
+async function restoreExpectedTab(expectedContext) {
+  if (!expectedContext?.tabId) {
+    return { ok: false };
+  }
+
+  try {
+    const tab = await chrome.tabs.get(expectedContext.tabId);
+    const sameUrl = normalizeUrlForContext(expectedContext.url) === normalizeUrlForContext(tab?.url);
+
+    if (!sameUrl) {
+      return {
+        ok: false,
+        current: {
+          tabId: tab?.id || null,
+          url: tab?.url || "",
+          title: tab?.title || ""
+        }
+      };
+    }
+
+    await chrome.tabs.update(expectedContext.tabId, { active: true });
+    rememberActiveTab(tab);
+    return {
+      ok: true,
+      current: {
+        tabId: tab.id || null,
+        url: tab.url || "",
+        title: tab.title || ""
+      }
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function getStalePageContextMessage(language) {
+  if (language === "it") {
+    return "La pagina di riferimento della richiesta non e' piu' disponibile o e' cambiata. Non eseguo l'azione per evitare di usare la scheda sbagliata. Torna alla pagina corretta, clicca Observe e riprova.";
+  }
+
+  return "The page for that request is no longer available or has changed. I stopped instead of acting in the wrong tab. Return to the correct page, click Observe, and retry.";
+}
+
+function normalizeUrlForContext(url) {
+  try {
+    const parsed = new URL(url || "");
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return String(url || "");
+  }
+}
+
+function rememberObservedTab(observation, source = "observation") {
+  const tab = observation?.tab;
+  if (!tab?.id && !tab?.url) {
+    return;
+  }
+
+  const id = String(tab.id || normalizeUrlForContext(tab.url));
+  const previous = state.accessibleTabs[id] || {};
+  const now = new Date().toISOString();
+  state.accessibleTabs[id] = {
+    id,
+    tabId: tab.id || previous.tabId || null,
+    url: tab.url || previous.url || "",
+    title: tab.title || previous.title || "",
+    source,
+    lastObservedAt: observation.capturedAt || now,
+    lastActiveAt: previous.lastActiveAt || "",
+    visibleTextLength: String(observation.visible_text || "").length,
+    links: Array.isArray(observation.links) ? observation.links.length : 0,
+    buttons: Array.isArray(observation.buttons) ? observation.buttons.length : 0
+  };
+  pruneAccessibleTabs();
+}
+
+function rememberActiveTab(tab) {
+  if (!tab?.id && !tab?.url) {
+    return;
+  }
+
+  const id = String(tab.id || normalizeUrlForContext(tab.url));
+  const previous = state.accessibleTabs[id] || {};
+  state.accessibleTabs[id] = {
+    id,
+    tabId: tab.id || previous.tabId || null,
+    url: tab.url || previous.url || "",
+    title: tab.title || previous.title || "",
+    source: previous.source || "active-tab",
+    lastObservedAt: previous.lastObservedAt || "",
+    lastActiveAt: new Date().toISOString(),
+    visibleTextLength: previous.visibleTextLength || 0,
+    links: previous.links || 0,
+    buttons: previous.buttons || 0
+  };
+  pruneAccessibleTabs();
+}
+
+function rememberActionResultTabs(results) {
+  results.forEach((result) => {
+    const observation = result?.artifact?.kind === "page_observation"
+      ? result.artifact.observation
+      : result?.artifact?.observation;
+    rememberObservedTab(observation, "action-artifact");
+  });
+}
+
+function getRecentAccessibleTabs(currentTabId) {
+  return Object.values(state.accessibleTabs || {})
+    .sort((a, b) => String(b.lastActiveAt || b.lastObservedAt || "").localeCompare(String(a.lastActiveAt || a.lastObservedAt || "")))
+    .slice(0, 6)
+    .map((tab) => ({
+      ...tab,
+      isCurrent: Boolean(currentTabId && tab.tabId === currentTabId)
+    }));
+}
+
+function pruneAccessibleTabs() {
+  const entries = Object.entries(state.accessibleTabs || {})
+    .sort(([, a], [, b]) => String(b.lastActiveAt || b.lastObservedAt || "").localeCompare(String(a.lastActiveAt || a.lastObservedAt || "")))
+    .slice(0, 12);
+  state.accessibleTabs = Object.fromEntries(entries);
+}
+
+function isPageBoundAction(action) {
+  return [
+    "observe_page",
+    "get_visible_text",
+    "get_dom_snapshot",
+    "get_forms",
+    "get_links",
+    "get_buttons",
+    "scroll_to_element",
+    "scroll_by",
+    "wait_for_page_change",
+    "focus_element",
+    "highlight_element",
+    "fill_field",
+    "select_option",
+    "toggle_checkbox",
+    "set_radio",
+    "upload_file_to_field",
+    "click_element",
+    "click_overlay_number",
+    "capture_viewport",
+    "capture_numbered_overlay"
+  ].includes(action?.type);
 }
 
 async function ensurePermissionForActionPlan(actions) {
@@ -3455,6 +3786,7 @@ async function restoreSession() {
   state.attachments = session.attachments || [];
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];
+  state.accessibleTabs = session.accessibleTabs || {};
   state.activity = session.activity || [];
   state.debugLogs = session.debugLogs || [];
   state.pendingMemoryProposal = session.pendingMemoryProposal || null;
@@ -3502,6 +3834,7 @@ function persistSession() {
       attachments: state.attachments,
       messages: state.messages.slice(-30),
       actionNotes: state.actionNotes.slice(-80),
+      accessibleTabs: Object.fromEntries(Object.entries(state.accessibleTabs || {}).slice(0, 12)),
       activity: state.activity.slice(0, 80),
       debugLogs: state.debugLogs.slice(0, 200),
       pendingMemoryProposal: state.pendingMemoryProposal
@@ -3613,7 +3946,8 @@ function normalizeKey(value) {
 }
 
 function detectUserLanguage(text) {
-  if (/\b(cosa|cos'hai|quindi|secondo|ruolo|bene|analisi|valutare|profilo|trovato|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
+  if (/[àèéìòù]/i.test(text)
+    || /\b(cosa|cos'hai|quindi|secondo|ruolo|bene|analisi|valutare|profilo|trovato|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|devi|doevi|dovevi|puoi|voglio|questa|questo|qui|scheda|tab|candidatura|candidarmi|presentare|offerta|lavoro|adatto|adatta|continua|dunque|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
     return "it";
   }
 
