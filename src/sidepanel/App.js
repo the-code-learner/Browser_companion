@@ -2212,13 +2212,30 @@ function sanitizeDebugData(value, depth = 0) {
   if (Array.isArray(value)) return value.slice(0, 80).map((item) => sanitizeDebugData(item, depth + 1));
   if (typeof value !== "object") return String(value);
 
+  const objectKeys = Object.keys(value);
+  const looksLikeAttachment = objectKeys.includes("status")
+    && objectKeys.includes("type")
+    && (objectKeys.includes("text") || objectKeys.includes("textPreview") || objectKeys.includes("name"));
+
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
-    if (/password|authorization|token|secret|cookie|credential/i.test(key)) {
+    if (/password|authorization|token|secret|cookie|credential|username/i.test(key)) {
       return [key, "[redacted]"];
     }
 
-    if (/text|content|body|visible_text|bodyPreview/i.test(key) && typeof item === "string") {
-      return [key, redactSensitiveText(item).slice(0, 4000)];
+    if (/reasoning/i.test(key)) {
+      return [key, "[omitted provider reasoning]"];
+    }
+
+    if (looksLikeAttachment && key === "name") {
+      return [key, "[attachment name redacted]"];
+    }
+
+    if (/baseUrl|codexPath|command|path/i.test(key) && typeof item === "string") {
+      return [key, redactLocalAndPrivateUrls(item)];
+    }
+
+    if (/text|content|body|visible_text|bodyPreview|textPreview|prompt/i.test(key) && typeof item === "string") {
+      return [key, `[omitted ${item.length} chars]`];
     }
 
     return [key, sanitizeDebugData(item, depth + 1)];
@@ -2227,8 +2244,16 @@ function sanitizeDebugData(value, depth = 0) {
 
 function redactSensitiveText(text) {
   return String(text || "")
+    .replace(/[A-Za-z]:\\(?:Users\\[^\\\s]+|Desktop|Documents|Downloads|Desktop\\Projects)[^\n\r"]*/gi, "[local path]")
+    .replace(/https?:\/\/(?:llm\.)?[^/\s"]+/gi, "[url]")
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
     .replace(/\b(?:\+?\d[\d .()-]{7,}\d)\b/g, "[phone]");
+}
+
+function redactLocalAndPrivateUrls(text) {
+  return redactSensitiveText(text)
+    .replace(/\\[^\\\s"]+/g, "\\...")
+    .slice(0, 240);
 }
 
 async function copyDebugLogs() {
@@ -3322,7 +3347,7 @@ function normalizeKey(value) {
 }
 
 function detectUserLanguage(text) {
-  if (/\b(cosa|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
+  if (/\b(cosa|cos'hai|trovato|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
     return "it";
   }
 

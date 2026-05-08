@@ -1382,18 +1382,19 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
 
 async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
+  const initialMaxTokens = wantsJson ? 4096 : 4096;
   const requestBody = {
     model: provider.model,
     messages: [
       {
         role: "user",
         content: wantsJson
-          ? `${prompt}\n\nReturn only valid JSON.`
-          : prompt
+          ? `${prompt}\n\nReturn only valid JSON in the final assistant content. If you use hidden reasoning, continue until the final content contains only the JSON object.`
+          : `${prompt}\n\nIf you use hidden reasoning, continue until you emit the final user-facing answer in assistant content.`
       }
     ],
     temperature: 0.2,
-    max_tokens: wantsJson ? 1200 : 1600,
+    max_tokens: initialMaxTokens,
     stream: false
   };
 
@@ -1401,6 +1402,24 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
     requestBody.response_format = { type: "json_object" };
   }
 
+  let json = await postHttpProviderCompletion(baseUrl, provider, requestBody, wantsJson);
+  let extracted = extractChatCompletionText(json);
+
+  if (!extracted.ok && extracted.retryable) {
+    requestBody.max_tokens = wantsJson ? 8192 : 8192;
+    requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
+    json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false);
+    extracted = extractChatCompletionText(json);
+  }
+
+  if (extracted.ok) {
+    return extracted.text;
+  }
+
+  throw new Error(extracted.message);
+}
+
+async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat) {
   let response = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
@@ -1408,11 +1427,11 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
       "content-type": "application/json"
     },
     body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(120000)
+    signal: AbortSignal.timeout(360000)
   });
   let text = await response.text();
 
-  if (!response.ok && wantsJson && /response_format|json_object|unsupported/i.test(text)) {
+  if (!response.ok && canRetryWithoutResponseFormat && /response_format|json_object|unsupported/i.test(text)) {
     delete requestBody.response_format;
     response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
@@ -1421,7 +1440,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
         "content-type": "application/json"
       },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(120000)
+      signal: AbortSignal.timeout(360000)
     });
     text = await response.text();
   }
@@ -1430,8 +1449,44 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
     throw new Error(`HTTP provider returned ${response.status}: ${text.slice(0, 500)}`);
   }
 
-  const json = JSON.parse(text);
-  return json.choices?.[0]?.message?.content || json.choices?.[0]?.text || text;
+  return JSON.parse(text);
+}
+
+function extractChatCompletionText(json) {
+  const choice = json?.choices?.[0];
+  const content = choice?.message?.content || choice?.text || "";
+
+  if (content) {
+    return {
+      ok: true,
+      text: content
+    };
+  }
+
+  const finishReason = choice?.finish_reason || "";
+  const reasoning = choice?.message?.reasoning_content || "";
+
+  if (reasoning && finishReason === "length") {
+    return {
+      ok: false,
+      retryable: true,
+      message: "HTTP provider produced only hidden reasoning and hit the token limit before returning a usable answer. Browser Companion retried with more tokens, but the model still did not emit final assistant content."
+    };
+  }
+
+  if (reasoning) {
+    return {
+      ok: false,
+      retryable: false,
+      message: "HTTP provider produced hidden reasoning but no user-facing answer. The model must emit final assistant content after thinking."
+    };
+  }
+
+  return {
+    ok: false,
+    retryable: finishReason === "length",
+    message: `HTTP provider returned no assistant content. Finish reason: ${finishReason || "unknown"}.`
+  };
 }
 
 function normalizeHttpProviderBaseUrl(baseUrl) {
