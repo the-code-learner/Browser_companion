@@ -1765,10 +1765,10 @@ async function handleChatSubmit(event) {
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
 
   const agentResult = await getAgentResult(text);
-  handleAgentResult(agentResult);
+  await handleAgentResult(agentResult);
 }
 
-async function getAgentResult(goal) {
+async function getAgentResult(goal, options = {}) {
   const responseLanguage = detectUserLanguage(goal);
   const navigationPlan = buildNavigationPlan(goal, responseLanguage);
 
@@ -1785,6 +1785,7 @@ async function getAgentResult(goal) {
       provider: state.codex.provider,
       model: state.codex.model,
       httpProvider: selectedHttpProvider,
+      runtimeContext: options.continuationReason || "",
       observation: state.page.observation || null,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
@@ -1886,7 +1887,7 @@ function buildDeterministicActionPlan(goal, responseLanguage) {
     || buildRequestedClickPlan(goal, state.page.observation, responseLanguage);
 }
 
-async function handleAgentResult(result) {
+async function handleAgentResult(result, options = {}) {
   result = normalizeAgentControlFlow(result);
   addDebugLog("agent.result", { result }, result?.type || "unknown result");
 
@@ -1911,7 +1912,7 @@ async function handleAgentResult(result) {
       state.activity.unshift("Executing low-risk action plan.");
       addActionNote("Executed low-risk action plan", result.actions.map(formatActionDetail));
       render();
-      await executeActionPlan(result);
+      await executeActionPlan(result, options);
       return;
     }
 
@@ -2124,7 +2125,7 @@ async function confirmPendingPlan() {
   }
 }
 
-async function executeActionPlan(plan) {
+async function executeActionPlan(plan, options = {}) {
   const normalizedPlan = normalizePlan(plan);
   const actions = normalizedPlan?.actions || [];
   const permission = await ensurePermissionForActionPlan(actions);
@@ -2173,6 +2174,26 @@ async function executeActionPlan(plan) {
     addActionNote(getArtifactSummary(artifact), getArtifactDetails(artifact));
   });
 
+  if (shouldAutoContinueAfterReadOnlyAction(normalizedPlan, results, options)) {
+    await refreshPageAfterAction();
+    const goal = getLastUserMessageText() || normalizedPlan.goal || "";
+    const continuationDepth = (options.continuationDepth || 0) + 1;
+    state.activity.unshift("Continuing with updated page context.");
+    addDebugLog("agent.auto_continue", {
+      goal,
+      continuationDepth,
+      actions,
+      results
+    }, "Continuing after read-only context action.");
+    render();
+    const followUpResult = await getAgentResult(goal, {
+      continuationDepth,
+      continuationReason: "A read-only browser action was just executed to gather context. Use the updated page observation to answer the user's original request now if possible. Only request another read-only action if essential."
+    });
+    await handleAgentResult(followUpResult, { continuationDepth });
+    return;
+  }
+
   const synthesized = await maybeSynthesizeResults(plan, results);
   const answerText = synthesized || getExecutionSummary(results);
   const memoryProposal = await maybeSaveResearchMemory(plan, results, answerText);
@@ -2185,6 +2206,38 @@ async function executeActionPlan(plan) {
     proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
   }
   await refreshPageAfterAction();
+}
+
+function shouldAutoContinueAfterReadOnlyAction(plan, results, options = {}) {
+  if ((options.continuationDepth || 0) >= 2) {
+    return false;
+  }
+
+  const actions = plan?.actions || [];
+  if (!actions.length || !results.length || results.some((result) => result.status !== "success")) {
+    return false;
+  }
+
+  const contextActionTypes = new Set([
+    "observe_page",
+    "get_visible_text",
+    "get_dom_snapshot",
+    "get_forms",
+    "get_links",
+    "get_buttons",
+    "capture_viewport",
+    "capture_numbered_overlay",
+    "scroll_to_element",
+    "scroll_by",
+    "wait_for_page_change"
+  ]);
+  const hasExternalArtifact = results.some((result) => ["web_search", "http_response"].includes(result.artifact?.kind));
+
+  return !hasExternalArtifact && actions.every((action) => contextActionTypes.has(action?.type));
+}
+
+function getLastUserMessageText() {
+  return [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
 }
 
 async function ensurePermissionForActionPlan(actions) {
@@ -3560,7 +3613,7 @@ function normalizeKey(value) {
 }
 
 function detectUserLanguage(text) {
-  if (/\b(cosa|cos'hai|trovato|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
+  if (/\b(cosa|cos'hai|quindi|secondo|ruolo|bene|analisi|valutare|profilo|trovato|vedi|compila|invia|accetta|pagina|campo|allega|modulo|devo|puoi|voglio|questa|questo|ricordati|salva|memorizza|ciao|chi|sei|sono|funzioni)\b/i.test(text)) {
     return "it";
   }
 
