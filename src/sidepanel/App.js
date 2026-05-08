@@ -1984,10 +1984,20 @@ function extractNestedNaturalText(text) {
   if (!raw) return "";
 
   const parsed = parseLooseJsonObject(raw);
+  const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
+  const candidate = Array.isArray(parsed?.candidates) ? parsed.candidates[0] : null;
+  const geminiParts = Array.isArray(candidate?.content?.parts)
+    ? candidate.content.parts.map((part) => part?.text || "").filter(Boolean).join("\n")
+    : "";
   const nested = parsed?.text
     || parsed?.answer
     || parsed?.response
+    || parsed?.content
+    || parsed?.message?.content
     || parsed?.message
+    || choice?.message?.content
+    || choice?.text
+    || geminiParts
     || parsed?.result
     || parsed?.output
     || parsed?.summary

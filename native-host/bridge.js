@@ -1267,14 +1267,7 @@ function runCliAgentRequest(provider, payload = {}) {
   }
 
   const output = compactProviderOutput(result.stdout || result.stderr || "");
-  try {
-    return JSON.parse(extractJsonObject(output));
-  } catch {
-    return {
-      type: "agent_error",
-      message: `${provider.label} responded, but the response was not valid Browser Companion JSON.`
-    };
-  }
+  return parseAgentJsonOrNaturalResponse(output);
 }
 
 function runProviderPromptWithModelFallback(provider, prompt, model, needsJson) {
@@ -1538,7 +1531,10 @@ function compactProviderOutput(output) {
   const text = stripProviderNoise(String(output || "")).trim();
   try {
     const parsed = JSON.parse(text);
-    return parsed.text || parsed.response || parsed.result || parsed.output || text;
+    if (parsed?.type || Array.isArray(parsed?.actions)) {
+      return text;
+    }
+    return pickResponseText(parsed) || text;
   } catch {
     return text;
   }
@@ -1599,7 +1595,12 @@ function normalizeAgentResponse(response) {
 
   if (!response.type) {
     const text = pickResponseText(response);
-    return text ? makeNaturalAgentResponse(text) : response;
+    return text
+      ? makeNaturalAgentResponse(text)
+      : {
+          type: "agent_error",
+          message: "Provider returned JSON, but it did not contain Browser Companion fields or user-facing text."
+        };
   }
 
   if (response.type === "natural_response") {
@@ -1627,19 +1628,34 @@ function normalizeAgentResponse(response) {
 }
 
 function pickResponseText(response) {
-  return compact(
-    response?.text
-    || response?.answer
-    || response?.response
-    || response?.message
-    || response?.result
-    || response?.output
-    || response?.summary
-    || response?.summary_for_user
-    || response?.question
-    || response?.reason
-    || ""
-  );
+  if (typeof response === "string") {
+    return compact(response);
+  }
+
+  const choice = Array.isArray(response?.choices) ? response.choices[0] : null;
+  const candidate = Array.isArray(response?.candidates) ? response.candidates[0] : null;
+  const geminiParts = Array.isArray(candidate?.content?.parts)
+    ? candidate.content.parts.map((part) => part?.text || "").filter(Boolean).join("\n")
+    : "";
+  const values = [
+    response?.text,
+    response?.answer,
+    response?.response,
+    response?.content,
+    response?.message?.content,
+    response?.message,
+    choice?.message?.content,
+    choice?.text,
+    geminiParts,
+    response?.result,
+    response?.output,
+    response?.summary,
+    response?.summary_for_user,
+    response?.question,
+    response?.reason
+  ];
+
+  return compact(values.find((value) => typeof value === "string" && value.trim()) || "");
 }
 
 function makeNaturalAgentResponse(text) {
