@@ -94,6 +94,7 @@ const state = {
     draftContent: ""
   },
   pendingMemoryIntent: null,
+  pendingMemoryProposal: null,
   chatAtBottom: true,
   activity: [],
   debugLogs: []
@@ -1746,20 +1747,19 @@ async function handleChatSubmit(event) {
   input.value = "";
   render();
 
-  const memoryRequest = parseDirectMemoryRequest(text);
+  if (state.pendingMemoryProposal) {
+    const handled = await handlePendingMemoryProposalReply(text);
+    if (handled) {
+      return;
+    }
+  }
+
+  const memoryRequest = state.connector.status === "connected" ? null : parseDirectMemoryRequest(text);
   if (memoryRequest) {
     const memoryItem = memoryRequest.synthesize
       ? await synthesizeMemoryRequest(memoryRequest)
       : memoryRequest;
-    const saved = await saveUserMemory(memoryItem);
-    state.messages.push({
-      role: "assistant",
-      text: saved
-        ? localText(detectUserLanguage(text), "memorySaved")
-        : localText(detectUserLanguage(text), "memorySaveFailed"),
-      createdAt: Date.now()
-    });
-    render();
+    proposeMemorySave(memoryItem, detectUserLanguage(text), memoryRequest.goal);
     return;
   }
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
@@ -1887,6 +1887,7 @@ function buildDeterministicActionPlan(goal, responseLanguage) {
 }
 
 async function handleAgentResult(result) {
+  result = normalizeAgentControlFlow(result);
   addDebugLog("agent.result", { result }, result?.type || "unknown result");
 
   if (result?.type === "agent_plan") {
@@ -1939,6 +1940,14 @@ async function handleAgentResult(result) {
     return;
   }
 
+  if (result?.type === "memory_proposal") {
+    proposeMemorySave({
+      title: result.memory_title || result.title || result.heading || inferResearchMemoryTitle(result.goal || result.text || ""),
+      content: result.memory_content || result.content || result.text || result.summary_for_user || ""
+    }, detectUserLanguage(result.goal || result.text || ""), result.goal || "");
+    return;
+  }
+
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
     const provider = getSelectedProviderStatus();
     state.messages.push({
@@ -1952,13 +1961,93 @@ async function handleAgentResult(result) {
   }
 
   const responseText = getAgentDisplayText(result) || "I could not produce a safe browser action from that request yet.";
-  const memorySaved = await maybeSaveDeferredMemory(responseText);
+  const memoryProposal = await maybeSaveDeferredMemory(responseText);
   state.messages.push({
     role: "assistant",
-    text: memorySaved ? appendMemorySavedNote(responseText) : responseText,
+    text: memoryProposal ? appendMemorySavedNote(responseText) : responseText,
     createdAt: Date.now()
   });
+  if (memoryProposal) {
+    proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
+    return;
+  }
   render();
+}
+
+function normalizeAgentControlFlow(result) {
+  if (result?.type !== "agent_plan" || !Array.isArray(result.actions)) {
+    return result;
+  }
+
+  const controlAction = result.actions.find((action) => ["ask_user", "stop_for_human"].includes(action?.type));
+
+  if (!controlAction) {
+    return result;
+  }
+
+  if (controlAction.type === "ask_user" && isMemoryProposalLike(result, controlAction)) {
+    const proposal = extractMemoryProposalFromText(controlAction.value || result.summary_for_user || controlAction.reason || "");
+    return {
+      type: "memory_proposal",
+      text: proposal.content,
+      question: "",
+      reason: "",
+      goal: result.goal || "",
+      risk_level: "low",
+      summary_for_user: result.summary_for_user || "",
+      needs_clarification: false,
+      requires_confirmation: false,
+      will_submit: false,
+      actions: [],
+      uncertain_fields: [],
+      memory_title: proposal.title,
+      memory_content: proposal.content
+    };
+  }
+
+  const text = compact(
+    controlAction.value
+    || result.question
+    || result.reason
+    || result.summary_for_user
+    || controlAction.reason
+    || ""
+  );
+
+  if (controlAction.type === "stop_for_human") {
+    return {
+      type: "stop_for_human",
+      reason: text || "This needs to be handled by the user directly."
+    };
+  }
+
+  return {
+    type: "ask_user",
+    question: text || "I need one more confirmation before continuing."
+  };
+}
+
+function isMemoryProposalLike(result, action) {
+  const combined = `${result?.goal || ""} ${result?.summary_for_user || ""} ${action?.reason || ""} ${action?.value || ""}`;
+  return /\b(memory|memoria|remember|save|store|salva|salvare|memorizza|local memory|user memory)\b/i.test(combined);
+}
+
+function extractMemoryProposalFromText(text) {
+  const raw = String(text || "").trim();
+  const withoutQuestion = raw
+    .replace(/\n*Would you like me to save[\s\S]*$/i, "")
+    .replace(/\n*Vuoi che (?:lo|la|le)?\s*salvi[\s\S]*$/i, "")
+    .trim();
+  const lines = withoutQuestion.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const title = compact(lines[0] || "User memory")
+    .replace(/^\*\*/, "")
+    .replace(/\*\*$/, "")
+    .slice(0, 90);
+
+  return sanitizeMemoryItem({
+    title,
+    content: withoutQuestion || raw
+  }, { goal: raw });
 }
 
 function getAgentDisplayText(result) {
@@ -2086,12 +2175,15 @@ async function executeActionPlan(plan) {
 
   const synthesized = await maybeSynthesizeResults(plan, results);
   const answerText = synthesized || getExecutionSummary(results);
-  const memorySaved = await maybeSaveResearchMemory(plan, results, answerText);
+  const memoryProposal = await maybeSaveResearchMemory(plan, results, answerText);
   state.messages.push({
     role: "assistant",
-    text: memorySaved ? appendMemorySavedNote(answerText) : answerText,
+    text: memoryProposal ? appendMemorySavedNote(answerText) : answerText,
     createdAt: Date.now()
   });
+  if (memoryProposal) {
+    proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
+  }
   await refreshPageAfterAction();
 }
 
@@ -2244,6 +2336,11 @@ function sanitizeDebugData(value, depth = 0) {
       return [key, redactLocalAndPrivateUrls(item)];
     }
 
+    if (/goal|memoryRequest|requestedScope|summary_for_user|question|reason|value/i.test(key) && typeof item === "string") {
+      const redacted = redactSensitiveText(item);
+      return [key, redacted.length > 240 ? `[omitted ${item.length} chars]` : redacted];
+    }
+
     if (/text|content|body|visible_text|bodyPreview|textPreview|prompt/i.test(key) && typeof item === "string") {
       return [key, `[omitted ${item.length} chars]`];
     }
@@ -2285,13 +2382,17 @@ function parseDirectMemoryRequest(text) {
     return null;
   }
 
-  const match = raw.match(/^(?:remember|save|store|ricordati|salva|memorizza)\b(?:\s+(?:that|che|questo|this))?\s*[:,-]?\s+([\s\S]{6,})/i);
+  const match = raw.match(/^(?:remember|save|store|ricordati|salva|salvalo|salvare|memorizza|aggiungi)\b(?:\s+(?:that|che|questo|this|in memoria|to memory))?\s*[:,-]?\s+([\s\S]{6,})/i);
 
-  if (!match) {
+  const looseMemorySave = !match
+    && /\b(remember|save|store|ricordati|salva|salvalo|salvare|memorizza|aggiungi)\b/i.test(raw)
+    && /\b(memory|memoria|informazioni|information|profilo|profile|sintesi|summary)\b/i.test(raw);
+
+  if (!match && !looseMemorySave) {
     return null;
   }
 
-  const content = match[1].trim();
+  const content = (match?.[1] || raw).trim();
   if (!content || /\?$/.test(content)) {
     return null;
   }
@@ -2481,17 +2582,16 @@ async function maybeSaveResearchMemory(plan, results, answerText) {
   }
 
   const title = state.pendingMemoryIntent?.title || inferResearchMemoryTitle(goal);
-  const saved = await saveUserMemory({
-    title,
-    content: curateMemoryContent(answerText)
-  });
+  state.pendingMemoryIntent = null;
 
-  if (saved) {
-    state.pendingMemoryIntent = null;
-    state.activity.unshift(`Saved research summary to user memory: ${title}.`);
-  }
-
-  return saved;
+  return {
+    item: {
+      title,
+      content: curateMemoryContent(answerText)
+    },
+    responseLanguage: detectUserLanguage(goal),
+    goal
+  };
 }
 
 async function maybeSaveDeferredMemory(answerText) {
@@ -2501,16 +2601,16 @@ async function maybeSaveDeferredMemory(answerText) {
     return false;
   }
 
-  const saved = await saveUserMemory({
-    title: intent.title || inferResearchMemoryTitle(intent.goal),
-    content: curateMemoryContent(answerText)
-  });
+  state.pendingMemoryIntent = null;
 
-  if (saved) {
-    state.pendingMemoryIntent = null;
-  }
-
-  return saved;
+  return {
+    item: {
+      title: intent.title || inferResearchMemoryTitle(intent.goal),
+      content: curateMemoryContent(answerText)
+    },
+    responseLanguage: detectUserLanguage(intent.goal),
+    goal: intent.goal
+  };
 }
 
 function curateMemoryContent(text) {
@@ -2523,7 +2623,106 @@ function curateMemoryContent(text) {
 }
 
 function appendMemorySavedNote(text) {
-  return `${text}\n\n_Memory saved locally._`;
+  return `${text}\n\n_Memory preview prepared._`;
+}
+
+function proposeMemorySave(item, responseLanguage = "en", sourceGoal = "") {
+  const memoryItem = sanitizeMemoryItem(item, { goal: sourceGoal || item?.title || "" });
+  state.pendingMemoryProposal = {
+    id: crypto.randomUUID(),
+    title: memoryItem.title,
+    content: memoryItem.content,
+    sourceGoal,
+    responseLanguage,
+    createdAt: Date.now()
+  };
+  state.activity.unshift(`Prepared memory preview: ${memoryItem.title}.`);
+  addDebugLog("memory.proposal.created", {
+    title: memoryItem.title,
+    content: memoryItem.content,
+    sourceGoal
+  }, "Memory preview prepared.");
+  state.messages.push({
+    role: "assistant",
+    text: formatMemoryPreview(memoryItem, responseLanguage),
+    createdAt: Date.now()
+  });
+  persistSession();
+  render();
+}
+
+async function handlePendingMemoryProposalReply(text) {
+  const responseLanguage = state.pendingMemoryProposal.responseLanguage || detectUserLanguage(text);
+
+  if (isMemoryProposalRejection(text)) {
+    const title = state.pendingMemoryProposal.title;
+    state.pendingMemoryProposal = null;
+    state.activity.unshift(`Memory preview discarded: ${title}.`);
+    state.messages.push({
+      role: "assistant",
+      text: responseLanguage === "it" ? "Ok, non salvo questa memoria." : "Ok, I will not save this memory.",
+      createdAt: Date.now()
+    });
+    persistSession();
+    render();
+    return true;
+  }
+
+  if (!isMemoryProposalConfirmation(text)) {
+    return false;
+  }
+
+  const proposal = state.pendingMemoryProposal;
+  const saved = await saveUserMemory({
+    title: proposal.title,
+    content: proposal.content
+  });
+  state.pendingMemoryProposal = null;
+  state.messages.push({
+    role: "assistant",
+    text: saved
+      ? localText(responseLanguage, "memorySaved")
+      : localText(responseLanguage, "memorySaveFailed"),
+    createdAt: Date.now()
+  });
+  persistSession();
+  render();
+  return true;
+}
+
+function isMemoryProposalConfirmation(text) {
+  return /^(si|sì|ok|okay|yes|yep|salva|salvalo|confermo|conferma|procedi|va bene|save|confirm|go ahead)$/i.test(String(text || "").trim());
+}
+
+function isMemoryProposalRejection(text) {
+  return /^(no|nope|annulla|cancella|non salvare|lascia stare|cancel|discard|don't save|do not save)$/i.test(String(text || "").trim());
+}
+
+function formatMemoryPreview(item, responseLanguage = "en") {
+  const title = item.title || "User memory";
+  const content = item.content || "";
+
+  if (responseLanguage === "it") {
+    return [
+      "Ho preparato questa preview per la memoria locale:",
+      "",
+      `**${title}**`,
+      "",
+      content,
+      "",
+      "Vuoi salvarla? Rispondi `si` per salvare oppure `no` per annullare."
+    ].join("\n");
+  }
+
+  return [
+    "I prepared this local memory preview:",
+    "",
+    `**${title}**`,
+    "",
+    content,
+    "",
+    "Save it? Reply `yes` to save or `no` to cancel."
+  ].join("\n");
 }
 
 function inferResearchMemoryTitle(goal) {
@@ -3205,6 +3404,7 @@ async function restoreSession() {
   state.actionNotes = session.actionNotes || [];
   state.activity = session.activity || [];
   state.debugLogs = session.debugLogs || [];
+  state.pendingMemoryProposal = session.pendingMemoryProposal || null;
 }
 
 async function restoreProviderSettings() {
@@ -3250,7 +3450,8 @@ function persistSession() {
       messages: state.messages.slice(-30),
       actionNotes: state.actionNotes.slice(-80),
       activity: state.activity.slice(0, 80),
-      debugLogs: state.debugLogs.slice(0, 200)
+      debugLogs: state.debugLogs.slice(0, 200),
+      pendingMemoryProposal: state.pendingMemoryProposal
     }
   });
 }
@@ -3281,6 +3482,8 @@ function clearSession() {
   ];
   state.pendingPlan = null;
   state.pendingPolicy = null;
+  state.pendingMemoryProposal = null;
+  state.pendingMemoryIntent = null;
   state.confirmationText = "";
   state.actionNotes = [];
   state.debugLogs = [];

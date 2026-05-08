@@ -1731,6 +1731,7 @@ function buildAgentPrompt(payload, options = {}) {
     includeSchema ? toolSchema : "",
     includeSchema ? "" : "",
     includeSchema ? "Important for non-Codex providers: if any browser action is needed, return only one JSON object conforming to the schema above. Do not wrap it in Markdown. Do not explain outside JSON." : "",
+    includeSchema ? "For memory saves, return a top-level memory_proposal JSON object with memory_title and memory_content, not an agent_plan action." : "",
     includeSchema ? "" : "",
     "User goal:",
     payload.goal || "",
@@ -1750,7 +1751,7 @@ function buildAgentPrompt(payload, options = {}) {
     "Local attachment context JSON:",
     JSON.stringify(attachments, null, 2),
     "",
-    "Return only a JSON object that matches the Browser Companion tool schema when actions are needed."
+    "Return only a JSON object that matches the Browser Companion tool schema when actions or memory proposals are needed."
   ].filter((line) => line !== "").join("\n");
 }
 

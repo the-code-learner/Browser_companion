@@ -24,6 +24,7 @@
         "natural_response",
         "ask_user",
         "stop_for_human",
+        "memory_proposal",
         "agent_plan"
       ]
     },
@@ -71,6 +72,12 @@
       "items": {
         "$ref": "#/$defs/uncertain_field"
       }
+    },
+    "memory_title": {
+      "type": "string"
+    },
+    "memory_content": {
+      "type": "string"
     }
   },
   "$defs": {
