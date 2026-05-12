@@ -5341,22 +5341,35 @@ function getUserMemoryForSynthesis(mode = "full") {
 
 function compactObservationForSynthesis(observation, mode = "full") {
   const compacted = compactObservationForProvider(observation);
-  if (!compacted || mode !== "compact") {
+  if (!compacted) {
     return compacted;
   }
 
+  const dedupedVisibleText = dedupeObservationTextForSynthesis(compacted.visible_text || "");
+  const baseObservation = {
+    ...compacted,
+    visible_text: dedupedVisibleText.text,
+    note: dedupedVisibleText.removedCount > 0
+      ? `Observation compacted for synthesis; removed ${dedupedVisibleText.removedCount} near-duplicate text block${dedupedVisibleText.removedCount === 1 ? "" : "s"}.`
+      : compacted.note
+  };
+
+  if (mode !== "compact") {
+    return baseObservation;
+  }
+
   return {
-    type: compacted.type,
-    tab: compacted.tab,
-    viewport: compacted.viewport,
-    capturedAt: compacted.capturedAt,
-    visible_text: String(compacted.visible_text || "").slice(0, 2200),
-    visibleTextLength: compacted.visibleTextLength,
-    visibleTextTruncated: compacted.visibleTextTruncated,
-    headings: Array.isArray(compacted.headings) ? compacted.headings.slice(0, 12) : [],
+    type: baseObservation.type,
+    tab: baseObservation.tab,
+    viewport: baseObservation.viewport,
+    capturedAt: baseObservation.capturedAt,
+    visible_text: String(baseObservation.visible_text || "").slice(0, 2200),
+    visibleTextLength: baseObservation.visibleTextLength,
+    visibleTextTruncated: baseObservation.visibleTextTruncated,
+    headings: Array.isArray(baseObservation.headings) ? baseObservation.headings.slice(0, 12) : [],
     links: [],
     buttons: [],
-    forms: Array.isArray(compacted.forms) ? compacted.forms.slice(0, 3).map((form) => ({
+    forms: Array.isArray(baseObservation.forms) ? baseObservation.forms.slice(0, 3).map((form) => ({
       agent_id: form.agent_id || "",
       title: form.title || "",
       fields: (Array.isArray(form.fields) ? form.fields : []).slice(0, 4).map((field) => ({
@@ -5367,36 +5380,207 @@ function compactObservationForSynthesis(observation, mode = "full") {
         value: field.value || ""
       }))
     })) : [],
-    counts: compacted.counts,
+    counts: baseObservation.counts,
     note: "Observation compacted aggressively for synthesis retry."
   };
 }
 
-function compactResultsForSynthesis(results, mode = "full") {
-  const items = Array.isArray(results) ? results : [];
-  if (mode !== "compact") {
-    return items.map(stripLargeArtifactsForSynthesis);
+function dedupeObservationTextForSynthesis(text) {
+  const blocks = splitTextIntoDedupBlocks(text);
+  if (blocks.length <= 1) {
+    return {
+      text: String(text || ""),
+      removedCount: 0
+    };
   }
 
-  return items.slice(0, 10).map((result) => ({
+  const kept = [];
+  const fingerprints = new Set();
+  let removedCount = 0;
+
+  for (const block of blocks) {
+    const fingerprint = fingerprintTextBlock(block);
+    if (!fingerprint) {
+      continue;
+    }
+    if (fingerprints.has(fingerprint) || kept.some((candidate) => areTextBlocksVerySimilar(candidate, block))) {
+      removedCount += 1;
+      continue;
+    }
+    kept.push(block);
+    fingerprints.add(fingerprint);
+  }
+
+  return {
+    text: kept.join("\n\n"),
+    removedCount
+  };
+}
+
+function splitTextIntoDedupBlocks(text) {
+  const raw = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (!raw) {
+    return [];
+  }
+
+  const paragraphChunks = raw.split(/\n\s*\n+/).map((chunk) => chunk.trim()).filter(Boolean);
+  if (paragraphChunks.length > 1) {
+    return paragraphChunks;
+  }
+
+  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) {
+    return [];
+  }
+
+  const blocks = [];
+  let current = [];
+  let currentLength = 0;
+  for (const line of lines) {
+    current.push(line);
+    currentLength += line.length;
+    if (currentLength >= 180 || /[.!?]$/.test(line)) {
+      blocks.push(current.join(" ").trim());
+      current = [];
+      currentLength = 0;
+    }
+  }
+  if (current.length) {
+    blocks.push(current.join(" ").trim());
+  }
+  return blocks.filter(Boolean);
+}
+
+function normalizeTextBlock(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function fingerprintTextBlock(text) {
+  return normalizeTextBlock(text)
+    .replace(/\b(the|and|for|with|this|that|from|amazon|ssd|sono|della|delle|degli|dello|dell|con|per|che|una|uno)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function areTextBlocksVerySimilar(a, b) {
+  const normA = normalizeTextBlock(a);
+  const normB = normalizeTextBlock(b);
+  if (!normA || !normB) {
+    return false;
+  }
+  if (normA === normB) {
+    return true;
+  }
+
+  const tokensA = new Set(normA.split(" ").filter((token) => token.length >= 4));
+  const tokensB = new Set(normB.split(" ").filter((token) => token.length >= 4));
+  if (!tokensA.size || !tokensB.size) {
+    return false;
+  }
+
+  let overlap = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  const containment = overlap / Math.min(tokensA.size, tokensB.size);
+  const balance = Math.min(normA.length, normB.length) / Math.max(normA.length, normB.length);
+  return containment >= 0.82 && balance >= 0.7;
+}
+
+function compactResultsForSynthesis(results, mode = "full") {
+  const items = Array.isArray(results) ? results : [];
+  const latestObservation = getLatestObservationFromResults(items);
+  const limit = mode === "compact" ? 10 : 16;
+  const summarized = items
+    .slice(0, limit)
+    .map((result) => summarizeResultForSynthesis(result, latestObservation, mode))
+    .filter(Boolean);
+
+  return dedupeSummarizedResults(summarized);
+}
+
+function summarizeResultForSynthesis(result, latestObservation, mode = "full") {
+  if (!result) {
+    return null;
+  }
+
+  const artifact = summarizeArtifactForSynthesis(result.artifact, latestObservation, mode);
+  const entry = {
     action_id: result.action_id || "",
     status: result.status || "",
     target_verified: Boolean(result.target_verified),
     page_changed: Boolean(result.page_changed),
     type: result.type || "",
     log_message: result.log_message || "",
-    validation_messages: Array.isArray(result.validation_messages) ? result.validation_messages.slice(0, 3) : [],
-    artifact: summarizeArtifactForSynthesis(result.artifact)
-  }));
+    validation_messages: Array.isArray(result.validation_messages) ? result.validation_messages.slice(0, 3) : []
+  };
+
+  if (mode !== "compact") {
+    if (result.before?.value != null) {
+      entry.before = { value: String(result.before.value).slice(0, 200) };
+    }
+    if (result.after?.value != null) {
+      entry.after = { value: String(result.after.value).slice(0, 200) };
+    }
+  }
+
+  if (artifact) {
+    entry.artifact = artifact;
+  }
+
+  if (!entry.log_message && !entry.artifact && !entry.action_id) {
+    return null;
+  }
+
+  return entry;
 }
 
-function summarizeArtifactForSynthesis(artifact) {
+function dedupeSummarizedResults(results) {
+  const seen = new Set();
+  const output = [];
+
+  for (const result of results) {
+    const key = JSON.stringify({
+      action_id: result.action_id || "",
+      status: result.status || "",
+      log_message: result.log_message || "",
+      artifact: result.artifact || null
+    });
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(result);
+  }
+
+  return output;
+}
+
+function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode = "full") {
   if (!artifact) {
     return null;
   }
 
   if (artifact.kind === "page_observation") {
     const observation = artifact.observation || {};
+    const sameAsTopLevel = isObservationEquivalentForSynthesis(observation, latestObservation);
+    if (sameAsTopLevel) {
+      return {
+        kind: "page_observation",
+        duplicateOfTopLevelObservation: true,
+        title: observation.tab?.title || "",
+        url: observation.tab?.url || ""
+      };
+    }
+
     return {
       kind: "page_observation",
       title: observation.tab?.title || "",
@@ -5411,7 +5595,7 @@ function summarizeArtifactForSynthesis(artifact) {
       kind: "http_response",
       statusCode: artifact.statusCode || null,
       finalUrl: artifact.finalUrl || artifact.url || "",
-      bodyPreview: formatHttpBodyPreview(artifact).slice(0, 1200)
+      bodyPreview: formatHttpBodyPreview(artifact).slice(0, mode === "compact" ? 700 : 1200)
     };
   }
 
@@ -5419,13 +5603,36 @@ function summarizeArtifactForSynthesis(artifact) {
     return {
       kind: "web_search",
       query: artifact.query || "",
-      results: Array.isArray(artifact.results) ? artifact.results.slice(0, 5) : []
+      results: Array.isArray(artifact.results) ? artifact.results.slice(0, mode === "compact" ? 3 : 5) : []
+    };
+  }
+
+  if (artifact.kind === "screenshot") {
+    return {
+      kind: "screenshot",
+      ocrText: String(artifact.ocrText || "").slice(0, mode === "compact" ? 700 : 1200)
     };
   }
 
   return {
     kind: artifact.kind || "artifact"
   };
+}
+
+function isObservationEquivalentForSynthesis(a, b) {
+  if (!a || !b) {
+    return false;
+  }
+
+  const urlA = normalizeUrlForContext(a.tab?.url || "");
+  const urlB = normalizeUrlForContext(b.tab?.url || "");
+  if (urlA && urlB && urlA === urlB) {
+    return true;
+  }
+
+  const titleA = normalizeTextBlock(a.tab?.title || "");
+  const titleB = normalizeTextBlock(b.tab?.title || "");
+  return Boolean(titleA && titleB && titleA === titleB);
 }
 
 function stripLargeArtifactsForSynthesis(result) {
