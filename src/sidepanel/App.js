@@ -365,9 +365,9 @@ function applyTheme() {
 }
 
 function getThemeIcon() {
-  if (state.theme === "dark") return "D";
-  if (state.theme === "light") return "L";
-  return "S";
+  if (state.theme === "dark") return "☾";
+  if (state.theme === "light") return "☀";
+  return "◐";
 }
 
 function getThemeTitle() {
