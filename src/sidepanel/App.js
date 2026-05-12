@@ -220,6 +220,8 @@ function render() {
   if (httpProviderForm) httpProviderForm.addEventListener("submit", saveHttpProviderFromForm);
   const testHttpProviderButton = document.getElementById("test-http-provider");
   if (testHttpProviderButton) testHttpProviderButton.addEventListener("click", testHttpProviderFromForm);
+  const cancelHttpProviderEditButton = document.getElementById("cancel-http-provider-edit");
+  if (cancelHttpProviderEditButton) cancelHttpProviderEditButton.addEventListener("click", cancelHttpProviderEdit);
   document.querySelectorAll("[data-http-provider-edit]").forEach((button) => {
     button.addEventListener("click", () => editHttpProvider(button.dataset.httpProviderEdit));
   });
@@ -542,8 +544,9 @@ function renderHttpProviderSettings() {
         <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password)}">
         ${renderHttpProviderModelControl()}
         <div class="button-row">
-          <button id="test-http-provider" type="button">Test</button>
-          <button type="submit">Save HTTP Provider</button>
+          <button id="test-http-provider" type="button">Refresh Models</button>
+          <button type="submit">${state.httpProviderDraft.id ? "Save Changes" : "Save HTTP Provider"}</button>
+          ${state.httpProviderDraft.id ? `<button id="cancel-http-provider-edit" type="button">Cancel Edit</button>` : ""}
         </div>
       </form>
       <ul class="compact-list">
@@ -1725,7 +1728,10 @@ function readHttpProviderDraft() {
     password,
     authType: username || password ? "basic" : "none",
     model,
-    models: state.httpProviderDraft.models?.length ? state.httpProviderDraft.models : (model ? [model] : []),
+    models: state.httpProviderDraft.models?.length
+      ? Array.from(new Set([...state.httpProviderDraft.models, ...(model ? [model] : [])]))
+      : (model ? [model] : []),
+    loadedModels: state.httpProviderDraft.loadedModels || [],
     lastStatus: state.httpProviderDraft.lastStatus || "ready",
     lastMessage: state.httpProviderDraft.lastMessage || "OpenAI-compatible HTTP provider is configured."
   };
@@ -1735,6 +1741,11 @@ function editHttpProvider(id) {
   const provider = state.httpProviders.find((item) => item.id === id);
   if (!provider) return;
   state.httpProviderDraft = { ...provider };
+  render();
+}
+
+function cancelHttpProviderEdit() {
+  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "" };
   render();
 }
 
