@@ -401,6 +401,11 @@ h2 {
   color: var(--muted);
 }
 
+.message-error-stack {
+  display: grid;
+  gap: 8px;
+}
+
 .message-thinking {
   margin: 0 0 8px;
 }

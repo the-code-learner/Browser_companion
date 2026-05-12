@@ -820,10 +820,13 @@ function renderErrorNote(message) {
   const details = buildErrorNoteDetails(message);
   const items = details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
   return `
-    <details class="action-note action-error">
-      <summary>${escapeHtml(getErrorNoteSummary(message))}</summary>
-      <ul>${items}</ul>
-    </details>
+    <div class="message-error-stack">
+      <details class="action-note action-error">
+        <summary>${escapeHtml(getErrorNoteSummary(message))}</summary>
+        <ul>${items}</ul>
+      </details>
+      ${renderMessageThinking(message)}
+    </div>
   `;
 }
 
