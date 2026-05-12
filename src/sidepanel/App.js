@@ -756,9 +756,22 @@ function renderMessage(message) {
         </div>
       </div>
       ${renderMessageThinking(message)}
-      <div class="message-body">${renderRichText(message.text)}</div>
+      ${renderMessageContent(message)}
     </article>
   `;
+}
+
+function renderMessageContent(message) {
+  if (message.variant === "error") {
+    return `
+      <details class="action-note message-error" open>
+        <summary>Error</summary>
+        <div class="message-error-body">${renderRichText(message.text)}</div>
+      </details>
+    `;
+  }
+
+  return `<div class="message-body">${renderRichText(message.text)}</div>`;
 }
 
 function renderMessageThinking(message) {
@@ -1246,6 +1259,7 @@ async function observePage(options = {}) {
       state.messages.push({
         role: "assistant",
         text: permission.error,
+        variant: "error",
         createdAt: Date.now()
       });
     }
@@ -2015,6 +2029,7 @@ async function processOutboundQueue() {
         state.messages.push({
           role: "assistant",
           text: error.message || "The queued request could not be completed.",
+          variant: "error",
           createdAt: Date.now()
         });
         state.activity.unshift(`Queued request failed: ${error.message || "Unexpected error."}`);
@@ -2644,6 +2659,7 @@ async function handleAgentResult(result, options = {}) {
       role: "assistant",
       text: formatProviderAgentErrorMessage(result),
       thinking: getAgentDisplayThinking(result),
+      variant: "error",
       createdAt: Date.now()
     });
     state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
@@ -2865,6 +2881,7 @@ async function confirmPendingPlan(options = {}) {
     state.messages.push({
       role: "assistant",
       text: error.message || "The confirmed action could not be executed.",
+      variant: "error",
       createdAt: Date.now()
     });
     state.activity.unshift(`Execution failed: ${error.message || "Unexpected error."}`);
@@ -2881,6 +2898,7 @@ async function executeActionPlan(plan, options = {}) {
     state.messages.push({
       role: "assistant",
       text: pageMatch.error,
+      variant: "error",
       createdAt: Date.now()
     });
     state.activity.unshift(`Execution blocked: ${pageMatch.error}`);
@@ -2899,6 +2917,7 @@ async function executeActionPlan(plan, options = {}) {
     state.messages.push({
       role: "assistant",
       text: permission.error,
+      variant: "error",
       createdAt: Date.now()
     });
     state.activity.unshift(`Execution blocked: ${permission.error}`);
@@ -2919,7 +2938,7 @@ async function executeActionPlan(plan, options = {}) {
   }, response.ok ? "Action execution response received." : response.error);
 
   if (!response.ok) {
-    state.messages.push({ role: "assistant", text: response.error, createdAt: Date.now() });
+    state.messages.push({ role: "assistant", text: response.error, variant: "error", createdAt: Date.now() });
     state.activity.unshift(`Execution failed: ${response.error}`);
     render();
     return;
