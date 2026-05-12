@@ -1424,7 +1424,8 @@ function runHttpProviderAgentRequest(provider, payload = {}) {
     })
     .catch((error) => ({
       type: "agent_error",
-      message: error.message || "HTTP provider request failed."
+      message: error.message || "HTTP provider request failed.",
+      thinking: error?.partialThinking || ""
     }));
 }
 
@@ -1441,7 +1442,8 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
     }))
     .catch((error) => ({
       type: "natural_response",
-      text: error.message || "HTTP provider synthesis failed."
+      text: error.message || "HTTP provider synthesis failed.",
+      thinking: error?.partialThinking || ""
     }));
 }
 
@@ -1543,18 +1545,34 @@ async function readStreamingChatCompletion(response) {
   let finishReason = "";
   let usage = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    let eventBoundary = findSseEventBoundary(buffer);
-    while (eventBoundary) {
-      const rawEvent = buffer.slice(0, eventBoundary.index);
-      buffer = buffer.slice(eventBoundary.index + eventBoundary.length);
-      consumeStreamingEvent(rawEvent);
-      eventBoundary = findSseEventBoundary(buffer);
+      let eventBoundary = findSseEventBoundary(buffer);
+      while (eventBoundary) {
+        const rawEvent = buffer.slice(0, eventBoundary.index);
+        buffer = buffer.slice(eventBoundary.index + eventBoundary.length);
+        consumeStreamingEvent(rawEvent);
+        eventBoundary = findSseEventBoundary(buffer);
+      }
     }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const enriched = new Error(
+        aggregatedReasoning
+          ? "The operation was aborted due to timeout after streamed thinking arrived but before the final assistant answer was completed."
+          : "The operation was aborted due to timeout before the final assistant answer was completed."
+      );
+      enriched.name = error.name;
+      enriched.partialThinking = aggregatedReasoning;
+      enriched.partialContent = aggregatedContent;
+      enriched.finishReason = finishReason;
+      throw enriched;
+    }
+    throw error;
   }
 
   buffer += decoder.decode();
