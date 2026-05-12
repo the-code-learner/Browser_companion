@@ -744,6 +744,10 @@ function updateConfirmButtonState() {
 }
 
 function renderMessage(message) {
+  if (message.role === "assistant" && message.variant === "error") {
+    return renderErrorNote(message);
+  }
+
   const status = getQueuedMessageStatusLabel(message);
   const steerState = getQueuedMessageSteerState(message);
   return `
@@ -761,16 +765,42 @@ function renderMessage(message) {
   `;
 }
 
-function renderMessageContent(message) {
-  if (message.variant === "error") {
-    return `
-      <details class="action-note message-error" open>
-        <summary>Error</summary>
-        <div class="message-error-body">${renderRichText(message.text)}</div>
-      </details>
-    `;
+function renderErrorNote(message) {
+  const details = buildErrorNoteDetails(message);
+  const items = details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  return `
+    <details class="action-note action-error">
+      <summary>${escapeHtml(getErrorNoteSummary(message))}</summary>
+      <ul>${items}</ul>
+    </details>
+  `;
+}
+
+function getErrorNoteSummary(message) {
+  const raw = String(message?.text || "").trim();
+
+  if (/timeout|timed out|aborted due to timeout/i.test(raw)) {
+    return "Provider request timed out";
   }
 
+  return "Provider error";
+}
+
+function buildErrorNoteDetails(message) {
+  const details = [];
+  const text = compact(String(message?.text || "").trim());
+  if (text) {
+    details.push(text);
+  }
+
+  if (String(message?.thinking || "").trim()) {
+    details.push("The model had started reasoning before the request stopped.");
+  }
+
+  return details.length ? details : ["The provider request failed before a usable response was returned."];
+}
+
+function renderMessageContent(message) {
   return `<div class="message-body">${renderRichText(message.text)}</div>`;
 }
 
@@ -2738,14 +2768,14 @@ function normalizeAgentControlFlow(result) {
 
 function isProviderTimeoutResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""}`;
-  return result?.type === "agent_error" && (/\b524\b/.test(text) || /timeout occurred|timed out/i.test(text));
+  return result?.type === "agent_error" && (/\b524\b/.test(text) || /timeout occurred|timed out|aborted due to timeout/i.test(text));
 }
 
 function formatProviderAgentErrorMessage(result) {
   const raw = String(result?.message || "").trim();
 
-  if (/\b524\b/.test(raw) || /timeout occurred|timed out/i.test(raw)) {
-    return "Il provider HTTP ha risposto con un timeout 524: la richiesta arriva al server, ma il modello non completa la risposta in tempo. Se ricapita anche senza allegati, il collo di bottiglia e' lato upstream oppure il modello scelto e' troppo lento per questa pagina.";
+  if (/\b524\b/.test(raw) || /timeout occurred|timed out|aborted due to timeout/i.test(raw)) {
+    return "La richiesta al provider HTTP e' andata in timeout prima che il modello completasse la risposta. Se succede spesso, il modello e' troppo lento per questa pagina oppure il timeout locale del bridge va aumentato.";
   }
 
   if (/exceeds the available context size|exceed_context_size_error/i.test(raw)) {

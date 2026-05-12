@@ -417,42 +417,27 @@ h2 {
   margin-bottom: 0;
 }
 
-.message-error {
-  margin: 0 0 8px;
+.action-error {
   color: #b98f97;
 }
 
-.message-error[open] {
+.action-error[open] {
   border-left-color: #8f4d5d;
 }
 
-.message-error summary {
+.action-error summary {
   color: #d6a6b0;
 }
 
-.message-error-body {
-  margin-top: 6px;
-  color: #f0c6cd;
-}
-
-.message-error-body > :first-child {
-  margin-top: 0;
-}
-
-.message-error-body > :last-child {
-  margin-bottom: 0;
-}
-
-:root[data-theme="light"] .message-error,
-:root[data-theme="light"] .message-error-body {
+:root[data-theme="light"] .action-error {
   color: #8f5561;
 }
 
-:root[data-theme="light"] .message-error summary {
+:root[data-theme="light"] .action-error summary {
   color: #9d4d60;
 }
 
-:root[data-theme="light"] .message-error[open] {
+:root[data-theme="light"] .action-error[open] {
   border-left-color: #c88a98;
 }
 
