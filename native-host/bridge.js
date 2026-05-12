@@ -1523,6 +1523,11 @@ async function readStreamingChatCompletion(response) {
     return response.text();
   }
 
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    return response.text();
+  }
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1536,12 +1541,12 @@ async function readStreamingChatCompletion(response) {
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      const rawEvent = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
+    let eventBoundary = findSseEventBoundary(buffer);
+    while (eventBoundary) {
+      const rawEvent = buffer.slice(0, eventBoundary.index);
+      buffer = buffer.slice(eventBoundary.index + eventBoundary.length);
       consumeStreamingEvent(rawEvent);
-      boundary = buffer.indexOf("\n\n");
+      eventBoundary = findSseEventBoundary(buffer);
     }
   }
 
@@ -1595,6 +1600,24 @@ async function readStreamingChatCompletion(response) {
       if (parsed?.usage) usage = parsed.usage;
     }
   }
+}
+
+function findSseEventBoundary(buffer) {
+  const value = String(buffer || "");
+  if (!value) return null;
+
+  const crlfBoundary = value.indexOf("\r\n\r\n");
+  const lfBoundary = value.indexOf("\n\n");
+
+  if (crlfBoundary >= 0 && (lfBoundary < 0 || crlfBoundary <= lfBoundary)) {
+    return { index: crlfBoundary, length: 4 };
+  }
+
+  if (lfBoundary >= 0) {
+    return { index: lfBoundary, length: 2 };
+  }
+
+  return null;
 }
 
 function normalizeStreamText(value) {

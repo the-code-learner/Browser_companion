@@ -745,19 +745,29 @@ function updateConfirmButtonState() {
 
 function renderMessage(message) {
   const status = getQueuedMessageStatusLabel(message);
-  const canSteer = Boolean(message.role === "user" && isQueuedMessageSteerable(message.id));
+  const steerState = getQueuedMessageSteerState(message);
   return `
     <article class="message ${message.role}">
       <div class="message-head">
         <span>${message.role === "user" ? "You" : "Companion"}</span>
         <div class="message-tools">
           ${status ? `<em class="message-status">${escapeHtml(status)}</em>` : ""}
-          ${canSteer ? `<button type="button" class="message-steer" data-steer-message="${escapeHtml(message.id)}">Steer</button>` : ""}
+          ${renderSteerButton(message, steerState)}
         </div>
       </div>
       <div class="message-body">${renderRichText(message.text)}</div>
     </article>
   `;
+}
+
+function renderSteerButton(message, steerState) {
+  if (message.role !== "user" || steerState === "hidden") {
+    return "";
+  }
+
+  const disabled = steerState === "next" ? "disabled" : "";
+  const title = steerState === "next" ? "This queued message is already next." : "Move this queued message to the front.";
+  return `<button type="button" class="message-steer" data-steer-message="${escapeHtml(message.id)}" title="${escapeHtml(title)}" ${disabled}>Steer</button>`;
 }
 
 function renderChatTimeline() {
@@ -2036,7 +2046,15 @@ function steerQueuedMessage(messageId) {
   }
 
   const index = state.outboundQueue.findIndex((item) => item.messageId === targetId);
-  if (index <= 0) {
+  if (index < 0) {
+    return;
+  }
+
+  if (index === 0) {
+    state.activity.unshift(state.isProcessingQueue
+      ? "Queued message is already next."
+      : "Queued message is already at the front.");
+    render();
     return;
   }
 
@@ -2069,6 +2087,23 @@ function setMessageQueueStatus(messageId, status) {
 
 function isQueuedMessageSteerable(messageId) {
   return state.outboundQueue.some((item, index) => item.messageId === messageId && index > 0);
+}
+
+function getQueuedMessageSteerState(message) {
+  if (message?.role !== "user" || !message?.id) {
+    return "hidden";
+  }
+
+  const index = state.outboundQueue.findIndex((item) => item.messageId === message.id);
+  if (index < 0) {
+    return "hidden";
+  }
+
+  if (index === 0) {
+    return state.isProcessingQueue ? "next" : "hidden";
+  }
+
+  return "enabled";
 }
 
 function getQueuedMessageStatusLabel(message) {
@@ -2131,14 +2166,56 @@ function consumePendingSteeredQueueItem() {
     return null;
   }
 
-  const queuedItem = state.outboundQueue.find((item) => item.messageId === state.pendingSteeredMessageId);
-  if (!queuedItem) {
+  const index = state.outboundQueue.findIndex((item) => item.messageId === state.pendingSteeredMessageId);
+  if (index < 0) {
     state.pendingSteeredMessageId = null;
     return null;
   }
 
+  const [queuedItem] = state.outboundQueue.splice(index, 1);
   state.pendingSteeredMessageId = null;
   return queuedItem;
+}
+
+function buildSteeredContinuationGoal(baseGoal, steeredQueueItem) {
+  const goal = compact(baseGoal || "");
+  const steerText = compact(steeredQueueItem?.text || "");
+  if (!steerText) {
+    return goal;
+  }
+
+  if (!goal) {
+    return steerText;
+  }
+
+  return compact(
+    `Original user request:\n${goal}\n\nAdditional user message received while the request was still in progress:\n${steerText}`
+  );
+}
+
+function appendSteeredContinuationReason(reason, steeredQueueItem) {
+  const baseReason = compact(reason || "");
+  const steerText = compact(steeredQueueItem?.text || "");
+  if (!steerText) {
+    return baseReason;
+  }
+
+  return compact(
+    `${baseReason}\nA new user message arrived while you were still working. Treat it as an addition or refinement to the same task. Continue from the current progress instead of restarting from scratch. New user message: ${steerText}`
+  );
+}
+
+function injectSteeredMessageIntoCurrentFlow(steeredQueueItem) {
+  if (!steeredQueueItem) {
+    return;
+  }
+
+  materializeQueuedMessage(steeredQueueItem, "steered");
+  state.activity.unshift("Steered message injected into the current flow.");
+  addDebugLog("agent.steer.injected", {
+    messageId: steeredQueueItem.messageId,
+    text: steeredQueueItem.text
+  }, "Injected the steered queued message into the current flow.");
 }
 
 async function getAgentResult(goal, options = {}) {
@@ -2823,20 +2900,13 @@ async function executeActionPlan(plan, options = {}) {
 
   const steeredQueueItem = consumePendingSteeredQueueItem();
   if (steeredQueueItem) {
-    materializeQueuedMessage(steeredQueueItem, "steered");
-    state.activity.unshift("Steered message injected after the current action.");
-    addDebugLog("agent.steer.injected", {
-      messageId: steeredQueueItem.messageId,
-      text: steeredQueueItem.text
-    }, "Injected the steered queued message after the current action.");
+    injectSteeredMessageIntoCurrentFlow(steeredQueueItem);
     render();
-    await refreshPageAfterAction();
-    return;
   }
 
   if (shouldAutoContinueAfterReadOnlyAction(normalizedPlan, results, options)) {
     await refreshPageAfterAction();
-    const goal = getLastUserMessageText() || normalizedPlan.goal || "";
+    const goal = buildSteeredContinuationGoal(normalizedPlan.goal || getLastUserMessageText() || "", steeredQueueItem);
     const continuationDepth = (options.continuationDepth || 0) + 1;
     state.activity.unshift("Continuing with updated page context.");
     addDebugLog("agent.auto_continue", {
@@ -2848,7 +2918,10 @@ async function executeActionPlan(plan, options = {}) {
     render();
     const followUpResult = await getAgentResult(goal, {
       continuationDepth,
-      continuationReason: "A read-only browser action was just executed to gather context. Use the updated page observation to answer the user's original request now if possible. Only request another read-only action if essential.",
+      continuationReason: appendSteeredContinuationReason(
+        "A read-only browser action was just executed to gather context. Use the updated page observation to answer the user's original request now if possible. Only request another read-only action if essential.",
+        steeredQueueItem
+      ),
       planContext: options.planContext || getObservedPageContext()
     });
     await handleAgentResult(followUpResult, {
@@ -2859,15 +2932,15 @@ async function executeActionPlan(plan, options = {}) {
   }
 
   if (isSuccessfulReadOnlyContextRun(normalizedPlan, results)) {
-    const finalized = await finalizeReadOnlyRequest(normalizedPlan, results, options);
+    const finalized = await finalizeReadOnlyRequest(normalizedPlan, results, { ...options, steeredQueueItem });
     if (finalized) {
       return;
     }
   }
 
   const synthesized = await maybeSynthesizeResults(plan, completionResults);
-  if (shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized, options)) {
-    const goal = getLastUserMessageText() || normalizedPlan.goal || "";
+  if (steeredQueueItem || shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized, options)) {
+    const goal = buildSteeredContinuationGoal(normalizedPlan.goal || getLastUserMessageText() || "", steeredQueueItem);
     const continuationDepth = (options.continuationDepth || 0) + 1;
     const planContext = options.planContext || getObservedPageContext();
     state.activity.unshift("Continuing with the latest action results.");
@@ -2881,7 +2954,10 @@ async function executeActionPlan(plan, options = {}) {
     render();
     const followUpResult = await getAgentResult(goal, {
       continuationDepth,
-      continuationReason: buildPostActionContinuationReason(normalizedPlan, completionResults, synthesized),
+      continuationReason: appendSteeredContinuationReason(
+        buildPostActionContinuationReason(normalizedPlan, completionResults, synthesized),
+        steeredQueueItem
+      ),
       planContext
     });
     await handleAgentResult(followUpResult, {
@@ -2948,7 +3024,7 @@ function isSuccessfulReadOnlyContextRun(plan, results) {
 async function finalizeReadOnlyRequest(plan, results, options = {}) {
   await refreshPageAfterAction();
 
-  const goal = getLastUserMessageText() || plan.goal || "";
+  const goal = buildSteeredContinuationGoal(plan.goal || getLastUserMessageText() || "", options.steeredQueueItem);
   const responseLanguage = detectUserLanguage(goal);
   const planContext = options.planContext || getObservedPageContext();
   const completionResults = appendCurrentObservationArtifact(results);
@@ -2980,7 +3056,10 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
 
   const followUpResult = await getAgentResult(goal, {
     continuationDepth: options.continuationDepth || 0,
-    continuationReason: "Context gathering is complete. Answer the user's original request directly now using the latest page observation. Do not return another read-only action plan. If something is still missing, explain exactly what is missing.",
+    continuationReason: appendSteeredContinuationReason(
+      "Context gathering is complete. Answer the user's original request directly now using the latest page observation. Do not return another read-only action plan. If something is still missing, explain exactly what is missing.",
+      options.steeredQueueItem
+    ),
     planContext
   });
 
