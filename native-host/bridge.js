@@ -18,6 +18,7 @@ const npmCliPath = resolveNpmCliPath();
 const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
 const providerModelCache = new Map();
 const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
+const activeRequestControllers = new Map();
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -40,25 +41,27 @@ function readMessages() {
 }
 
 function handleMessage(message) {
+  const requestId = message?.requestId || "";
+
   if (message?.type === "health") {
-    writeMessage(getHealth());
+    writeResponse(requestId, getHealth());
     return;
   }
 
   if (message?.type === "connect") {
-    writeMessage(connectProvider(message.payload));
+    writeResponse(requestId, connectProvider(message.payload));
     return;
   }
 
   if (message?.type === "provider_install") {
-    writeMessage(installProvider(message.payload));
+    writeResponse(requestId, installProvider(message.payload));
     return;
   }
 
   if (message?.type === "http_provider_test") {
     testHttpProvider(message.payload)
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "http_provider_test",
         status: "error",
         models: [],
@@ -69,8 +72,8 @@ function handleMessage(message) {
 
   if (message?.type === "http_provider_unload") {
     unloadHttpProviderModel(message.payload)
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "http_provider_unload",
         status: "error",
         message: error.message || "HTTP provider model unload failed."
@@ -79,34 +82,75 @@ function handleMessage(message) {
   }
 
   if (message?.type === "nodejs_install") {
-    writeMessage(installNodejs());
+    writeResponse(requestId, installNodejs());
     return;
   }
 
   if (message?.type === "agent_request") {
-    Promise.resolve(runAgentRequest(message.payload))
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runAgentRequest(message.payload, { abortSignal: controller.signal }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "agent_error",
         message: error.message || "Agent request failed."
-      }));
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
     return;
   }
 
   if (message?.type === "synthesis_request") {
-    Promise.resolve(runSynthesisRequest(message.payload))
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runSynthesisRequest(message.payload, { abortSignal: controller.signal }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "natural_response",
         text: error.message || "Synthesis request failed."
-      }));
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
+    return;
+  }
+
+  if (message?.type === "stop_active_request") {
+    const targetRequestId = String(message.payload?.targetRequestId || "");
+    const controller = targetRequestId ? activeRequestControllers.get(targetRequestId) : null;
+    if (controller && !controller.signal.aborted) {
+      controller.abort("user_stop");
+      writeResponse(requestId, {
+        type: "stop_active_request",
+        status: "stopping",
+        targetRequestId,
+        message: "Stop signal sent to the active provider request."
+      });
+      return;
+    }
+
+    writeResponse(requestId, {
+      type: "stop_active_request",
+      status: "idle",
+      targetRequestId,
+      message: "No matching active provider request was found."
+    });
     return;
   }
 
   if (message?.type === "extract_attachment") {
     extractAttachment(message.payload)
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "attachment_extraction",
         status: "error",
         text: "",
@@ -117,8 +161,8 @@ function handleMessage(message) {
 
   if (message?.type === "http_request") {
     runHttpRequest(message.payload)
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "http_response",
         status: "error",
         message: error.message || "HTTP request failed."
@@ -128,8 +172,8 @@ function handleMessage(message) {
 
   if (message?.type === "web_search") {
     runWebSearch(message.payload)
-      .then(writeMessage)
-      .catch((error) => writeMessage({
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
         type: "web_search",
         status: "error",
         results: [],
@@ -140,9 +184,9 @@ function handleMessage(message) {
 
   if (message?.type === "dev_watch_status") {
     try {
-      writeMessage(getDevWatchStatus());
+      writeResponse(requestId, getDevWatchStatus());
     } catch (error) {
-      writeMessage({
+      writeResponse(requestId, {
         type: "dev_watch_status",
         enabled: false,
         fingerprint: "",
@@ -154,15 +198,15 @@ function handleMessage(message) {
   }
 
   if (message?.type === "user_memory_get") {
-    writeMessage(getUserMemory());
+    writeResponse(requestId, getUserMemory());
     return;
   }
 
   if (message?.type === "user_memory_save") {
     try {
-      writeMessage(saveUserMemory(message.payload));
+      writeResponse(requestId, saveUserMemory(message.payload));
     } catch (error) {
-      writeMessage({
+      writeResponse(requestId, {
         type: "user_memory",
         status: "error",
         items: readUserMemoryItems(),
@@ -174,9 +218,9 @@ function handleMessage(message) {
 
   if (message?.type === "user_memory_delete") {
     try {
-      writeMessage(deleteUserMemory(message.payload));
+      writeResponse(requestId, deleteUserMemory(message.payload));
     } catch (error) {
-      writeMessage({
+      writeResponse(requestId, {
         type: "user_memory",
         status: "error",
         items: readUserMemoryItems(),
@@ -186,7 +230,7 @@ function handleMessage(message) {
     return;
   }
 
-  writeMessage({
+  writeResponse(requestId, {
     connected: false,
     status: "unsupported",
     message: `Unsupported bridge message: ${message?.type || "missing"}`
@@ -1155,9 +1199,9 @@ function spawnLoginProcess() {
   });
 }
 
-function runAgentRequest(payload = {}) {
+function runAgentRequest(payload = {}, options = {}) {
   if (payload.httpProvider) {
-    return runHttpProviderAgentRequest(payload.httpProvider, payload);
+    return runHttpProviderAgentRequest(payload.httpProvider, payload, options);
   }
 
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
@@ -1219,9 +1263,9 @@ function runAgentRequest(payload = {}) {
   }
 }
 
-function runSynthesisRequest(payload = {}) {
+function runSynthesisRequest(payload = {}, options = {}) {
   if (payload.httpProvider) {
-    return runHttpProviderSynthesisRequest(payload.httpProvider, payload);
+    return runHttpProviderSynthesisRequest(payload.httpProvider, payload, options);
   }
 
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
@@ -1412,9 +1456,9 @@ function extractLoadedModels(json) {
     .filter(Boolean);
 }
 
-function runHttpProviderAgentRequest(provider, payload = {}) {
+function runHttpProviderAgentRequest(provider, payload = {}, options = {}) {
   const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
-  return runHttpProviderCompletion(provider, prompt, true)
+  return runHttpProviderCompletion(provider, prompt, true, options)
     .then(({ text, thinking }) => {
       const output = compactProviderOutput(text);
       const parsed = parseAgentJsonOrNaturalResponse(output);
@@ -1430,12 +1474,12 @@ function runHttpProviderAgentRequest(provider, payload = {}) {
     }));
 }
 
-function runHttpProviderSynthesisRequest(provider, payload = {}) {
+function runHttpProviderSynthesisRequest(provider, payload = {}, options = {}) {
   const prompt = buildSynthesisPrompt({
     ...payload,
     observation: compactObservationForPrompt(payload.observation)
   });
-  return runHttpProviderCompletion(provider, prompt, false)
+  return runHttpProviderCompletion(provider, prompt, false, options)
     .then(({ text, thinking }) => ({
       type: "natural_response",
       text: compactProviderOutput(text),
@@ -1448,7 +1492,7 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
     }));
 }
 
-async function runHttpProviderCompletion(provider, prompt, wantsJson) {
+async function runHttpProviderCompletion(provider, prompt, wantsJson, options = {}) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
   const useStreaming = Boolean(provider.useStreaming);
   const initialMaxTokens = getHttpProviderPositiveInt(provider.maxTokens, 24576, 1);
@@ -1484,13 +1528,13 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
     requestBody
   });
 
-  let json = await postHttpProviderCompletion(baseUrl, provider, requestBody, wantsJson);
+  let json = await postHttpProviderCompletion(baseUrl, provider, requestBody, wantsJson, options);
   let extracted = extractChatCompletionText(json);
 
   if (!extracted.ok && extracted.retryable) {
     requestBody.max_tokens = retryMaxTokens;
     requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
-    json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false);
+    json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false, options);
     extracted = extractChatCompletionText(json);
   }
 
@@ -1512,42 +1556,53 @@ function saveHttpProviderDebugRequest(payload) {
   }
 }
 
-async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat) {
+async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat, options = {}) {
   const timeoutMs = getHttpProviderPositiveInt(provider.timeoutMs, 360000, 1000);
-  let response = await fetch(`${baseUrl}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      ...getHttpProviderHeaders(provider),
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  let text = requestBody.stream
-    ? await readStreamingChatCompletion(response)
-    : await response.text();
+  const activityTimeout = createActivityTimeoutController(timeoutMs, options.abortSignal);
 
-  if (!response.ok && canRetryWithoutResponseFormat && /response_format|json_object|unsupported/i.test(text)) {
-    delete requestBody.response_format;
-    response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  try {
+    let response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         ...getHttpProviderHeaders(provider),
         "content-type": "application/json"
       },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: activityTimeout.signal
     });
-    text = requestBody.stream
-      ? await readStreamingChatCompletion(response)
+    let text = requestBody.stream
+      ? await readStreamingChatCompletion(response, activityTimeout)
       : await response.text();
-  }
 
-  if (!response.ok) {
-    throw new Error(`HTTP provider returned ${response.status}: ${text.slice(0, 500)}`);
-  }
+    if (!response.ok && canRetryWithoutResponseFormat && /response_format|json_object|unsupported/i.test(text)) {
+      delete requestBody.response_format;
+      response = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          ...getHttpProviderHeaders(provider),
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(requestBody),
+        signal: activityTimeout.signal
+      });
+      text = requestBody.stream
+        ? await readStreamingChatCompletion(response, activityTimeout)
+        : await response.text();
+    }
 
-  return JSON.parse(text);
+    if (!response.ok) {
+      throw new Error(`HTTP provider returned ${response.status}: ${text.slice(0, 500)}`);
+    }
+
+    return JSON.parse(text);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw makeProviderAbortError(activityTimeout.getAbortKind());
+    }
+    throw error;
+  } finally {
+    activityTimeout.dispose();
+  }
 }
 
 function getHttpProviderPositiveInt(value, fallback, min = 1) {
@@ -1558,7 +1613,76 @@ function getHttpProviderPositiveInt(value, fallback, min = 1) {
   return parsed;
 }
 
-async function readStreamingChatCompletion(response) {
+function createActivityTimeoutController(timeoutMs, externalSignal) {
+  const controller = new AbortController();
+  let abortKind = "timeout";
+  let timer = null;
+  let disposed = false;
+  let externalAbortHandler = null;
+
+  const markActivity = () => {
+    if (disposed || timeoutMs <= 0) {
+      return;
+    }
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (disposed || controller.signal.aborted) {
+        return;
+      }
+      abortKind = "timeout";
+      controller.abort();
+    }, timeoutMs);
+  };
+
+  if (externalSignal) {
+    externalAbortHandler = () => {
+      if (disposed || controller.signal.aborted) {
+        return;
+      }
+      abortKind = "user";
+      controller.abort();
+    };
+
+    if (externalSignal.aborted) {
+      externalAbortHandler();
+    } else {
+      externalSignal.addEventListener("abort", externalAbortHandler, { once: true });
+    }
+  }
+
+  markActivity();
+
+  return {
+    signal: controller.signal,
+    markActivity,
+    getAbortKind: () => abortKind,
+    dispose() {
+      disposed = true;
+      clearTimeout(timer);
+      if (externalSignal && externalAbortHandler) {
+        externalSignal.removeEventListener("abort", externalAbortHandler);
+      }
+    }
+  };
+}
+
+function makeProviderAbortError(kind, partialThinking = "", partialContent = "", finishReason = "") {
+  const isUserStop = kind === "user";
+  const message = isUserStop
+    ? "The request was stopped by the user."
+    : (partialThinking
+      ? "The operation was aborted due to timeout after streamed thinking arrived but before the final assistant answer was completed."
+      : "The operation was aborted due to timeout before the final assistant answer was completed.");
+  const error = new Error(message);
+  error.name = "AbortError";
+  error.partialThinking = partialThinking;
+  error.partialContent = partialContent;
+  error.finishReason = finishReason;
+  error.abortKind = kind;
+  return error;
+}
+
+async function readStreamingChatCompletion(response, activityTimeout = null) {
   if (!response.body) {
     return response.text();
   }
@@ -1580,6 +1704,7 @@ async function readStreamingChatCompletion(response) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      activityTimeout?.markActivity?.();
       buffer += decoder.decode(value, { stream: true });
 
       let eventBoundary = findSseEventBoundary(buffer);
@@ -1592,16 +1717,12 @@ async function readStreamingChatCompletion(response) {
     }
   } catch (error) {
     if (error?.name === "AbortError") {
-      const enriched = new Error(
-        aggregatedReasoning
-          ? "The operation was aborted due to timeout after streamed thinking arrived but before the final assistant answer was completed."
-          : "The operation was aborted due to timeout before the final assistant answer was completed."
+      throw makeProviderAbortError(
+        activityTimeout?.getAbortKind?.() || "timeout",
+        aggregatedReasoning,
+        aggregatedContent,
+        finishReason
       );
-      enriched.name = error.name;
-      enriched.partialThinking = aggregatedReasoning;
-      enriched.partialContent = aggregatedContent;
-      enriched.finishReason = finishReason;
-      throw enriched;
     }
     throw error;
   }
@@ -2381,6 +2502,18 @@ function writeMessage(message) {
   const length = Buffer.alloc(4);
   length.writeUInt32LE(payload.length, 0);
   process.stdout.write(Buffer.concat([length, payload]));
+}
+
+function writeResponse(requestId, message) {
+  if (!requestId) {
+    writeMessage(message);
+    return;
+  }
+
+  writeMessage({
+    requestId,
+    ...message
+  });
 }
 
 function compact(value) {

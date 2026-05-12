@@ -451,7 +451,7 @@ h2 {
   bottom: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 6px;
   align-items: end;
   border: 1px solid var(--line);
@@ -482,6 +482,12 @@ h2 {
   color: #ffffff;
   border-color: var(--accent);
   background: var(--accent);
+}
+
+.composer-stop {
+  color: var(--ink);
+  border-color: var(--line);
+  background: var(--panel-2);
 }
 
 .composer-meta {

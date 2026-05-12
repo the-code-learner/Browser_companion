@@ -109,6 +109,8 @@ const state = {
   composerDraft: "",
   outboundQueue: [],
   isProcessingQueue: false,
+  stopProcessingRequested: false,
+  stopRequestInFlight: false,
   currentProcessingMessageId: null,
   pendingSteeredMessageId: null,
   chatAtBottom: true,
@@ -317,6 +319,8 @@ function render() {
   document.getElementById("chat-form").addEventListener("submit", handleChatSubmit);
   document.getElementById("chat-input").addEventListener("input", handleComposerInput);
   document.getElementById("chat-input").addEventListener("keydown", handleComposerKeydown);
+  const stopProcessingButton = document.getElementById("stop-processing");
+  if (stopProcessingButton) stopProcessingButton.addEventListener("click", stopCurrentProcessing);
   document.querySelectorAll("[data-steer-message]").forEach((button) => {
     button.addEventListener("click", () => steerQueuedMessage(button.dataset.steerMessage));
   });
@@ -718,6 +722,9 @@ function renderComposer() {
     ? (state.outboundQueue.length ? `Working, ${state.outboundQueue.length} queued` : "Working")
     : (state.outboundQueue.length ? `${state.outboundQueue.length} queued` : "");
   const submitLabel = state.isProcessingQueue ? "Queue" : "Send";
+  const stopButton = state.isProcessingQueue
+    ? `<button id="stop-processing" type="button" class="composer-stop" ${state.stopRequestInFlight ? "disabled" : ""}>${escapeHtml(state.stopRequestInFlight ? "Stopping..." : "Stop")}</button>`
+    : "";
 
   return `
     <div class="composer-wrap">
@@ -727,6 +734,7 @@ function renderComposer() {
           <span>Attach</span>
         </label>
         <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page">${escapeHtml(state.composerDraft)}</textarea>
+        ${stopButton}
         <button type="submit">${escapeHtml(submitLabel)}</button>
       </form>
       ${queueLabel ? `<p class="composer-meta">${escapeHtml(queueLabel)}</p>` : ""}
@@ -2120,18 +2128,26 @@ async function processOutboundQueue() {
   }
 
   state.isProcessingQueue = true;
+  state.stopProcessingRequested = false;
+  state.stopRequestInFlight = false;
   render();
 
   try {
     while (state.outboundQueue.length) {
+      if (state.stopProcessingRequested) {
+        break;
+      }
       const item = state.outboundQueue.shift();
       state.currentProcessingMessageId = item?.messageId || null;
       materializeQueuedMessage(item, "processing");
       render();
 
       try {
-        await processQueuedMessage(item);
-        setMessageQueueStatus(item?.messageId, "sent");
+        const outcome = await processQueuedMessage(item);
+        setMessageQueueStatus(item?.messageId, outcome?.stopped ? "stopped" : "sent");
+        if (outcome?.stopped || state.stopProcessingRequested) {
+          break;
+        }
       } catch (error) {
         setMessageQueueStatus(item?.messageId, "failed");
         state.messages.push({
@@ -2145,7 +2161,16 @@ async function processOutboundQueue() {
       }
     }
   } finally {
+    if (state.stopProcessingRequested) {
+      state.activity.unshift(
+        state.outboundQueue.length
+          ? `Stopped processing. ${state.outboundQueue.length} queued request(s) remain.`
+          : "Stopped processing."
+      );
+    }
     state.isProcessingQueue = false;
+    state.stopProcessingRequested = false;
+    state.stopRequestInFlight = false;
     state.currentProcessingMessageId = null;
     state.pendingSteeredMessageId = null;
     render();
@@ -2174,6 +2199,38 @@ async function processQueuedMessage(item) {
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
   const agentResult = await getAgentResult(text, { planContext });
   await handleAgentResult(agentResult, { planContext });
+  return {
+    stopped: isUserStoppedResult(agentResult)
+  };
+}
+
+async function stopCurrentProcessing() {
+  if (!state.isProcessingQueue || state.stopRequestInFlight) {
+    return;
+  }
+
+  state.stopProcessingRequested = true;
+  state.stopRequestInFlight = true;
+  state.activity.unshift("Stopping current request...");
+  render();
+
+  try {
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.STOP_ACTIVE_REQUEST, {}));
+    addDebugLog("provider.request_stop", {
+      ok: response.ok,
+      error: response.error || "",
+      result: response.envelope?.payload || null
+    }, response.ok ? (response.envelope?.payload?.message || "Stop requested") : response.error);
+
+    if (response.ok) {
+      state.activity.unshift(response.envelope?.payload?.message || "Stop requested.");
+    } else {
+      state.activity.unshift(`Stop request failed: ${response.error || "Unexpected error."}`);
+    }
+  } finally {
+    state.stopRequestInFlight = false;
+    render();
+  }
 }
 
 function steerQueuedMessage(messageId) {
@@ -2265,6 +2322,10 @@ function getQueuedMessageStatusLabel(message) {
 
   if (status === "failed") {
     return "failed";
+  }
+
+  if (status === "stopped") {
+    return "stopped";
   }
 
   if (status === "pending" && state.isProcessingQueue) {
@@ -2762,6 +2823,18 @@ async function handleAgentResult(result, options = {}) {
     return;
   }
 
+  if (isUserStoppedResult(result)) {
+    state.messages.push({
+      role: "assistant",
+      text: "Stopped the current provider request.",
+      thinking: getAgentDisplayThinking(result),
+      createdAt: Date.now()
+    });
+    state.activity.unshift("Current provider request stopped.");
+    render();
+    return;
+  }
+
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
     const provider = getSelectedProviderStatus();
     state.messages.push({
@@ -2847,6 +2920,11 @@ function normalizeAgentControlFlow(result) {
 function isProviderTimeoutResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""}`;
   return result?.type === "agent_error" && (/\b524\b/.test(text) || /timeout occurred|timed out|aborted due to timeout/i.test(text));
+}
+
+function isUserStoppedResult(result) {
+  const text = `${result?.message || ""} ${result?.error || ""}`;
+  return result?.type === "agent_error" && /stopped by the user/i.test(text);
 }
 
 function formatProviderAgentErrorMessage(result) {

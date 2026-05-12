@@ -6,6 +6,11 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 });
 
+let nativePort = null;
+let nativePortSequence = 1;
+const nativePortPending = new Map();
+let activeNativeRequestId = null;
+
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.windowId) {
     return;
@@ -86,6 +91,10 @@ async function handleMessage(message) {
 
   if (message?.type === MESSAGE_TYPES.SYNTHESIS_REQUEST) {
     return requestSynthesis(message.payload);
+  }
+
+  if (message?.type === MESSAGE_TYPES.STOP_ACTIVE_REQUEST) {
+    return stopActiveProviderRequest();
   }
 
   if (message?.type === MESSAGE_TYPES.VALIDATE_ACTION_PLAN) {
@@ -256,10 +265,12 @@ async function unloadHttpProvider(payload) {
 
 async function requestAgent(payload) {
   try {
-    const response = await sendNativeMessage({
+    const { requestId, promise } = postNativePortRequest({
       type: "agent_request",
       payload
     });
+    activeNativeRequestId = requestId;
+    const response = await promise;
     return {
       ok: true,
       envelope: makeEnvelope(MESSAGE_TYPES.AGENT_RESPONSE, response)
@@ -269,15 +280,19 @@ async function requestAgent(payload) {
       ok: false,
       error: error.message || "Provider agent request failed."
     };
+  } finally {
+    activeNativeRequestId = null;
   }
 }
 
 async function requestSynthesis(payload) {
   try {
-    const response = await sendNativeMessage({
+    const { requestId, promise } = postNativePortRequest({
       type: "synthesis_request",
       payload
     });
+    activeNativeRequestId = requestId;
+    const response = await promise;
     return {
       ok: true,
       envelope: makeEnvelope(MESSAGE_TYPES.AGENT_RESPONSE, response)
@@ -286,6 +301,40 @@ async function requestSynthesis(payload) {
     return {
       ok: false,
       error: error.message || "Provider synthesis request failed."
+    };
+  } finally {
+    activeNativeRequestId = null;
+  }
+}
+
+async function stopActiveProviderRequest() {
+  if (!activeNativeRequestId) {
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.STOP_ACTIVE_REQUEST, {
+        type: "stop_active_request",
+        status: "idle",
+        message: "No active provider request to stop."
+      })
+    };
+  }
+
+  try {
+    const { promise } = postNativePortRequest({
+      type: "stop_active_request",
+      payload: {
+        targetRequestId: activeNativeRequestId
+      }
+    });
+    const response = await promise;
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.STOP_ACTIVE_REQUEST, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Provider stop request failed."
     };
   }
 }
@@ -986,4 +1035,59 @@ function sendNativeMessage(payload) {
       resolve(response);
     });
   });
+}
+
+function ensureNativePort() {
+  if (nativePort) {
+    return nativePort;
+  }
+
+  nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+  nativePort.onMessage.addListener(handleNativePortMessage);
+  nativePort.onDisconnect.addListener(handleNativePortDisconnect);
+  return nativePort;
+}
+
+function postNativePortRequest(payload) {
+  const port = ensureNativePort();
+  const requestId = `native_${Date.now()}_${nativePortSequence++}`;
+  const promise = new Promise((resolve, reject) => {
+    nativePortPending.set(requestId, { resolve, reject });
+  });
+
+  try {
+    port.postMessage({
+      ...payload,
+      requestId
+    });
+  } catch (error) {
+    nativePortPending.delete(requestId);
+    throw error;
+  }
+
+  return { requestId, promise };
+}
+
+function handleNativePortMessage(message) {
+  const requestId = message?.requestId;
+  if (!requestId || !nativePortPending.has(requestId)) {
+    return;
+  }
+
+  const pending = nativePortPending.get(requestId);
+  nativePortPending.delete(requestId);
+  pending.resolve(message);
+}
+
+function handleNativePortDisconnect() {
+  const lastError = chrome.runtime.lastError;
+  const reason = lastError?.message || "Native host disconnected.";
+
+  for (const pending of nativePortPending.values()) {
+    pending.reject(new Error(reason));
+  }
+
+  nativePortPending.clear();
+  nativePort = null;
+  activeNativeRequestId = null;
 }
