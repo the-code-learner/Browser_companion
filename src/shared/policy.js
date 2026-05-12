@@ -49,6 +49,10 @@ export function classifyAction(action) {
     return RISK_LEVELS.SENSITIVE;
   }
 
+  if (isSearchSubmitAction(action)) {
+    return RISK_LEVELS.LOW;
+  }
+
   if (SUBMIT_WORDS.test(text)) {
     return RISK_LEVELS.HIGH;
   }
@@ -66,6 +70,26 @@ export function classifyAction(action) {
   }
 
   return RISK_LEVELS.BLOCKED;
+}
+
+function isSearchSubmitAction(action) {
+  if (action?.type !== ACTION_TYPES.CLICK_ELEMENT) {
+    return false;
+  }
+
+  const target = action?.target || {};
+  const combined = [
+    target.agent_id,
+    target.role,
+    target.name,
+    ...(Array.isArray(target.selector_candidates) ? target.selector_candidates : [])
+  ].join(" ");
+
+  const normalized = String(combined || "").toLowerCase();
+  const searchWords = /\b(search|find|lookup|cerca|ricerca)\b/i;
+  const searchSelectorHints = /\b(search|find|lookup|cerca|ricerca)\b|nav-search-submit-button/i;
+
+  return searchSelectorHints.test(normalized) && (target.role === "button" || searchWords.test(normalized));
 }
 
 export function validateActionPlan(plan) {

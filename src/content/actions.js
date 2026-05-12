@@ -337,7 +337,14 @@
     const targetName = normalize(target.name);
     const actualName = normalize(getName(element));
 
-    if (targetName && actualName && !actualName.includes(targetName) && !targetName.includes(actualName)) {
+    if (
+      targetName &&
+      actualName &&
+      !actualName.includes(targetName) &&
+      !targetName.includes(actualName) &&
+      !matchesAnySelectorCandidate(element, target.selector_candidates || []) &&
+      !matchesAgentId(element, target.agent_id)
+    ) {
       throw new Error(`Target name mismatch. Expected ${target.name}, found ${getName(element)}.`);
     }
   }
@@ -401,7 +408,55 @@
   }
 
   function getName(element) {
-    return element.getAttribute("aria-label") || element.labels?.[0]?.innerText || element.innerText || element.placeholder || element.name || element.id || element.href || element.tagName.toLowerCase();
+    const directValue = typeof element.value === "string" ? element.value.trim() : "";
+    const textContent = compactText(element.innerText || element.textContent || "");
+    const labelledByText = getAriaLabelledByText(element);
+    return element.getAttribute("aria-label")
+      || labelledByText
+      || element.getAttribute("value")
+      || directValue
+      || compactText(element.labels?.[0]?.innerText || "")
+      || textContent
+      || element.placeholder
+      || element.name
+      || element.id
+      || element.href
+      || element.tagName.toLowerCase();
+  }
+
+  function getAriaLabelledByText(element) {
+    const labelledBy = element.getAttribute("aria-labelledby");
+    if (!labelledBy) {
+      return "";
+    }
+
+    return labelledBy
+      .split(/\s+/)
+      .map((id) => compactText(document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || ""))
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function matchesAnySelectorCandidate(element, selectors) {
+    for (const selector of selectors || []) {
+      if (!isCssSelectorCandidate(selector)) {
+        continue;
+      }
+
+      try {
+        if (element.matches(selector)) {
+          return true;
+        }
+      } catch {
+        // Ignore invalid selectors provided by the model.
+      }
+    }
+
+    return false;
+  }
+
+  function matchesAgentId(element, agentId) {
+    return Boolean(agentId) && element.getAttribute("data-browser-companion-id") === agentId;
   }
 
   function getSelectorCandidates(element) {
@@ -425,7 +480,16 @@
   }
 
   function normalize(value) {
-    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return compactText(value)
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function compactText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
   }
 
   function isVisible(element) {

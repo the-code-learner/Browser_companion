@@ -711,7 +711,7 @@ function updateConfirmButtonState() {
   }
 
   const highestRisk = getHighestRisk(state.pendingPolicy);
-  const needsTypedConfirmation = ["high", "sensitive"].includes(highestRisk);
+  const needsTypedConfirmation = highestRisk === "sensitive";
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
   button.disabled = !state.pendingPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
 }
@@ -834,7 +834,7 @@ function renderActionPreview() {
   const blocked = policy && !policy.allowed;
   const highestRisk = getHighestRisk(policy);
   const confirmation = getConfirmationLabel(highestRisk, policy);
-  const needsTypedConfirmation = ["high", "sensitive"].includes(highestRisk);
+  const needsTypedConfirmation = highestRisk === "sensitive";
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
   const confirmDisabled = blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
 
@@ -4338,7 +4338,9 @@ function getExecutionSummary(results) {
 
   if (failures.length > 0) {
     const failedCount = failures.length;
-    return `${total - failedCount} of ${total} action${total === 1 ? "" : "s"} completed. ${failedCount} need${failedCount === 1 ? "s" : ""} attention; see the expandable action details above.`;
+    const firstFailure = compact(failures[0]?.log_message || "");
+    const detail = firstFailure ? ` First issue: ${firstFailure}` : "";
+    return `${total - failedCount} of ${total} action${total === 1 ? "" : "s"} completed. ${failedCount} need${failedCount === 1 ? "s" : ""} attention; see the expandable action details above.${detail}`;
   }
 
   return "The browser actions were completed.";
@@ -4502,7 +4504,7 @@ function getConfirmationLabel(risk, policy) {
 
 function getRequiredConfirmationPhrase(risk, plan) {
   if (risk === "sensitive") return "CONFIRM SENSITIVE";
-  if (plan?.will_submit || risk === "high") return "SUBMIT";
+  if (plan?.will_submit || risk === "high") return "";
   return "CONFIRM";
 }
 
@@ -4548,7 +4550,7 @@ function localText(language, key, value) {
       humanOnly: "This request touches a human-only or sensitive flow, so I will stop instead of automating it.",
       attachClearProfile: "I found form context, but I could not confidently match attachment data to fields. Attach a text, CSV, JSON, Markdown, PDF, DOCX, XLSX, or image file with clear labels.",
       noSubmitControl: "I could not find a submit or accept control on the observed page.",
-      submitFound: `I found "${value}". This may submit, accept, send, or finalize something on the website. Type SUBMIT to enable the final action.`,
+      submitFound: `I found "${value}". This may submit, accept, send, or finalize something on the website. Use the confirm button when you want to continue.`,
       fillSummary: `I can fill ${value} non-sensitive field${value === 1 ? "" : "s"} from local attachment context. I will not submit the form.`,
       openUrl: `I will open ${value}.`,
       openUrlInNewTab: `I will open ${value} in a new tab.`,
@@ -4562,7 +4564,7 @@ function localText(language, key, value) {
       humanOnly: "Questa richiesta riguarda un flusso sensibile o da gestire manualmente, quindi mi fermo invece di automatizzarlo.",
       attachClearProfile: "Ho trovato un modulo, ma non riesco ad abbinare con sicurezza i dati allegati ai campi. Allega un file TXT, CSV, JSON, Markdown, PDF, DOCX, XLSX o immagine con etichette chiare.",
       noSubmitControl: "Non ho trovato un controllo di invio o accettazione nella pagina osservata.",
-      submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Digita SUBMIT per abilitare l'azione finale.`,
+      submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Usa il pulsante di conferma quando vuoi continuare.`,
       fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`,
       openUrl: `Apro ${value}.`,
       openUrlInNewTab: `Apro ${value} in una nuova scheda.`,
