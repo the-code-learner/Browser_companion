@@ -70,6 +70,7 @@ const state = {
   pendingPlanContext: null,
   pendingPolicy: null,
   confirmationText: "",
+  sessionApprovals: [],
   privacy: {
     persistSession: true,
     sendAttachmentsToCodex: true
@@ -304,6 +305,10 @@ function render() {
   if (state.pendingPlan) {
     document.getElementById("confirm-plan").addEventListener("click", confirmPendingPlan);
     document.getElementById("cancel-plan").addEventListener("click", cancelPendingPlan);
+    const sessionApprovalButton = document.getElementById("approve-plan-session");
+    if (sessionApprovalButton) {
+      sessionApprovalButton.addEventListener("click", () => confirmPendingPlan({ approvalScope: "session" }));
+    }
     const confirmationInput = document.getElementById("confirmation-text");
     if (confirmationInput) {
       confirmationInput.addEventListener("input", (event) => {
@@ -706,6 +711,7 @@ function handleComposerInput(event) {
 
 function updateConfirmButtonState() {
   const button = document.getElementById("confirm-plan");
+  const sessionButton = document.getElementById("approve-plan-session");
   if (!button || !state.pendingPlan) {
     return;
   }
@@ -713,7 +719,11 @@ function updateConfirmButtonState() {
   const highestRisk = getHighestRisk(state.pendingPolicy);
   const needsTypedConfirmation = highestRisk === "sensitive";
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
-  button.disabled = !state.pendingPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
+  const disabled = !state.pendingPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
+  button.disabled = disabled;
+  if (sessionButton) {
+    sessionButton.disabled = disabled;
+  }
 }
 
 function renderMessage(message) {
@@ -835,6 +845,7 @@ function renderActionPreview() {
   const highestRisk = getHighestRisk(policy);
   const confirmation = getConfirmationLabel(highestRisk, policy);
   const needsTypedConfirmation = highestRisk === "sensitive";
+  const canApproveSession = canOfferSessionApproval(state.pendingPlan, policy, state.pendingPlanContext);
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
   const confirmDisabled = blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
 
@@ -858,8 +869,12 @@ function renderActionPreview() {
           <input id="confirmation-text" type="text" value="${escapeHtml(state.confirmationText)}" autocomplete="off">
         </label>
       ` : ""}
+      ${canApproveSession ? `
+        <p class="approval-scope-note">You can approve these similar actions for this site for the rest of the current local session.</p>
+      ` : ""}
       <div class="preview-actions">
         <button id="cancel-plan" type="button">Cancel</button>
+        ${canApproveSession ? `<button id="approve-plan-session" type="button" ${confirmDisabled ? "disabled" : ""}>Approve Similar for Session</button>` : ""}
         <button id="confirm-plan" type="button" ${confirmDisabled ? "disabled" : ""}>${escapeHtml(getConfirmButtonText(highestRisk, state.pendingPlan))}</button>
       </div>
     </section>
@@ -2257,6 +2272,18 @@ async function handleAgentResult(result, options = {}) {
       return;
     }
 
+    if (policy.allowed && hasSessionApprovalForPlan(result, policy, planContext)) {
+      state.confirmationText = "";
+      state.activity.unshift("Executing session-approved action plan.");
+      addActionNote("Executed session-approved action plan", [
+        "A matching session approval rule was found for this action plan.",
+        ...result.actions.map(formatActionDetail)
+      ]);
+      render();
+      await executeActionPlan(result, { ...options, planContext });
+      return;
+    }
+
     state.pendingPlan = result;
     state.pendingPlanContext = planContext;
     state.pendingPolicy = policy;
@@ -2443,15 +2470,20 @@ function extractNestedNaturalText(text) {
   return raw;
 }
 
-async function confirmPendingPlan() {
+async function confirmPendingPlan(options = {}) {
   const plan = normalizePlan(state.pendingPlan);
 
   if (!plan) {
     return;
   }
 
-  state.pendingPlan = null;
   const planContext = state.pendingPlanContext;
+  const pendingPolicy = state.pendingPolicy;
+  if (options.approvalScope === "session") {
+    addSessionApprovalForPlan(plan, pendingPolicy, planContext);
+  }
+
+  state.pendingPlan = null;
   state.pendingPlanContext = null;
   state.pendingPolicy = null;
   state.confirmationText = "";
@@ -3155,6 +3187,139 @@ function cancelPendingPlan() {
   addActionNote("Canceled action approval", ["The pending browser action plan was canceled."]);
   persistSession();
   render();
+}
+
+function canOfferSessionApproval(plan, policy, planContext) {
+  if (!policy?.allowed || !policy?.requiresConfirmation) {
+    return false;
+  }
+
+  const highestRisk = getHighestRisk(policy);
+  if (highestRisk === "blocked" || highestRisk === "sensitive") {
+    return false;
+  }
+
+  return buildSessionApprovalEntries(plan, policy, planContext).length > 0;
+}
+
+function hasSessionApprovalForPlan(plan, policy, planContext) {
+  const entries = buildSessionApprovalEntries(plan, policy, planContext);
+  if (!entries.length) {
+    return false;
+  }
+
+  return entries.every((entry) => state.sessionApprovals.some((stored) => stored.key === entry.key));
+}
+
+function addSessionApprovalForPlan(plan, policy, planContext) {
+  const entries = buildSessionApprovalEntries(plan, policy, planContext);
+  if (!entries.length) {
+    return;
+  }
+
+  const next = [...state.sessionApprovals];
+  for (const entry of entries) {
+    if (!next.some((stored) => stored.key === entry.key)) {
+      next.push(entry);
+    }
+  }
+
+  state.sessionApprovals = next.slice(-60);
+  state.activity.unshift(`Saved ${entries.length} session approval rule${entries.length === 1 ? "" : "s"} for similar actions.`);
+  addActionNote("Saved session approval", entries.map((entry) => entry.label));
+  persistSession();
+}
+
+function buildSessionApprovalEntries(plan, policy, planContext) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const results = Array.isArray(policy?.results) ? policy.results : [];
+  if (!actions.length || !results.length) {
+    return [];
+  }
+
+  const origin = getApprovalOrigin(planContext?.url || state.page.observation?.tab?.url || "");
+  const entries = [];
+
+  if (!origin) {
+    return [];
+  }
+
+  for (const policyResult of results) {
+    if (!policyResult?.requiresConfirmation) {
+      continue;
+    }
+
+    const action = actions[policyResult.index];
+    if (!isSessionApprovableAction(action, policyResult)) {
+      return [];
+    }
+
+    const key = JSON.stringify({
+      origin,
+      risk: policyResult.risk,
+      actionType: action.type || "",
+      targetRole: action?.target?.role || "",
+      targetKey: getActionApprovalTargetKey(action)
+    });
+
+    entries.push({
+      key,
+      label: `${policyResult.risk} ${action.type}${origin ? ` on ${origin}` : ""}${action?.target?.name ? ` -> ${action.target.name}` : ""}`,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  return entries;
+}
+
+function isSessionApprovableAction(action, policyResult) {
+  if (!action || !policyResult?.requiresConfirmation) {
+    return false;
+  }
+
+  if (policyResult.risk === "blocked" || policyResult.risk === "sensitive") {
+    return false;
+  }
+
+  return [
+    "focus_element",
+    "fill_field",
+    "select_option",
+    "toggle_checkbox",
+    "set_radio",
+    "click_element",
+    "click_overlay_number"
+  ].includes(action.type);
+}
+
+function getApprovalOrigin(url) {
+  try {
+    return new URL(url || "").origin;
+  } catch {
+    return "";
+  }
+}
+
+function getActionApprovalTargetKey(action) {
+  const target = action?.target || {};
+  const selectorKey = Array.isArray(target.selector_candidates)
+    ? target.selector_candidates.filter(Boolean).slice(0, 3).join("||")
+    : "";
+  return normalizeApprovalText(
+    target.agent_id
+    || selectorKey
+    || target.name
+    || target.role
+    || ""
+  );
+}
+
+function normalizeApprovalText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
 }
 
 function addActionNote(summary, details = []) {
@@ -4508,6 +4673,7 @@ async function restoreSession() {
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];
   state.accessibleTabs = session.accessibleTabs || {};
+  state.sessionApprovals = Array.isArray(session.sessionApprovals) ? session.sessionApprovals : [];
   state.activity = session.activity || [];
   state.debugLogs = session.debugLogs || [];
   state.pendingMemoryProposal = session.pendingMemoryProposal || null;
@@ -4556,6 +4722,7 @@ function persistSession() {
       messages: state.messages.slice(-30),
       actionNotes: state.actionNotes.slice(-80),
       accessibleTabs: Object.fromEntries(Object.entries(state.accessibleTabs || {}).slice(0, 12)),
+      sessionApprovals: state.sessionApprovals.slice(-60),
       activity: state.activity.slice(0, 80),
       debugLogs: state.debugLogs.slice(0, 200),
       pendingMemoryProposal: state.pendingMemoryProposal
@@ -4591,6 +4758,7 @@ function clearSession() {
   state.pendingPolicy = null;
   state.pendingMemoryProposal = null;
   state.pendingMemoryIntent = null;
+  state.sessionApprovals = [];
   state.confirmationText = "";
   state.actionNotes = [];
   state.debugLogs = [];

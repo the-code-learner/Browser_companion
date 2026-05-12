@@ -858,6 +858,13 @@ h2 {
   margin-top: 12px;
 }
 
+.approval-scope-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .preview-actions button:last-child {
   color: #ffffff;
   border-color: var(--accent);
