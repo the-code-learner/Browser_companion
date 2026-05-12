@@ -2594,6 +2594,7 @@ async function handleAgentResult(result, options = {}) {
     state.messages.push({
       role: "assistant",
       text: result.summary_for_user,
+      thinking: getAgentDisplayThinking(result),
       createdAt: Date.now()
     });
 
