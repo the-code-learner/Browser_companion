@@ -126,6 +126,21 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "dev_watch_status") {
+    try {
+      writeMessage(getDevWatchStatus());
+    } catch (error) {
+      writeMessage({
+        type: "dev_watch_status",
+        enabled: false,
+        fingerprint: "",
+        changedAt: "",
+        message: error.message || "Dev watch status failed."
+      });
+    }
+    return;
+  }
+
   if (message?.type === "user_memory_get") {
     writeMessage(getUserMemory());
     return;
@@ -2032,6 +2047,85 @@ function findFile(root, fileName, maxDepth, depth = 0) {
   }
 
   return null;
+}
+
+function getDevWatchStatus() {
+  const entries = [];
+  const roots = [
+    "manifest.json",
+    "package.json",
+    "src",
+    "codex"
+  ];
+
+  roots.forEach((relativePath) => {
+    const fullPath = path.join(projectRoot, relativePath);
+    collectDevWatchEntries(fullPath, relativePath, entries);
+  });
+
+  const fingerprintSource = entries
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+    .map((entry) => `${entry.relativePath}|${entry.size}|${entry.mtimeMs}`)
+    .join("\n");
+  const fingerprint = crypto.createHash("sha1").update(fingerprintSource).digest("hex");
+  const changedAt = entries.reduce((latest, entry) => Math.max(latest, entry.mtimeMs), 0);
+
+  return {
+    type: "dev_watch_status",
+    enabled: true,
+    fingerprint,
+    changedAt: changedAt ? new Date(changedAt).toISOString() : "",
+    message: "Dev watch fingerprint ready."
+  };
+}
+
+function collectDevWatchEntries(fullPath, relativePath, entries) {
+  if (!fs.existsSync(fullPath)) {
+    return;
+  }
+
+  let stats;
+  try {
+    stats = fs.statSync(fullPath);
+  } catch {
+    return;
+  }
+
+  if (stats.isDirectory()) {
+    let children = [];
+    try {
+      children = fs.readdirSync(fullPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const child of children) {
+      if (shouldSkipDevWatchPath(child.name)) {
+        continue;
+      }
+
+      collectDevWatchEntries(
+        path.join(fullPath, child.name),
+        `${relativePath}/${child.name}`,
+        entries
+      );
+    }
+    return;
+  }
+
+  entries.push({
+    relativePath: relativePath.replace(/\\/g, "/"),
+    size: stats.size || 0,
+    mtimeMs: Math.round(stats.mtimeMs || 0)
+  });
+}
+
+function shouldSkipDevWatchPath(name) {
+  return [
+    ".git",
+    "node_modules",
+    ".DS_Store"
+  ].includes(String(name || ""));
 }
 
 function writeMessage(message) {

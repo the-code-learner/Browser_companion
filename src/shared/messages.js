@@ -18,6 +18,7 @@ export const MESSAGE_TYPES = Object.freeze({
   AGENT_RESPONSE: "agent_response",
   VALIDATE_ACTION_PLAN: "validate_action_plan",
   POLICY_RESULT: "policy_result",
+  DEV_WATCH_STATUS: "dev_watch_status",
   EXECUTE_ACTION_PLAN: "execute_action_plan",
   EXECUTION_RESULT: "execution_result"
 });

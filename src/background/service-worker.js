@@ -91,6 +91,10 @@ async function handleMessage(message) {
     };
   }
 
+  if (message?.type === MESSAGE_TYPES.DEV_WATCH_STATUS) {
+    return requestDevWatchStatus();
+  }
+
   if (message?.type === MESSAGE_TYPES.EXECUTE_ACTION_PLAN) {
     return executeActionPlan(message.payload?.plan);
   }
@@ -365,6 +369,21 @@ async function deleteUserMemory(payload) {
     return {
       ok: false,
       error: error.message || "User memory could not be deleted."
+    };
+  }
+}
+
+async function requestDevWatchStatus() {
+  try {
+    const response = await sendNativeMessage({ type: "dev_watch_status" });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.DEV_WATCH_STATUS, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Dev watch status could not be loaded."
     };
   }
 }

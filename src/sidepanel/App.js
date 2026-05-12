@@ -109,6 +109,10 @@ const state = {
 
 const app = document.getElementById("app");
 let connectorCheckInFlight = false;
+let devWatchPollTimer = null;
+let devWatchPollInFlight = false;
+let devWatchFingerprint = "";
+let devWatchInitialized = false;
 
 initialize();
 
@@ -119,6 +123,8 @@ async function initialize() {
   render();
   checkConnector();
   loadUserMemory();
+  startDevAutoReloadPolling();
+  window.addEventListener("beforeunload", stopDevAutoReloadPolling, { once: true });
 }
 
 function render() {
@@ -365,6 +371,62 @@ function queueConnectorRefresh() {
   setTimeout(() => {
     checkConnector();
   }, 0);
+}
+
+function startDevAutoReloadPolling() {
+  if (devWatchPollTimer) {
+    return;
+  }
+
+  void checkDevAutoReloadStatus();
+  devWatchPollTimer = window.setInterval(() => {
+    void checkDevAutoReloadStatus();
+  }, 2500);
+}
+
+function stopDevAutoReloadPolling() {
+  if (!devWatchPollTimer) {
+    return;
+  }
+
+  window.clearInterval(devWatchPollTimer);
+  devWatchPollTimer = null;
+}
+
+async function checkDevAutoReloadStatus() {
+  if (devWatchPollInFlight) {
+    return;
+  }
+
+  devWatchPollInFlight = true;
+
+  try {
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEV_WATCH_STATUS));
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = response.envelope?.payload || {};
+    if (!payload.enabled || !payload.fingerprint) {
+      return;
+    }
+
+    if (!devWatchInitialized) {
+      devWatchFingerprint = payload.fingerprint;
+      devWatchInitialized = true;
+      return;
+    }
+
+    if (payload.fingerprint === devWatchFingerprint) {
+      return;
+    }
+
+    devWatchFingerprint = payload.fingerprint;
+    persistSession();
+    chrome.runtime.reload();
+  } finally {
+    devWatchPollInFlight = false;
+  }
 }
 
 function renderSettingsButton(section, label) {
