@@ -1451,7 +1451,8 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
 async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
   const useStreaming = Boolean(provider.useStreaming);
-  const initialMaxTokens = wantsJson ? 24576 : 24576;
+  const initialMaxTokens = getHttpProviderPositiveInt(provider.maxTokens, 24576, 1);
+  const retryMaxTokens = getHttpProviderPositiveInt(provider.retryMaxTokens, 49152, 1);
   const requestBody = {
     model: provider.model,
     messages: [
@@ -1477,6 +1478,9 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
     wantsJson,
     useStreaming,
     model: provider.model,
+    timeoutMs: getHttpProviderPositiveInt(provider.timeoutMs, 360000, 1000),
+    maxTokens: initialMaxTokens,
+    retryMaxTokens,
     requestBody
   });
 
@@ -1484,7 +1488,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   let extracted = extractChatCompletionText(json);
 
   if (!extracted.ok && extracted.retryable) {
-    requestBody.max_tokens = wantsJson ? 49152 : 49152;
+    requestBody.max_tokens = retryMaxTokens;
     requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
     json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false);
     extracted = extractChatCompletionText(json);
@@ -1509,6 +1513,7 @@ function saveHttpProviderDebugRequest(payload) {
 }
 
 async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat) {
+  const timeoutMs = getHttpProviderPositiveInt(provider.timeoutMs, 360000, 1000);
   let response = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
@@ -1516,7 +1521,7 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
       "content-type": "application/json"
     },
     body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(360000)
+    signal: AbortSignal.timeout(timeoutMs)
   });
   let text = requestBody.stream
     ? await readStreamingChatCompletion(response)
@@ -1531,7 +1536,7 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
         "content-type": "application/json"
       },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(360000)
+      signal: AbortSignal.timeout(timeoutMs)
     });
     text = requestBody.stream
       ? await readStreamingChatCompletion(response)
@@ -1543,6 +1548,14 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
   }
 
   return JSON.parse(text);
+}
+
+function getHttpProviderPositiveInt(value, fallback, min = 1) {
+  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return parsed;
 }
 
 async function readStreamingChatCompletion(response) {

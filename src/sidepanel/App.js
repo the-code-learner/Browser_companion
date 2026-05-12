@@ -87,7 +87,10 @@ const state = {
     username: "",
     password: "",
     model: "",
-    useStreaming: false
+    useStreaming: false,
+    maxTokens: HTTP_PROVIDER_DEFAULT_MAX_TOKENS,
+    retryMaxTokens: HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS,
+    timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
   },
   userMemory: {
     status: "unknown",
@@ -122,6 +125,9 @@ const PROVIDER_FORM_LIMIT = 8;
 const PROVIDER_FIELD_LIMIT = 12;
 const PROVIDER_SELECTOR_LIMIT = 3;
 const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
+const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
+const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
+const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 360000;
 
 initialize();
 
@@ -551,6 +557,20 @@ function renderHttpProviderSettings() {
         <input id="http-provider-username" type="text" placeholder="Basic auth username" value="${escapeHtml(state.httpProviderDraft.username)}">
         <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password)}">
         ${renderHttpProviderModelControl()}
+        <div class="button-row">
+          <label class="field-stack compact-field">
+            <span>Max tokens</span>
+            <input id="http-provider-max-tokens" type="number" min="1" step="1" value="${escapeHtml(String(state.httpProviderDraft.maxTokens ?? HTTP_PROVIDER_DEFAULT_MAX_TOKENS))}">
+          </label>
+          <label class="field-stack compact-field">
+            <span>Retry max tokens</span>
+            <input id="http-provider-retry-max-tokens" type="number" min="1" step="1" value="${escapeHtml(String(state.httpProviderDraft.retryMaxTokens ?? HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS))}">
+          </label>
+          <label class="field-stack compact-field">
+            <span>Request timeout (ms)</span>
+            <input id="http-provider-timeout-ms" type="number" min="1000" step="1000" value="${escapeHtml(String(state.httpProviderDraft.timeoutMs ?? HTTP_PROVIDER_DEFAULT_TIMEOUT_MS))}">
+          </label>
+        </div>
         <label class="toggle-row">
           <input id="http-provider-use-streaming" type="checkbox" ${state.httpProviderDraft.useStreaming ? "checked" : ""}>
           <span>Use streaming responses when the server supports them</span>
@@ -588,16 +608,46 @@ function renderHttpProviderModelControl() {
 }
 
 function renderHttpProviderItem(provider) {
+  const extras = [
+    provider.useStreaming ? "streaming on" : "",
+    provider.maxTokens ? `max ${provider.maxTokens}` : "",
+    provider.retryMaxTokens ? `retry ${provider.retryMaxTokens}` : "",
+    provider.timeoutMs ? `${provider.timeoutMs} ms timeout` : ""
+  ].filter(Boolean).join(" - ");
+
   return `
     <li>
       <strong>${escapeHtml(provider.name)}</strong>
-      <span>${escapeHtml(provider.baseUrl)} - ${escapeHtml(provider.model || "No model selected")}${provider.useStreaming ? " - streaming on" : ""}</span>
+      <span>${escapeHtml(provider.baseUrl)} - ${escapeHtml(provider.model || "No model selected")}${extras ? ` - ${escapeHtml(extras)}` : ""}</span>
       <div class="button-row">
         <button type="button" data-http-provider-edit="${escapeHtml(provider.id)}">Edit</button>
         <button type="button" data-http-provider-delete="${escapeHtml(provider.id)}">Delete</button>
       </div>
     </li>
   `;
+}
+
+function makeDefaultHttpProviderDraft() {
+  return {
+    id: "",
+    name: "",
+    baseUrl: "",
+    username: "",
+    password: "",
+    model: "",
+    useStreaming: false,
+    maxTokens: HTTP_PROVIDER_DEFAULT_MAX_TOKENS,
+    retryMaxTokens: HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS,
+    timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
+  };
+}
+
+function sanitizePositiveInteger(value, fallback, defaultValue, min = 1) {
+  const parsed = Number.parseInt(String(value ?? fallback ?? defaultValue), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return defaultValue;
+  }
+  return parsed;
 }
 
 function renderPrivacySettings() {
@@ -1778,7 +1828,7 @@ async function saveHttpProviderFromForm(event) {
   } else {
     state.httpProviders.push(provider);
   }
-  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "", useStreaming: false };
+  state.httpProviderDraft = makeDefaultHttpProviderDraft();
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
   if (state.codex.provider === `http:${provider.id}` || existingIndex < 0) {
     state.codex.provider = `http:${provider.id}`;
@@ -1800,6 +1850,22 @@ function readHttpProviderDraft() {
   const password = document.getElementById("http-provider-password")?.value || "";
   const model = document.getElementById("http-provider-model")?.value.trim() || state.httpProviderDraft.model || "";
   const useStreaming = Boolean(document.getElementById("http-provider-use-streaming")?.checked);
+  const maxTokens = sanitizePositiveInteger(
+    document.getElementById("http-provider-max-tokens")?.value,
+    state.httpProviderDraft.maxTokens,
+    HTTP_PROVIDER_DEFAULT_MAX_TOKENS
+  );
+  const retryMaxTokens = sanitizePositiveInteger(
+    document.getElementById("http-provider-retry-max-tokens")?.value,
+    state.httpProviderDraft.retryMaxTokens,
+    HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS
+  );
+  const timeoutMs = sanitizePositiveInteger(
+    document.getElementById("http-provider-timeout-ms")?.value,
+    state.httpProviderDraft.timeoutMs,
+    HTTP_PROVIDER_DEFAULT_TIMEOUT_MS,
+    1000
+  );
   return {
     ...state.httpProviderDraft,
     id: existingId || crypto.randomUUID(),
@@ -1810,6 +1876,9 @@ function readHttpProviderDraft() {
     authType: username || password ? "basic" : "none",
     model,
     useStreaming,
+    maxTokens,
+    retryMaxTokens,
+    timeoutMs,
     models: state.httpProviderDraft.models?.length
       ? Array.from(new Set([...state.httpProviderDraft.models, ...(model ? [model] : [])]))
       : (model ? [model] : []),
@@ -1822,12 +1891,17 @@ function readHttpProviderDraft() {
 function editHttpProvider(id) {
   const provider = state.httpProviders.find((item) => item.id === id);
   if (!provider) return;
-  state.httpProviderDraft = { ...provider };
+  state.httpProviderDraft = {
+    ...provider,
+    maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
+    retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
+    timeoutMs: sanitizePositiveInteger(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, 1000)
+  };
   render();
 }
 
 function cancelHttpProviderEdit() {
-  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "", useStreaming: false };
+  state.httpProviderDraft = makeDefaultHttpProviderDraft();
   render();
 }
 
@@ -2775,11 +2849,11 @@ function formatProviderAgentErrorMessage(result) {
   const raw = String(result?.message || "").trim();
 
   if (/\b524\b/.test(raw) || /timeout occurred|timed out|aborted due to timeout/i.test(raw)) {
-    return "La richiesta al provider HTTP e' andata in timeout prima che il modello completasse la risposta. Se succede spesso, il modello e' troppo lento per questa pagina oppure il timeout locale del bridge va aumentato.";
+    return "The HTTP provider timed out before the model completed its response. If this happens often, the model is too slow for this page or the local bridge timeout needs to be increased.";
   }
 
   if (/exceeds the available context size|exceed_context_size_error/i.test(raw)) {
-    return "Il provider HTTP ha rifiutato la richiesta perche' il contesto inviato supera la finestra disponibile del modello.";
+    return "The HTTP provider rejected the request because the supplied context exceeds the model's available context window.";
   }
 
   return raw || "The selected local provider is not ready, so I used only local page context.";
@@ -4160,7 +4234,7 @@ async function handlePendingMemoryProposalReply(text) {
     state.activity.unshift(`Memory preview discarded: ${title}.`);
     state.messages.push({
       role: "assistant",
-      text: responseLanguage === "it" ? "Ok, non salvo questa memoria." : "Ok, I will not save this memory.",
+      text: "Ok, I will not save this memory.",
       createdAt: Date.now()
     });
     persistSession();
@@ -4201,18 +4275,6 @@ function isMemoryProposalRejection(text) {
 function formatMemoryPreview(item, responseLanguage = "en") {
   const title = item.title || "User memory";
   const content = item.content || "";
-
-  if (responseLanguage === "it") {
-    return [
-      "Ho preparato questa preview per la memoria locale:",
-      "",
-      `**${title}**`,
-      "",
-      content,
-      "",
-      "Vuoi salvarla? Rispondi `si` per salvare oppure `no` per annullare."
-    ].join("\n");
-  }
 
   return [
     "I prepared this local memory preview:",
@@ -5112,7 +5174,10 @@ async function restoreProviderSettings() {
   state.httpProviders = Array.isArray(settings.httpProviders)
     ? settings.httpProviders.map((provider) => ({
       ...provider,
-      useStreaming: Boolean(provider.useStreaming)
+      useStreaming: Boolean(provider.useStreaming),
+      maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
+      retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
+      timeoutMs: sanitizePositiveInteger(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, 1000)
     }))
     : [];
   state.codex = {
@@ -5290,24 +5355,10 @@ function localText(language, key, value) {
       openSearch: `I will open Google search results for "${value}".`,
       memorySaved: "Saved that to local user memory.",
       memorySaveFailed: "I could not save that to local user memory."
-    },
-    it: {
-      needObservation: "Devo osservare la scheda corrente prima di aiutarti con questa pagina.",
-      humanOnly: "Questa richiesta riguarda un flusso sensibile o da gestire manualmente, quindi mi fermo invece di automatizzarlo.",
-      attachClearProfile: "Ho trovato un modulo, ma non riesco ad abbinare con sicurezza i dati allegati ai campi. Allega un file TXT, CSV, JSON, Markdown, PDF, DOCX, XLSX o immagine con etichette chiare.",
-      noSubmitControl: "Non ho trovato un controllo di invio o accettazione nella pagina osservata.",
-      submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Usa il pulsante di conferma quando vuoi continuare.`,
-      fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`,
-      openUrl: `Apro ${value}.`,
-      openUrlInNewTab: `Apro ${value} in una nuova scheda.`,
-      openUrlsInNewTabs: `Apro ${value} link in nuove schede.`,
-      openSearch: `Apro i risultati Google per "${value}".`,
-      memorySaved: "Salvato nella memoria utente locale.",
-      memorySaveFailed: "Non sono riuscito a salvarlo nella memoria utente locale."
     }
   };
 
-  return messages[language]?.[key] || messages.en[key];
+  return messages.en[key];
 }
 
 function escapeHtml(value) {
