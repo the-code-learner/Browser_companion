@@ -2537,8 +2537,7 @@ async function executeActionPlan(plan, options = {}) {
     addActionNote(getArtifactSummary(artifact), getArtifactDetails(artifact));
   });
 
-  const hasPageChange = results.some((result) => result.page_changed);
-  const completionResults = hasPageChange
+  const completionResults = shouldCapturePostActionObservation(normalizedPlan, results)
     ? await capturePostActionObservation(results)
     : results;
 
@@ -2587,6 +2586,30 @@ async function executeActionPlan(plan, options = {}) {
   }
 
   const synthesized = await maybeSynthesizeResults(plan, completionResults);
+  if (shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized, options)) {
+    const goal = getLastUserMessageText() || normalizedPlan.goal || "";
+    const continuationDepth = (options.continuationDepth || 0) + 1;
+    const planContext = options.planContext || getObservedPageContext();
+    state.activity.unshift("Continuing with the latest action results.");
+    addDebugLog("agent.auto_continue_after_actions", {
+      goal,
+      continuationDepth,
+      actions,
+      results: completionResults,
+      synthesized
+    }, "Continuing after browser actions because the current context is not sufficient yet.");
+    render();
+    const followUpResult = await getAgentResult(goal, {
+      continuationDepth,
+      continuationReason: buildPostActionContinuationReason(normalizedPlan, completionResults, synthesized),
+      planContext
+    });
+    await handleAgentResult(followUpResult, {
+      continuationDepth,
+      planContext
+    });
+    return;
+  }
   const answerText = synthesized || getExecutionSummary(completionResults);
   const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, answerText);
   state.messages.push({
@@ -2603,6 +2626,24 @@ async function executeActionPlan(plan, options = {}) {
 async function capturePostActionObservation(results) {
   await refreshPageAfterAction();
   return appendCurrentObservationArtifact(results);
+}
+
+function shouldCapturePostActionObservation(plan, results) {
+  const actions = plan?.actions || [];
+
+  if (!actions.length || !results.length) {
+    return false;
+  }
+
+  if (results.some((result) => result.page_changed)) {
+    return true;
+  }
+
+  if (results.some((result) => result.status !== "success")) {
+    return false;
+  }
+
+  return actions.some((action) => POST_ACTION_OBSERVATION_ACTION_TYPES.has(action?.type));
 }
 
 function shouldAutoContinueAfterReadOnlyAction(plan, results, options = {}) {
@@ -2709,6 +2750,67 @@ function appendCurrentObservationArtifact(results) {
   }
 
   return items;
+}
+
+function shouldContinueAfterActionPlan(plan, results, synthesized, options = {}) {
+  if ((options.continuationDepth || 0) >= MAX_ACTION_CONTINUATIONS) {
+    return false;
+  }
+
+  const actions = plan?.actions || [];
+  if (!actions.length || !results.length || results.some((result) => result.status !== "success")) {
+    return false;
+  }
+
+  if (isSuccessfulReadOnlyContextRun(plan, results)) {
+    return false;
+  }
+
+  if (synthesized && !isActionOnlyCompletionText(synthesized)) {
+    return false;
+  }
+
+  return results.some((result) => ACTION_CONTINUATION_ARTIFACT_KINDS.has(result.artifact?.kind))
+    || actions.some((action) => POST_ACTION_OBSERVATION_ACTION_TYPES.has(action?.type));
+}
+
+function buildPostActionContinuationReason(plan, results, synthesized) {
+  const latestObservation = getLatestObservationFromResults(results);
+  const actionSummary = results
+    .slice(0, 6)
+    .map((result) => {
+      const detail = compact(result?.log_message || "");
+      return `${result.action_id || "action"}: ${result.status}${detail ? ` - ${detail}` : ""}`;
+    })
+    .join(" | ");
+  const fallbackNote = synthesized
+    ? `The intermediate answer was not sufficient yet: "${compact(synthesized).slice(0, 240)}".`
+    : "No final answer is available yet from the last action batch.";
+
+  return [
+    "A browser action batch has just completed. Use the newest context to either answer directly or choose the next necessary action plan.",
+    latestObservation ? `Latest observed page after the actions: ${formatObservationForContinuation(latestObservation)}.` : "",
+    actionSummary ? `Recent action results: ${actionSummary}.` : "",
+    fallbackNote,
+    "Do not stop only because the previous action batch finished. If the user's goal still needs more context, return the next best action plan."
+  ].filter(Boolean).join("\n");
+}
+
+function getLatestObservationFromResults(results) {
+  const pageObservationResult = [...(Array.isArray(results) ? results : [])]
+    .reverse()
+    .find((result) => result?.artifact?.kind === "page_observation");
+
+  return pageObservationResult?.artifact?.observation || state.page.observation || null;
+}
+
+function formatObservationForContinuation(observation) {
+  const tab = observation?.tab || {};
+  const parts = [];
+  if (tab.title) parts.push(`title="${String(tab.title).slice(0, 120)}"`);
+  if (tab.url) parts.push(`url=${String(tab.url).slice(0, 220)}`);
+  if (observation?.capturedAt) parts.push(`capturedAt=${observation.capturedAt}`);
+  return parts.join(", ");
 }
 
 function isReadOnlyContextPlan(plan) {
@@ -3415,7 +3517,26 @@ const READ_ONLY_CONTEXT_ACTION_TYPES = new Set([
   "wait_for_page_change"
 ]);
 
+const POST_ACTION_OBSERVATION_ACTION_TYPES = new Set([
+  "click_element",
+  "click_overlay_number",
+  "fill_field",
+  "select_option",
+  "toggle_checkbox",
+  "set_radio",
+  "go_back",
+  "wait_for_page_change"
+]);
+
+const ACTION_CONTINUATION_ARTIFACT_KINDS = new Set([
+  "page_observation",
+  "web_search",
+  "http_response",
+  "screenshot"
+]);
+
 const MAX_READ_ONLY_CONTINUATIONS = 4;
+const MAX_ACTION_CONTINUATIONS = 4;
 
 function proposeMemorySave(item, responseLanguage = "en", sourceGoal = "") {
   const memoryItem = sanitizeMemoryItem(item, { goal: sourceGoal || item?.title || "" });
@@ -4199,13 +4320,14 @@ async function maybeSynthesizeResults(plan, results) {
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
   const selectedHttpProvider = getSelectedHttpProvider();
+  const latestObservation = getLatestObservationFromResults(results);
   const payload = {
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
     provider: state.codex.provider,
     model: state.codex.model,
     httpProvider: selectedHttpProvider,
-    observation: state.page.observation,
+    observation: latestObservation,
     userMemory: state.userMemory.items.map((item) => ({
       id: item.id,
       title: item.title,

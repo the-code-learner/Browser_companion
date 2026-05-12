@@ -39,8 +39,7 @@
         if (!element) {
           throw new Error("Overlay target could not be resolved.");
         }
-        element.click();
-        return success(action, true, `Clicked overlay number ${item.number}.`);
+        return success(action, false, `${activateElement(element)} via overlay number ${item.number}.`);
       }
 
       const element = resolveElement(action.target);
@@ -90,8 +89,7 @@
       if (action.type === "click_element") {
         element.scrollIntoView({ block: "center", inline: "nearest" });
         verifyElement(element, action.target);
-        element.click();
-        return success(action, true, `Clicked ${getName(element)}.`);
+        return success(action, false, activateElement(element));
       }
 
       if (action.type === "upload_file_to_field") {
@@ -405,6 +403,39 @@
       validation_messages: [],
       log_message: message
     };
+  }
+
+  function activateElement(element) {
+    if (isSubmitControl(element)) {
+      const form = element.form || element.closest?.("form");
+      if (form && typeof form.requestSubmit === "function") {
+        form.requestSubmit(element.matches("button,input") ? element : undefined);
+      } else {
+        element.click();
+      }
+      return `Submitted ${getName(element)}.`;
+    }
+
+    element.click();
+    return `Clicked ${getName(element)}.`;
+  }
+
+  function isSubmitControl(element) {
+    if (!element?.matches) {
+      return false;
+    }
+
+    if (element.matches("button")) {
+      const type = String(element.getAttribute("type") || "submit").toLowerCase();
+      return type === "submit";
+    }
+
+    if (element.matches("input")) {
+      const type = String(element.getAttribute("type") || "").toLowerCase();
+      return type === "submit" || type === "image";
+    }
+
+    return false;
   }
 
   function getName(element) {

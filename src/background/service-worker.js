@@ -422,6 +422,9 @@ async function executeActionPlan(plan) {
       await ensureActionScripts(tab.id);
     }
 
+    const beforeTabState = actionMayChangePage(action)
+      ? await chrome.tabs.get(tab.id).catch(() => null)
+      : null;
     const browserLevelResult = await executeBrowserLevelAction(tab, action);
     if (browserLevelResult) {
       results.push(browserLevelResult);
@@ -433,11 +436,12 @@ async function executeActionPlan(plan) {
       func: (browserAction) => window.__browserCompanionActions.execute(browserAction),
       args: [action]
     });
-    results.push(result);
 
-    if (result?.page_changed) {
-      await waitForTabSettled(tab.id);
+    if (result?.status === "success" && beforeTabState) {
+      result.page_changed = await waitForPotentialPageChange(tab.id, beforeTabState);
     }
+
+    results.push(result);
   }
 
   return {
@@ -468,6 +472,13 @@ function needsTabScript(action) {
     "web_search",
     "go_back",
     "wait_for_page_change"
+  ].includes(action?.type);
+}
+
+function actionMayChangePage(action) {
+  return [
+    "click_element",
+    "click_overlay_number"
   ].includes(action?.type);
 }
 
@@ -869,6 +880,41 @@ function normalizeNavigationUrl(value) {
   }
 
   return url.href;
+}
+
+async function waitForPotentialPageChange(tabId, beforeTabState, timeoutMs = 2500) {
+  const startedAt = Date.now();
+  let changed = false;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!currentTab) {
+      return changed;
+    }
+
+    changed = changed || hasTabNavigationChanged(beforeTabState, currentTab);
+    if (changed && currentTab.status === "complete") {
+      return true;
+    }
+
+    await delay(changed ? 140 : 90);
+  }
+
+  const finalTab = await chrome.tabs.get(tabId).catch(() => null);
+  return finalTab ? hasTabNavigationChanged(beforeTabState, finalTab) : changed;
+}
+
+function hasTabNavigationChanged(beforeTab, afterTab) {
+  return normalizeTabNavigationValue(beforeTab?.url) !== normalizeTabNavigationValue(afterTab?.url)
+    || normalizeTabNavigationValue(beforeTab?.title) !== normalizeTabNavigationValue(afterTab?.title);
+}
+
+function normalizeTabNavigationValue(value) {
+  return String(value || "").trim();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function waitForTabSettled(tabId, timeoutMs = 10000) {
