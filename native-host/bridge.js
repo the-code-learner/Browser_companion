@@ -1414,9 +1414,12 @@ function extractLoadedModels(json) {
 function runHttpProviderAgentRequest(provider, payload = {}) {
   const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
   return runHttpProviderCompletion(provider, prompt, true)
-    .then((text) => {
+    .then(({ text, thinking }) => {
       const output = compactProviderOutput(text);
       const parsed = parseAgentJsonOrNaturalResponse(output);
+      if (thinking && parsed && typeof parsed === "object" && !parsed.thinking) {
+        parsed.thinking = thinking;
+      }
       return parsed;
     })
     .catch((error) => ({
@@ -1431,9 +1434,10 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
     observation: compactObservationForPrompt(payload.observation)
   });
   return runHttpProviderCompletion(provider, prompt, false)
-    .then((text) => ({
+    .then(({ text, thinking }) => ({
       type: "natural_response",
-      text: compactProviderOutput(text)
+      text: compactProviderOutput(text),
+      thinking
     }))
     .catch((error) => ({
       type: "natural_response",
@@ -1475,7 +1479,10 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   }
 
   if (extracted.ok) {
-    return extracted.text;
+    return {
+      text: extracted.text,
+      thinking: extracted.thinking || ""
+    };
   }
 
   throw new Error(extracted.message);
@@ -1635,16 +1642,17 @@ function normalizeStreamText(value) {
 function extractChatCompletionText(json) {
   const choice = json?.choices?.[0];
   const content = choice?.message?.content || choice?.text || "";
+  const reasoning = choice?.message?.reasoning_content || "";
 
   if (content) {
     return {
       ok: true,
-      text: content
+      text: content,
+      thinking: reasoning
     };
   }
 
   const finishReason = choice?.finish_reason || "";
-  const reasoning = choice?.message?.reasoning_content || "";
 
   if (reasoning && finishReason === "length") {
     return {
@@ -1782,8 +1790,9 @@ function normalizeAgentResponse(response) {
 
   if (!response.type) {
     const text = pickResponseText(response);
+    const thinking = pickResponseThinking(response);
     return text
-      ? makeNaturalAgentResponse(text)
+      ? makeNaturalAgentResponse(text, thinking)
       : {
           type: "agent_error",
           message: "Provider returned JSON, but it did not contain Browser Companion fields or user-facing text."
@@ -1793,7 +1802,8 @@ function normalizeAgentResponse(response) {
   if (response.type === "natural_response") {
     return {
       ...response,
-      text: pickResponseText(response)
+      text: pickResponseText(response),
+      thinking: pickResponseThinking(response)
     };
   }
 
@@ -1845,10 +1855,27 @@ function pickResponseText(response) {
   return compact(values.find((value) => typeof value === "string" && value.trim()) || "");
 }
 
-function makeNaturalAgentResponse(text) {
+function pickResponseThinking(response) {
+  if (typeof response === "string") {
+    return "";
+  }
+
+  const choice = Array.isArray(response?.choices) ? response.choices[0] : null;
+  const values = [
+    response?.thinking,
+    response?.reasoning_content,
+    response?.message?.reasoning_content,
+    choice?.message?.reasoning_content
+  ];
+
+  return compact(values.find((value) => typeof value === "string" && value.trim()) || "");
+}
+
+function makeNaturalAgentResponse(text, thinking = "") {
   return {
     type: "natural_response",
     text,
+    thinking,
     question: "",
     reason: "",
     goal: "",

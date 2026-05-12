@@ -401,6 +401,22 @@ h2 {
   color: var(--muted);
 }
 
+.message-thinking {
+  margin: 0 0 8px;
+}
+
+.message-thinking-body {
+  margin-top: 6px;
+}
+
+.message-thinking-body > :first-child {
+  margin-top: 0;
+}
+
+.message-thinking-body > :last-child {
+  margin-bottom: 0;
+}
+
 .composer {
   position: sticky;
   bottom: 0;

@@ -755,8 +755,22 @@ function renderMessage(message) {
           ${renderSteerButton(message, steerState)}
         </div>
       </div>
+      ${renderMessageThinking(message)}
       <div class="message-body">${renderRichText(message.text)}</div>
     </article>
+  `;
+}
+
+function renderMessageThinking(message) {
+  if (message.role !== "assistant" || !String(message.thinking || "").trim()) {
+    return "";
+  }
+
+  return `
+    <details class="action-note message-thinking">
+      <summary>Thinking</summary>
+      <div class="message-thinking-body">${renderRichText(message.thinking)}</div>
+    </details>
   `;
 }
 
@@ -2604,13 +2618,13 @@ async function handleAgentResult(result, options = {}) {
   }
 
   if (result?.type === "ask_user") {
-    state.messages.push({ role: "assistant", text: result.question, createdAt: Date.now() });
+    state.messages.push({ role: "assistant", text: result.question, thinking: getAgentDisplayThinking(result), createdAt: Date.now() });
     render();
     return;
   }
 
   if (result?.type === "stop_for_human") {
-    state.messages.push({ role: "assistant", text: result.reason, createdAt: Date.now() });
+    state.messages.push({ role: "assistant", text: result.reason, thinking: getAgentDisplayThinking(result), createdAt: Date.now() });
     state.activity.unshift("Automation stopped for human action.");
     render();
     return;
@@ -2629,6 +2643,7 @@ async function handleAgentResult(result, options = {}) {
     state.messages.push({
       role: "assistant",
       text: formatProviderAgentErrorMessage(result),
+      thinking: getAgentDisplayThinking(result),
       createdAt: Date.now()
     });
     state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
@@ -2641,6 +2656,7 @@ async function handleAgentResult(result, options = {}) {
   state.messages.push({
     role: "assistant",
     text: memoryProposal ? appendMemorySavedNote(responseText) : responseText,
+    thinking: getAgentDisplayThinking(result),
     createdAt: Date.now()
   });
   if (memoryProposal) {
@@ -2763,6 +2779,17 @@ function getAgentDisplayText(result) {
   return extractNestedNaturalText(text);
 }
 
+function getAgentDisplayThinking(result) {
+  const text = compact(
+    result?.thinking
+    || result?.reasoning_content
+    || result?.message?.reasoning_content
+    || ""
+  );
+
+  return extractNestedReasoningText(text);
+}
+
 function extractNestedNaturalText(text) {
   const raw = String(text || "").trim();
   if (!raw) return "";
@@ -2789,6 +2816,25 @@ function extractNestedNaturalText(text) {
 
   if (nested && typeof nested === "string") {
     addDebugLog("agent.nested_json_text_unwrapped", { raw, parsed }, "Unwrapped JSON text returned as natural_response.");
+    return compact(nested);
+  }
+
+  return raw;
+}
+
+function extractNestedReasoningText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+
+  const parsed = parseLooseJsonObject(raw);
+  const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
+  const nested = parsed?.thinking
+    || parsed?.reasoning_content
+    || parsed?.message?.reasoning_content
+    || choice?.message?.reasoning_content
+    || "";
+
+  if (nested && typeof nested === "string") {
     return compact(nested);
   }
 
