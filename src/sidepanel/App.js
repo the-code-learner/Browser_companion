@@ -200,7 +200,6 @@ function render() {
     </section>
     <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" aria-label="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>&#8595;</button>
 
-    ${renderLiveThinkingPanel()}
     ${renderComposer()}
   `;
 
@@ -745,21 +744,6 @@ function renderComposer() {
   `;
 }
 
-function renderLiveThinkingPanel() {
-  if (!state.liveThinking?.text) {
-    return "";
-  }
-
-  return `
-    <div class="live-thinking-wrap">
-      <details class="action-note action-thinking" open>
-        <summary>Thinking</summary>
-        <ul><li>${escapeHtml(state.liveThinking.text)}</li></ul>
-      </details>
-    </div>
-  `;
-}
-
 function setupChatScrollControls() {
   const chatLog = document.querySelector(".chat-log");
   const jumpButton = document.getElementById("jump-to-latest");
@@ -915,10 +899,10 @@ function renderChatTimeline() {
       kind: "note",
       createdAt: state.liveThinking.createdAt || Date.now(),
       item: {
-        summary: "Thinking",
+        summaryHtml: renderLiveThinkingSummary(state.liveThinking),
         details: [state.liveThinking.text],
         variant: "thinking",
-        open: true
+        open: false
       }
     }] : []),
     ...state.actionNotes.map((item) => ({ kind: "note", createdAt: item.createdAt || 0, item }))
@@ -943,12 +927,20 @@ function renderActionNote(note) {
   const details = note.details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
   const variantClass = note.variant === "thinking" ? " action-thinking" : "";
   const openAttr = note.open ? " open" : "";
+  const summary = note.summaryHtml || escapeHtml(note.summary);
   return `
     <details class="action-note${variantClass}"${openAttr}>
-      <summary>${escapeHtml(note.summary)}</summary>
+      <summary>${summary}</summary>
       <ul>${details}</ul>
     </details>
   `;
+}
+
+function renderLiveThinkingSummary(liveThinking) {
+  const dots = liveThinking?.streaming
+    ? `<span class="thinking-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>`
+    : "";
+  return `Thinking${dots}`;
 }
 
 function renderRichText(text) {
@@ -2231,6 +2223,10 @@ async function processQueuedMessage(item) {
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
   state.liveThinking = null;
   const agentResult = await getAgentResult(text, { planContext });
+  if (state.liveThinking) {
+    state.liveThinking.streaming = false;
+    render();
+  }
   await handleAgentResult(agentResult, { planContext });
   return {
     stopped: isUserStoppedResult(agentResult)
@@ -2251,6 +2247,7 @@ function handleRuntimeMessage(message) {
   state.liveThinking = {
     requestId: payload.requestId || "",
     text: thinking,
+    streaming: true,
     createdAt: state.liveThinking?.createdAt || Date.now(),
     updatedAt: Date.now()
   };
