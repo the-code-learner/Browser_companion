@@ -700,18 +700,29 @@ function renderLogsSettings() {
 }
 
 function renderDebugLog(entry) {
+  const summaryText = getDebugLogSummary(entry);
   return `
     <li>
       <details>
         <summary>
           <span>${escapeHtml(entry.time || "")}</span>
           <strong>${escapeHtml(entry.event || "event")}</strong>
-          ${entry.summary ? `<em>${escapeHtml(entry.summary)}</em>` : ""}
+          ${summaryText ? `<em>${escapeHtml(summaryText)}</em>` : ""}
         </summary>
         <pre>${escapeHtml(JSON.stringify(entry.data || {}, null, 2))}</pre>
       </details>
     </li>
   `;
+}
+
+function getDebugLogSummary(entry) {
+  if (entry?.event === "provider.progress") {
+    const updates = Number.parseInt(String(entry?.data?.updates || 0), 10) || 0;
+    if (updates > 0) {
+      return `Received provider thinking progress (${updates} updates).`;
+    }
+  }
+  return entry?.summary || "";
 }
 
 function summarizeObservationForLog(observation = {}) {
@@ -850,8 +861,12 @@ function renderErrorNote(message) {
 function getErrorNoteSummary(message) {
   const raw = String(message?.text || "").trim();
 
-  if (/timeout|timed out|aborted due to timeout/i.test(raw)) {
+  if (/\b524\b/.test(raw) || /timeout|timed out|aborted due to timeout/i.test(raw)) {
     return "Provider request timed out";
+  }
+
+  if (/upstream error page|HTTP provider returned \d+/i.test(raw)) {
+    return "Provider upstream error";
   }
 
   return "Provider error";
@@ -2904,6 +2919,7 @@ async function handleAgentResult(result, options = {}) {
 
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
     const provider = getSelectedProviderStatus();
+    logProviderError("provider.error", result, `${provider?.label || "Selected provider"} error`);
     state.messages.push({
       role: "assistant",
       text: formatProviderAgentErrorMessage(result),
@@ -2989,16 +3005,75 @@ function isProviderTimeoutResult(result) {
   return result?.type === "agent_error" && (/\b524\b/.test(text) || /timeout occurred|timed out|aborted due to timeout/i.test(text));
 }
 
+function isProviderErrorLikeResult(result) {
+  const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
+  return /\b524\b/.test(text)
+    || /timeout occurred|timed out|aborted due to timeout/i.test(text)
+    || /HTTP provider returned \d+/i.test(text)
+    || /<!doctype html>|<html\b|cloudflare/i.test(text);
+}
+
+function extractProviderErrorMeta(result) {
+  const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`.trim();
+  const statusMatch = text.match(/\bHTTP provider returned (\d{3})\b/i) || text.match(/\b(52[0-9]|50[0-9]|40[0-9])\b/);
+  const statusCode = statusMatch ? Number.parseInt(statusMatch[1], 10) : null;
+  let kind = "provider_error";
+
+  if (/\b524\b/.test(text) || /timeout occurred|timed out|aborted due to timeout/i.test(text)) {
+    kind = "timeout";
+  } else if (/<!doctype html>|<html\b|cloudflare/i.test(text)) {
+    kind = "upstream_html";
+  } else if (/exceeds the available context size|exceed_context_size_error/i.test(text)) {
+    kind = "context_limit";
+  } else if (/HTTP provider returned \d+/i.test(text)) {
+    kind = "http_error";
+  }
+
+  return {
+    kind,
+    statusCode,
+    raw: text.slice(0, 1200)
+  };
+}
+
+function logProviderError(event, result, summary = "") {
+  const meta = extractProviderErrorMeta(result);
+  addDebugLog(event, {
+    ...meta,
+    result
+  }, summary || buildProviderErrorSummary(meta));
+}
+
+function buildProviderErrorSummary(meta = {}) {
+  if (meta.kind === "timeout") {
+    return meta.statusCode ? `Provider timeout (${meta.statusCode})` : "Provider timeout";
+  }
+  if (meta.kind === "upstream_html") {
+    return meta.statusCode ? `Provider upstream HTML error (${meta.statusCode})` : "Provider upstream HTML error";
+  }
+  if (meta.kind === "context_limit") {
+    return "Provider context limit error";
+  }
+  if (meta.statusCode) {
+    return `Provider HTTP error (${meta.statusCode})`;
+  }
+  return "Provider error";
+}
+
 function isUserStoppedResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""}`;
   return result?.type === "agent_error" && /stopped by the user/i.test(text);
 }
 
 function formatProviderAgentErrorMessage(result) {
-  const raw = String(result?.message || "").trim();
+  const raw = String(result?.message || result?.text || "").trim();
 
   if (/\b524\b/.test(raw) || /timeout occurred|timed out|aborted due to timeout/i.test(raw)) {
     return "The HTTP provider timed out before the model completed its response. If this happens often, the model is too slow for this page or the local bridge timeout needs to be increased.";
+  }
+
+  if (/HTTP provider returned \d+/i.test(raw) || /<!doctype html>|<html\b|cloudflare/i.test(raw)) {
+    return "The HTTP provider returned an upstream error page instead of a usable model response.";
   }
 
   if (/exceeds the available context size|exceed_context_size_error/i.test(raw)) {
@@ -3258,7 +3333,12 @@ async function executeActionPlan(plan, options = {}) {
   }
 
   const synthesized = await maybeSynthesizeResults(plan, completionResults);
-  if (steeredQueueItem || shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized, options)) {
+  if (synthesized.error) {
+    pushPostActionSynthesisError(synthesized.error);
+    await refreshPageAfterAction();
+    return;
+  }
+  if (steeredQueueItem || shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized.text, options)) {
     const goal = buildSteeredContinuationGoal(normalizedPlan.goal || getLastUserMessageText() || "", steeredQueueItem);
     const continuationDepth = (options.continuationDepth || 0) + 1;
     const planContext = options.planContext || getObservedPageContext();
@@ -3268,13 +3348,13 @@ async function executeActionPlan(plan, options = {}) {
       continuationDepth,
       actions,
       results: completionResults,
-      synthesized
+      synthesized: synthesized.text
     }, "Continuing after browser actions because the current context is not sufficient yet.");
     render();
     const followUpResult = await getAgentResult(goal, {
       continuationDepth,
       continuationReason: appendSteeredContinuationReason(
-        buildPostActionContinuationReason(normalizedPlan, completionResults, synthesized),
+        buildPostActionContinuationReason(normalizedPlan, completionResults, synthesized.text),
         steeredQueueItem
       ),
       planContext
@@ -3285,7 +3365,7 @@ async function executeActionPlan(plan, options = {}) {
     });
     return;
   }
-  const answerText = synthesized || getExecutionSummary(completionResults);
+  const answerText = synthesized.text || getExecutionSummary(completionResults);
   const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, answerText);
   state.messages.push({
     role: "assistant",
@@ -3358,11 +3438,15 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
   render();
 
   const synthesized = await maybeSynthesizeResults({ ...plan, goal }, completionResults);
-  if (synthesized && !isActionOnlyCompletionText(synthesized)) {
-    const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, synthesized);
+  if (synthesized.error) {
+    pushPostActionSynthesisError(synthesized.error);
+    return true;
+  }
+  if (synthesized.text && !isActionOnlyCompletionText(synthesized.text)) {
+    const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, synthesized.text);
     state.messages.push({
       role: "assistant",
-      text: memoryProposal ? appendMemorySavedNote(synthesized) : synthesized,
+      text: memoryProposal ? appendMemorySavedNote(synthesized.text) : synthesized.text,
       createdAt: Date.now()
     });
     if (memoryProposal) {
@@ -3984,6 +4068,12 @@ function formatActionDetail(action) {
 }
 
 function addDebugLog(event, data = {}, summary = "") {
+  if (event === "provider.progress") {
+    updateProviderProgressDebugLog(data, summary);
+    persistSession();
+    return;
+  }
+
   state.debugLogs.unshift({
     id: crypto.randomUUID(),
     time: new Date().toISOString(),
@@ -3993,6 +4083,56 @@ function addDebugLog(event, data = {}, summary = "") {
   });
   state.debugLogs = state.debugLogs.slice(0, 200);
   persistSession();
+}
+
+function updateProviderProgressDebugLog(data = {}, summary = "") {
+  const time = new Date().toISOString();
+  const requestId = String(data?.requestId || "");
+  const thinkingLength = Number.parseInt(String(data?.thinkingLength || 0), 10) || 0;
+  const sample = {
+    time,
+    thinkingLength
+  };
+  const existingIndex = state.debugLogs.findIndex((entry) => (
+    entry.event === "provider.progress"
+    && String(entry.data?.requestId || "") === requestId
+  ));
+
+  if (existingIndex >= 0) {
+    const [entry] = state.debugLogs.splice(existingIndex, 1);
+    const nextUpdates = (Number.parseInt(String(entry.data?.updates || 0), 10) || 0) + 1;
+    const nextEntry = {
+      ...entry,
+      time,
+      summary: summary || `Received provider thinking progress (${nextUpdates} updates).`,
+      data: {
+        requestId,
+        updates: nextUpdates,
+        firstAt: entry.data?.firstAt || entry.time || time,
+        lastAt: time,
+        latestThinkingLength: thinkingLength,
+        samples: [sample, ...(Array.isArray(entry.data?.samples) ? entry.data.samples : [])].slice(0, 80)
+      }
+    };
+    state.debugLogs.unshift(nextEntry);
+    return;
+  }
+
+  state.debugLogs.unshift({
+    id: crypto.randomUUID(),
+    time,
+    event: "provider.progress",
+    summary: summary || "Received provider thinking progress.",
+    data: {
+      requestId,
+      updates: 1,
+      firstAt: time,
+      lastAt: time,
+      latestThinkingLength: thinkingLength,
+      samples: [sample]
+    }
+  });
+  state.debugLogs = state.debugLogs.slice(0, 200);
 }
 
 function sanitizeDebugData(value, depth = 0) {
@@ -5114,41 +5254,178 @@ async function maybeSynthesizeResults(plan, results) {
       connectorStatus: state.connector.status,
       resultKinds: results.map((result) => result.artifact?.kind || result.status)
     }, "Synthesis skipped.");
-    return "";
+    return { text: "", error: null };
   }
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
   const selectedHttpProvider = getSelectedHttpProvider();
-  const latestObservation = compactObservationForProvider(getLatestObservationFromResults(results));
-  const payload = {
+  const buildPayload = (mode = "full") => ({
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
     provider: state.codex.provider,
     model: state.codex.model,
     httpProvider: selectedHttpProvider,
-    observation: latestObservation,
-    userMemory: state.userMemory.items.map((item) => ({
-      id: item.id,
-      title: item.title,
-      content: item.content,
-      updatedAt: item.updatedAt
-    })),
-    results: results.map(stripLargeArtifactsForSynthesis)
-  };
-  addDebugLog("provider.synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}`);
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
-  addDebugLog("provider.synthesis.end", {
-    ok: response.ok,
-    error: response.error || "",
-    result: response.envelope?.payload || null
-  }, response.ok ? "Synthesis response received." : response.error);
+    observation: compactObservationForSynthesis(getLatestObservationFromResults(results), mode),
+    userMemory: getUserMemoryForSynthesis(mode),
+    results: compactResultsForSynthesis(results, mode)
+  });
 
-  if (!response.ok) {
-    state.activity.unshift(`Synthesis failed: ${response.error}`);
-    return "";
+  const runSynthesisAttempt = async (mode = "full") => {
+    const payload = buildPayload(mode);
+    addDebugLog("provider.synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}${mode === "compact" ? " (compact retry)" : ""}`);
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
+    addDebugLog("provider.synthesis.end", {
+      ok: response.ok,
+      error: response.error || "",
+      result: response.envelope?.payload || null,
+      mode
+    }, response.ok ? `Synthesis response received${mode === "compact" ? " after compact retry" : ""}.` : response.error);
+
+    if (!response.ok) {
+      return {
+        text: "",
+        error: {
+          message: response.error || "Synthesis failed.",
+          thinking: ""
+        }
+      };
+    }
+
+    const payloadResult = response.envelope?.payload || {};
+    if (isProviderErrorLikeResult(payloadResult)) {
+      return {
+        text: "",
+        error: {
+          message: formatProviderAgentErrorMessage(payloadResult),
+          thinking: getAgentDisplayThinking(payloadResult)
+        }
+      };
+    }
+
+    return {
+      text: payloadResult.text || "",
+      error: null
+    };
+  };
+
+  const firstAttempt = await runSynthesisAttempt("full");
+  if (!firstAttempt.error) {
+    return firstAttempt;
   }
 
-  return response.envelope.payload?.text || "";
+  if (!isProviderErrorLikeResult(firstAttempt.error)) {
+    state.activity.unshift(`Synthesis failed: ${firstAttempt.error.message}`);
+    return firstAttempt;
+  }
+
+  state.activity.unshift("Synthesis hit a provider error; retrying with compact context.");
+  addDebugLog("provider.synthesis.retry", {
+    error: firstAttempt.error,
+    reason: "provider_error_compact_retry"
+  }, "Retrying synthesis with compact context.");
+  const compactAttempt = await runSynthesisAttempt("compact");
+  if (compactAttempt.error) {
+    state.activity.unshift(`Synthesis failed: ${compactAttempt.error.message}`);
+  }
+  return compactAttempt;
+}
+
+function getUserMemoryForSynthesis(mode = "full") {
+  return state.userMemory.items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      content: mode === "compact" ? "" : item.content,
+      updatedAt: item.updatedAt
+    }));
+}
+
+function compactObservationForSynthesis(observation, mode = "full") {
+  const compacted = compactObservationForProvider(observation);
+  if (!compacted || mode !== "compact") {
+    return compacted;
+  }
+
+  return {
+    type: compacted.type,
+    tab: compacted.tab,
+    viewport: compacted.viewport,
+    capturedAt: compacted.capturedAt,
+    visible_text: String(compacted.visible_text || "").slice(0, 2200),
+    visibleTextLength: compacted.visibleTextLength,
+    visibleTextTruncated: compacted.visibleTextTruncated,
+    headings: Array.isArray(compacted.headings) ? compacted.headings.slice(0, 12) : [],
+    links: [],
+    buttons: [],
+    forms: Array.isArray(compacted.forms) ? compacted.forms.slice(0, 3).map((form) => ({
+      agent_id: form.agent_id || "",
+      title: form.title || "",
+      fields: (Array.isArray(form.fields) ? form.fields : []).slice(0, 4).map((field) => ({
+        agent_id: field.agent_id || "",
+        role: field.role || "",
+        type: field.type || "",
+        name: field.name || "",
+        value: field.value || ""
+      }))
+    })) : [],
+    counts: compacted.counts,
+    note: "Observation compacted aggressively for synthesis retry."
+  };
+}
+
+function compactResultsForSynthesis(results, mode = "full") {
+  const items = Array.isArray(results) ? results : [];
+  if (mode !== "compact") {
+    return items.map(stripLargeArtifactsForSynthesis);
+  }
+
+  return items.slice(0, 10).map((result) => ({
+    action_id: result.action_id || "",
+    status: result.status || "",
+    target_verified: Boolean(result.target_verified),
+    page_changed: Boolean(result.page_changed),
+    type: result.type || "",
+    log_message: result.log_message || "",
+    validation_messages: Array.isArray(result.validation_messages) ? result.validation_messages.slice(0, 3) : [],
+    artifact: summarizeArtifactForSynthesis(result.artifact)
+  }));
+}
+
+function summarizeArtifactForSynthesis(artifact) {
+  if (!artifact) {
+    return null;
+  }
+
+  if (artifact.kind === "page_observation") {
+    const observation = artifact.observation || {};
+    return {
+      kind: "page_observation",
+      title: observation.tab?.title || "",
+      url: observation.tab?.url || "",
+      visibleTextLength: observation.visibleTextLength || String(observation.visible_text || "").length,
+      counts: observation.counts || null
+    };
+  }
+
+  if (artifact.kind === "http_response") {
+    return {
+      kind: "http_response",
+      statusCode: artifact.statusCode || null,
+      finalUrl: artifact.finalUrl || artifact.url || "",
+      bodyPreview: formatHttpBodyPreview(artifact).slice(0, 1200)
+    };
+  }
+
+  if (artifact.kind === "web_search") {
+    return {
+      kind: "web_search",
+      query: artifact.query || "",
+      results: Array.isArray(artifact.results) ? artifact.results.slice(0, 5) : []
+    };
+  }
+
+  return {
+    kind: artifact.kind || "artifact"
+  };
 }
 
 function stripLargeArtifactsForSynthesis(result) {
@@ -5173,6 +5450,19 @@ function stripLargeArtifactsForSynthesis(result) {
   }
 
   return result;
+}
+
+function pushPostActionSynthesisError(error = {}) {
+  logProviderError("provider.synthesis.error", error, "Post-action synthesis failed.");
+  state.messages.push({
+    role: "assistant",
+    text: "The browser action completed, but the HTTP provider failed while preparing the final answer. " + (error.message || "The provider did not return a usable response."),
+    thinking: String(error.thinking || "").trim(),
+    variant: "error",
+    createdAt: Date.now()
+  });
+  state.activity.unshift("Post-action answer synthesis failed.");
+  render();
 }
 
 function getArtifactSummary(artifact) {
