@@ -1444,7 +1444,7 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
 async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
   const useStreaming = Boolean(provider.useStreaming);
-  const initialMaxTokens = wantsJson ? 4096 : 4096;
+  const initialMaxTokens = wantsJson ? 24576 : 24576;
   const requestBody = {
     model: provider.model,
     messages: [
@@ -1468,7 +1468,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   let extracted = extractChatCompletionText(json);
 
   if (!extracted.ok && extracted.retryable) {
-    requestBody.max_tokens = wantsJson ? 8192 : 8192;
+    requestBody.max_tokens = wantsJson ? 49152 : 49152;
     requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
     json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false);
     extracted = extractChatCompletionText(json);
