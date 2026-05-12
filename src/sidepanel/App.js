@@ -2537,6 +2537,11 @@ async function executeActionPlan(plan, options = {}) {
     addActionNote(getArtifactSummary(artifact), getArtifactDetails(artifact));
   });
 
+  const hasPageChange = results.some((result) => result.page_changed);
+  const completionResults = hasPageChange
+    ? await capturePostActionObservation(results)
+    : results;
+
   const steeredQueueItem = consumePendingSteeredQueueItem();
   if (steeredQueueItem) {
     materializeQueuedMessage(steeredQueueItem, "steered");
@@ -2581,9 +2586,9 @@ async function executeActionPlan(plan, options = {}) {
     }
   }
 
-  const synthesized = await maybeSynthesizeResults(plan, results);
-  const answerText = synthesized || getExecutionSummary(results);
-  const memoryProposal = await maybeSaveResearchMemory(plan, results, answerText);
+  const synthesized = await maybeSynthesizeResults(plan, completionResults);
+  const answerText = synthesized || getExecutionSummary(completionResults);
+  const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, answerText);
   state.messages.push({
     role: "assistant",
     text: memoryProposal ? appendMemorySavedNote(answerText) : answerText,
@@ -2593,6 +2598,11 @@ async function executeActionPlan(plan, options = {}) {
     proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
   }
   await refreshPageAfterAction();
+}
+
+async function capturePostActionObservation(results) {
+  await refreshPageAfterAction();
+  return appendCurrentObservationArtifact(results);
 }
 
 function shouldAutoContinueAfterReadOnlyAction(plan, results, options = {}) {

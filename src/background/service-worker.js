@@ -434,6 +434,10 @@ async function executeActionPlan(plan) {
       args: [action]
     });
     results.push(result);
+
+    if (result?.page_changed) {
+      await waitForTabSettled(tab.id);
+    }
   }
 
   return {
@@ -869,9 +873,14 @@ function normalizeNavigationUrl(value) {
 
 function waitForTabSettled(tabId, timeoutMs = 10000) {
   return new Promise((resolve) => {
+    let finished = false;
     const timeout = setTimeout(done, timeoutMs);
 
     function done() {
+      if (finished) {
+        return;
+      }
+      finished = true;
       clearTimeout(timeout);
       chrome.tabs.onUpdated.removeListener(listener);
       resolve();
@@ -884,6 +893,15 @@ function waitForTabSettled(tabId, timeoutMs = 10000) {
     }
 
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId)
+      .then((currentTab) => {
+        if (currentTab?.status === "complete") {
+          setTimeout(done, 150);
+        }
+      })
+      .catch(() => {
+        done();
+      });
   });
 }
 
