@@ -440,6 +440,7 @@ async function ensureActionScripts(tabId) {
 function needsTabScript(action) {
   return ![
     "open_url",
+    "open_url_new_tab",
     "http_request",
     "web_search",
     "go_back",
@@ -527,6 +528,30 @@ async function executeBrowserLevelAction(tab, action) {
       page_changed: true,
       validation_messages: [],
       log_message: `Opened ${url}.`
+    };
+  }
+
+  if (action?.type === "open_url_new_tab") {
+    const url = normalizeNavigationUrl(action.value || action.url);
+    const created = await chrome.tabs.create({
+      windowId: tab.windowId,
+      url,
+      active: false,
+      ...(Number.isInteger(tab.index) ? { index: tab.index + 1 } : {})
+    });
+    return {
+      type: "execution_result",
+      action_id: action.id || action.type,
+      status: "success",
+      target_verified: true,
+      page_changed: false,
+      validation_messages: [],
+      log_message: `Opened ${url} in a new tab.`,
+      artifact: {
+        kind: "tab_opened",
+        tabId: created?.id || null,
+        url
+      }
     };
   }
 

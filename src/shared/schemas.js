@@ -10,6 +10,7 @@ export const ACTION_TYPES = Object.freeze({
   HTTP_REQUEST: "http_request",
   WEB_SEARCH: "web_search",
   OPEN_URL: "open_url",
+  OPEN_URL_NEW_TAB: "open_url_new_tab",
   SCROLL_TO_ELEMENT: "scroll_to_element",
   SCROLL_BY: "scroll_by",
   WAIT_FOR_PAGE_CHANGE: "wait_for_page_change",

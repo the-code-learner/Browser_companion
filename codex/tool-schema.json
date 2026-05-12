@@ -170,6 +170,7 @@
             "http_request",
             "web_search",
             "open_url",
+            "open_url_new_tab",
             "scroll_to_element",
             "scroll_by",
             "wait_for_page_change",

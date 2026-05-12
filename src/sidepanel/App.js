@@ -1955,6 +1955,7 @@ function buildDeterministicActionPlan(goal, responseLanguage) {
   }
 
   return buildNavigationPlan(goal, responseLanguage)
+    || buildRequestedOpenLinksPlan(goal, state.page.observation, responseLanguage)
     || buildRequestedClickPlan(goal, state.page.observation, responseLanguage);
 }
 
@@ -2293,6 +2294,13 @@ async function executeActionPlan(plan, options = {}) {
     return;
   }
 
+  if (isSuccessfulReadOnlyContextRun(normalizedPlan, results)) {
+    const finalized = await finalizeReadOnlyRequest(normalizedPlan, results, options);
+    if (finalized) {
+      return;
+    }
+  }
+
   const synthesized = await maybeSynthesizeResults(plan, results);
   const answerText = synthesized || getExecutionSummary(results);
   const memoryProposal = await maybeSaveResearchMemory(plan, results, answerText);
@@ -2308,31 +2316,124 @@ async function executeActionPlan(plan, options = {}) {
 }
 
 function shouldAutoContinueAfterReadOnlyAction(plan, results, options = {}) {
-  if ((options.continuationDepth || 0) >= 2) {
+  if ((options.continuationDepth || 0) >= MAX_READ_ONLY_CONTINUATIONS) {
     return false;
   }
 
+  return isSuccessfulReadOnlyContextRun(plan, results);
+}
+
+function isSuccessfulReadOnlyContextRun(plan, results) {
   const actions = plan?.actions || [];
+
   if (!actions.length || !results.length || results.some((result) => result.status !== "success")) {
     return false;
   }
 
-  const contextActionTypes = new Set([
-    "observe_page",
-    "get_visible_text",
-    "get_dom_snapshot",
-    "get_forms",
-    "get_links",
-    "get_buttons",
-    "capture_viewport",
-    "capture_numbered_overlay",
-    "scroll_to_element",
-    "scroll_by",
-    "wait_for_page_change"
-  ]);
   const hasExternalArtifact = results.some((result) => ["web_search", "http_response"].includes(result.artifact?.kind));
+  return !hasExternalArtifact && actions.every((action) => READ_ONLY_CONTEXT_ACTION_TYPES.has(action?.type));
+}
 
-  return !hasExternalArtifact && actions.every((action) => contextActionTypes.has(action?.type));
+async function finalizeReadOnlyRequest(plan, results, options = {}) {
+  await refreshPageAfterAction();
+
+  const goal = getLastUserMessageText() || plan.goal || "";
+  const responseLanguage = detectUserLanguage(goal);
+  const planContext = options.planContext || getObservedPageContext();
+  const completionResults = appendCurrentObservationArtifact(results);
+
+  state.activity.unshift("Finishing the request with the gathered page context.");
+  addDebugLog("agent.read_only_finalize.start", {
+    goal,
+    continuationDepth: options.continuationDepth || 0,
+    planContext,
+    results: completionResults
+  }, "Requesting a final answer after read-only context gathering.");
+  render();
+
+  const synthesized = await maybeSynthesizeResults({ ...plan, goal }, completionResults);
+  if (synthesized && !isActionOnlyCompletionText(synthesized)) {
+    const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, synthesized);
+    state.messages.push({
+      role: "assistant",
+      text: memoryProposal ? appendMemorySavedNote(synthesized) : synthesized,
+      createdAt: Date.now()
+    });
+    if (memoryProposal) {
+      proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
+    } else {
+      render();
+    }
+    return true;
+  }
+
+  const followUpResult = await getAgentResult(goal, {
+    continuationDepth: options.continuationDepth || 0,
+    continuationReason: "Context gathering is complete. Answer the user's original request directly now using the latest page observation. Do not return another read-only action plan. If something is still missing, explain exactly what is missing.",
+    planContext
+  });
+
+  if (followUpResult?.type === "agent_plan" && isReadOnlyContextPlan(followUpResult)) {
+    const fallbackText = responseLanguage === "it"
+      ? "Ho raccolto il contesto disponibile dalla pagina, ma l'agente continua a chiedere altre azioni di sola lettura invece di rispondere. Mi fermo qui per evitare un loop. Se torni nella sezione giusta o fai un nuovo Observe, posso riprendere da li'."
+      : "I gathered the available page context, but the agent kept asking for more read-only actions instead of answering. I stopped here to avoid a loop. If you return to the right section or run Observe again, I can continue from there.";
+    state.messages.push({
+      role: "assistant",
+      text: fallbackText,
+      createdAt: Date.now()
+    });
+    addDebugLog("agent.read_only_finalize.loop_blocked", {
+      goal,
+      result: followUpResult,
+      planContext
+    }, "Stopped a repeated read-only continuation loop.");
+    render();
+    return true;
+  }
+
+  await handleAgentResult(followUpResult, {
+    continuationDepth: options.continuationDepth || 0,
+    planContext
+  });
+  return true;
+}
+
+function appendCurrentObservationArtifact(results) {
+  const items = Array.isArray(results) ? [...results] : [];
+  const hasPageObservation = items.some((result) => result?.artifact?.kind === "page_observation");
+
+  if (!hasPageObservation && state.page.observation) {
+    items.push({
+      action_id: "current_page_observation",
+      status: "success",
+      target_verified: true,
+      page_changed: false,
+      type: "execution_result",
+      validation_messages: [],
+      log_message: "Captured the latest page observation for answer synthesis.",
+      artifact: {
+        kind: "page_observation",
+        observation: state.page.observation
+      }
+    });
+  }
+
+  return items;
+}
+
+function isReadOnlyContextPlan(plan) {
+  const actions = plan?.actions || [];
+  return Boolean(actions.length) && actions.every((action) => READ_ONLY_CONTEXT_ACTION_TYPES.has(action?.type));
+}
+
+function isActionOnlyCompletionText(text) {
+  const compactText = compact(text).toLowerCase();
+  return compactText === "the browser actions were completed."
+    || compactText === "no browser actions were returned."
+    || compactText === "scrolled the page."
+    || compactText === "observed the active tab."
+    || compactText === "action completed."
+    || compactText.length < 40;
 }
 
 function getLastUserMessageText() {
@@ -3010,6 +3111,22 @@ function appendMemorySavedNote(text) {
   return `${text}\n\n_Memory preview prepared._`;
 }
 
+const READ_ONLY_CONTEXT_ACTION_TYPES = new Set([
+  "observe_page",
+  "get_visible_text",
+  "get_dom_snapshot",
+  "get_forms",
+  "get_links",
+  "get_buttons",
+  "capture_viewport",
+  "capture_numbered_overlay",
+  "scroll_to_element",
+  "scroll_by",
+  "wait_for_page_change"
+]);
+
+const MAX_READ_ONLY_CONTINUATIONS = 4;
+
 function proposeMemorySave(item, responseLanguage = "en", sourceGoal = "") {
   const memoryItem = sanitizeMemoryItem(item, { goal: sourceGoal || item?.title || "" });
   state.pendingMemoryProposal = {
@@ -3148,6 +3265,11 @@ function buildLocalAgentResult(goal, responseLanguage) {
     return navigationPlan;
   }
 
+  const openLinksPlan = buildRequestedOpenLinksPlan(goal, observation, responseLanguage);
+  if (openLinksPlan) {
+    return openLinksPlan;
+  }
+
   const clickPlan = buildRequestedClickPlan(goal, observation, responseLanguage);
   if (clickPlan) {
     return clickPlan;
@@ -3179,6 +3301,7 @@ function buildLocalAgentResult(goal, responseLanguage) {
 }
 
 function buildNavigationPlan(goal, responseLanguage) {
+  const preferNewTab = shouldPreferNewTabNavigation(goal);
   const searchMatch = goal.match(/\b(?:open|apri)\s+((?:https?:\/\/)?(?:www\.)?(?:google|bing|duckduckgo|brave|yahoo)(?:\.[a-z]{2,})?)\b.*\b(?:search|cerca)\b.*["“”']([^"“”']+)["“”']/i)
     || goal.match(/\b(?:search|cerca)\b.*["“”']([^"“”']+)["“”'].*\b(?:on|su)\s+((?:https?:\/\/)?(?:www\.)?(?:google|bing|duckduckgo|brave|yahoo)(?:\.[a-z]{2,})?)/i);
 
@@ -3192,14 +3315,16 @@ function buildNavigationPlan(goal, responseLanguage) {
       type: "agent_plan",
       goal,
       risk_level: "low",
-      summary_for_user: localText(responseLanguage, "openSearch", query.trim()),
+      summary_for_user: preferNewTab
+        ? localText(responseLanguage, "openUrlInNewTab", url)
+        : localText(responseLanguage, "openSearch", query.trim()),
       needs_clarification: false,
       requires_confirmation: false,
       will_submit: false,
       actions: [
         {
           id: "act_open_url_001",
-          type: "open_url",
+          type: preferNewTab ? "open_url_new_tab" : "open_url",
           target: {
             agent_id: "",
             role: "",
@@ -3218,6 +3343,11 @@ function buildNavigationPlan(goal, responseLanguage) {
     };
   }
 
+  const explicitUrls = extractExplicitUrls(goal);
+  if (/\b(open|apri|go to|vai su|naviga a)\b/i.test(goal) && explicitUrls.length > 1) {
+    return buildOpenUrlsInNewTabsPlan(goal, explicitUrls, responseLanguage);
+  }
+
   const openMatch = goal.match(/\b(?:open|apri|go to|vai su|naviga a)\s+((?:https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s]*)?)/i)
     || goal.match(/\b((?:https?:\/\/)[^\s]+)\b/i);
   if (!openMatch) {
@@ -3228,14 +3358,16 @@ function buildNavigationPlan(goal, responseLanguage) {
     type: "agent_plan",
     goal,
     risk_level: "low",
-    summary_for_user: localText(responseLanguage, "openUrl", openMatch[1]),
+    summary_for_user: preferNewTab
+      ? localText(responseLanguage, "openUrlInNewTab", openMatch[1])
+      : localText(responseLanguage, "openUrl", openMatch[1]),
     needs_clarification: false,
     requires_confirmation: false,
     will_submit: false,
     actions: [
       {
         id: "act_open_url_001",
-        type: "open_url",
+        type: preferNewTab ? "open_url_new_tab" : "open_url",
         target: {
           agent_id: "",
           role: "",
@@ -3270,6 +3402,138 @@ function normalizeUrlValue(value) {
   return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
 }
 
+function shouldPreferNewTabNavigation(goal) {
+  const text = String(goal || "");
+
+  if (/\b(new tab|background tab|keep this page|keep current page|without leaving this page|don'?t leave this page|open in tab)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\b(nuova tab|nuova scheda|in scheda separata|senza lasciare questa pagina|mantieni questa pagina|lascia aperta questa pagina)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\b(compare|comparison|reference|references|research|look up|documentation|docs|read later)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\b(confronta|confrontare|riferimento|riferimenti|ricerca|documentazione|documentazione ufficiale|leggi dopo)\b/i.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractExplicitUrls(goal) {
+  const matches = String(goal || "").match(/(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s,;)]*)?/gi) || [];
+  const seen = new Set();
+  const urls = [];
+
+  matches.forEach((match) => {
+    const value = String(match || "").trim().replace(/[.)]+$/, "");
+    if (!value || value.includes("@")) {
+      return;
+    }
+
+    try {
+      const normalized = normalizeUrlValue(value).href;
+      if (seen.has(normalized)) {
+        return;
+      }
+      seen.add(normalized);
+      urls.push(normalized);
+    } catch {
+      // Ignore invalid URL-like fragments.
+    }
+  });
+
+  return urls;
+}
+
+function buildOpenUrlsInNewTabsPlan(goal, urls, responseLanguage) {
+  return {
+    type: "agent_plan",
+    goal,
+    risk_level: "low",
+    summary_for_user: localText(responseLanguage, "openUrlsInNewTabs", urls.length),
+    needs_clarification: false,
+    requires_confirmation: false,
+    will_submit: false,
+    actions: urls.map((url, index) => ({
+      id: `act_open_new_tab_${String(index + 1).padStart(3, "0")}`,
+      type: "open_url_new_tab",
+      target: {
+        agent_id: "",
+        role: "",
+        name: "",
+        selector_candidates: []
+      },
+      value: url,
+      source: {
+        file_id: "",
+        confidence: 1
+      },
+      reason: responseLanguage === "it"
+        ? "L'utente ha chiesto di aprire piu' link, quindi li apro in schede separate."
+        : "The user asked to open multiple links, so I am opening them in separate tabs."
+    })),
+    uncertain_fields: []
+  };
+}
+
+function buildRequestedOpenLinksPlan(goal, observation, responseLanguage) {
+  if (!/\b(open|apri)\b/i.test(goal)) {
+    return null;
+  }
+
+  const requestedNames = extractQuotedElementNames(goal);
+  if (requestedNames.length < 2) {
+    return null;
+  }
+
+  const candidates = (observation.links || []).filter((item) => item.agent_id && item.name && item.href);
+  const used = new Set();
+  const matches = [];
+
+  for (const name of requestedNames) {
+    const target = findNamedElement(candidates.filter((item) => !used.has(item.agent_id)), name);
+    if (!target?.href) {
+      return null;
+    }
+    used.add(target.agent_id);
+    matches.push(target);
+  }
+
+  return {
+    type: "agent_plan",
+    goal,
+    risk_level: "low",
+    summary_for_user: localText(responseLanguage, "openUrlsInNewTabs", matches.length),
+    needs_clarification: false,
+    requires_confirmation: false,
+    will_submit: false,
+    actions: matches.map((target, index) => ({
+      id: `act_open_named_link_tab_${String(index + 1).padStart(3, "0")}`,
+      type: "open_url_new_tab",
+      target: {
+        agent_id: target.agent_id,
+        role: target.role || "link",
+        name: target.name || "",
+        selector_candidates: target.selector_candidates || []
+      },
+      value: target.href,
+      source: {
+        file_id: "current_page_observation",
+        confidence: 0.9
+      },
+      reason: responseLanguage === "it"
+        ? "L'utente ha chiesto di aprire piu' link osservati, quindi li apro in nuove schede."
+        : "The user asked to open multiple observed links, so I am opening them in new tabs."
+    })),
+    uncertain_fields: []
+  };
+}
+
 function buildRequestedClickPlan(goal, observation, responseLanguage) {
   if (!/\b(click|clicca|press|premi|open|apri)\b/i.test(goal)) {
     return null;
@@ -3278,6 +3542,43 @@ function buildRequestedClickPlan(goal, observation, responseLanguage) {
   const wanted = extractRequestedElementName(goal);
   if (!wanted) {
     return null;
+  }
+
+  const preferNewTab = shouldPreferNewTabNavigation(goal);
+  const linkCandidates = (observation.links || []).filter((item) => item.agent_id && item.name && item.href);
+  const linkTarget = findNamedElement(linkCandidates, wanted);
+
+  if (preferNewTab && linkTarget?.href) {
+    return {
+      type: "agent_plan",
+      goal,
+      risk_level: "low",
+      summary_for_user: localText(responseLanguage, "openUrlInNewTab", linkTarget.href),
+      needs_clarification: false,
+      requires_confirmation: false,
+      will_submit: false,
+      actions: [
+        {
+          id: "act_open_named_link_new_tab_001",
+          type: "open_url_new_tab",
+          target: {
+            agent_id: linkTarget.agent_id,
+            role: linkTarget.role || "link",
+            name: linkTarget.name || "",
+            selector_candidates: linkTarget.selector_candidates || []
+          },
+          value: linkTarget.href,
+          source: {
+            file_id: "current_page_observation",
+            confidence: 0.9
+          },
+          reason: responseLanguage === "it"
+            ? "Apro il link richiesto in una nuova scheda per preservare la pagina corrente."
+            : "Open the requested link in a new tab to preserve the current page."
+        }
+      ],
+      uncertain_fields: []
+    };
   }
 
   const candidates = [
@@ -3343,6 +3644,12 @@ function extractRequestedElementName(goal) {
   }
 
   return "";
+}
+
+function extractQuotedElementNames(goal) {
+  return [...String(goal || "").matchAll(/["'â€œâ€](.+?)["'â€œâ€]/g)]
+    .map((match) => String(match[1] || "").trim())
+    .filter(Boolean);
 }
 
 function findNamedElement(candidates, wanted) {
@@ -3964,6 +4271,8 @@ function localText(language, key, value) {
       submitFound: `I found "${value}". This may submit, accept, send, or finalize something on the website. Type SUBMIT to enable the final action.`,
       fillSummary: `I can fill ${value} non-sensitive field${value === 1 ? "" : "s"} from local attachment context. I will not submit the form.`,
       openUrl: `I will open ${value}.`,
+      openUrlInNewTab: `I will open ${value} in a new tab.`,
+      openUrlsInNewTabs: `I will open ${value} link${value === 1 ? "" : "s"} in new tabs.`,
       openSearch: `I will open Google search results for "${value}".`,
       memorySaved: "Saved that to local user memory.",
       memorySaveFailed: "I could not save that to local user memory."
@@ -3976,6 +4285,8 @@ function localText(language, key, value) {
       submitFound: `Ho trovato "${value}". Potrebbe inviare, accettare, spedire o finalizzare qualcosa sul sito. Digita SUBMIT per abilitare l'azione finale.`,
       fillSummary: `Posso compilare ${value} camp${value === 1 ? "o non sensibile" : "i non sensibili"} usando il contesto degli allegati locali. Non inviero' il modulo.`,
       openUrl: `Apro ${value}.`,
+      openUrlInNewTab: `Apro ${value} in una nuova scheda.`,
+      openUrlsInNewTabs: `Apro ${value} link in nuove schede.`,
       openSearch: `Apro i risultati Google per "${value}".`,
       memorySaved: "Salvato nella memoria utente locale.",
       memorySaveFailed: "Non sono riuscito a salvarlo nella memoria utente locale."
