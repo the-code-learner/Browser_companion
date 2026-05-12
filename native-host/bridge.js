@@ -91,7 +91,16 @@ function handleMessage(message) {
     if (requestId) {
       activeRequestControllers.set(requestId, controller);
     }
-    Promise.resolve(runAgentRequest(message.payload, { abortSignal: controller.signal }))
+    Promise.resolve(runAgentRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId,
+      onProgress: (progress) => writeResponse(requestId, {
+        type: "provider_progress",
+        requestId,
+        thinking: progress.thinking || "",
+        content: progress.content || ""
+      })
+    }))
       .then((response) => writeResponse(requestId, response))
       .catch((error) => writeResponse(requestId, {
         type: "agent_error",
@@ -110,7 +119,16 @@ function handleMessage(message) {
     if (requestId) {
       activeRequestControllers.set(requestId, controller);
     }
-    Promise.resolve(runSynthesisRequest(message.payload, { abortSignal: controller.signal }))
+    Promise.resolve(runSynthesisRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId,
+      onProgress: (progress) => writeResponse(requestId, {
+        type: "provider_progress",
+        requestId,
+        thinking: progress.thinking || "",
+        content: progress.content || ""
+      })
+    }))
       .then((response) => writeResponse(requestId, response))
       .catch((error) => writeResponse(requestId, {
         type: "natural_response",
@@ -1559,6 +1577,7 @@ function saveHttpProviderDebugRequest(payload) {
 async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat, options = {}) {
   const timeoutMs = getHttpProviderPositiveInt(provider.timeoutMs, 360000, 1000);
   const activityTimeout = createActivityTimeoutController(timeoutMs, options.abortSignal);
+  activityTimeout.onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
 
   try {
     let response = await fetch(`${baseUrl}/v1/chat/completions`, {
@@ -1597,7 +1616,12 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
     return JSON.parse(text);
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw makeProviderAbortError(activityTimeout.getAbortKind());
+      throw makeProviderAbortError(
+        error?.abortKind || activityTimeout.getAbortKind(),
+        error?.partialThinking || "",
+        error?.partialContent || "",
+        error?.finishReason || ""
+      );
     }
     throw error;
   } finally {
@@ -1699,6 +1723,8 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
   let aggregatedReasoning = "";
   let finishReason = "";
   let usage = null;
+  let lastProgressEmitAt = 0;
+  let lastProgressThinkingLength = 0;
 
   try {
     while (true) {
@@ -1775,6 +1801,25 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
       if (deltaReasoning) aggregatedReasoning += deltaReasoning;
       if (choice?.finish_reason) finishReason = choice.finish_reason;
       if (parsed?.usage) usage = parsed.usage;
+
+      const now = Date.now();
+      if (
+        typeof activityTimeout?.onProgress === "function"
+        && aggregatedReasoning
+        && (
+          now - lastProgressEmitAt >= 700
+          || aggregatedReasoning.length - lastProgressThinkingLength >= 120
+          || Boolean(choice?.finish_reason)
+        )
+      ) {
+        lastProgressEmitAt = now;
+        lastProgressThinkingLength = aggregatedReasoning.length;
+        activityTimeout.onProgress({
+          thinking: aggregatedReasoning,
+          content: aggregatedContent,
+          finishReason
+        });
+      }
     }
   }
 }

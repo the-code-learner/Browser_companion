@@ -1069,6 +1069,16 @@ function postNativePortRequest(payload) {
 }
 
 function handleNativePortMessage(message) {
+  if (message?.type === MESSAGE_TYPES.PROVIDER_PROGRESS) {
+    chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.PROVIDER_PROGRESS,
+      payload: message
+    }).catch(() => {
+      // Sidepanel may be closed; best effort only.
+    });
+    return;
+  }
+
   const requestId = message?.requestId;
   if (!requestId || !nativePortPending.has(requestId)) {
     return;

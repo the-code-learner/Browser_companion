@@ -401,6 +401,14 @@ h2 {
   color: var(--muted);
 }
 
+.action-thinking[open] {
+  border-left-color: var(--accent);
+}
+
+.action-thinking summary {
+  color: var(--ink);
+}
+
 .message-error-stack {
   display: grid;
   gap: 8px;

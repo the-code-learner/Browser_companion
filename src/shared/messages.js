@@ -17,6 +17,7 @@ export const MESSAGE_TYPES = Object.freeze({
   AGENT_REQUEST: "agent_request",
   SYNTHESIS_REQUEST: "synthesis_request",
   STOP_ACTIVE_REQUEST: "stop_active_request",
+  PROVIDER_PROGRESS: "provider_progress",
   AGENT_RESPONSE: "agent_response",
   VALIDATE_ACTION_PLAN: "validate_action_plan",
   POLICY_RESULT: "policy_result",

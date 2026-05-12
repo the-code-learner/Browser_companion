@@ -113,6 +113,7 @@ const state = {
   stopRequestInFlight: false,
   currentProcessingMessageId: null,
   pendingSteeredMessageId: null,
+  liveThinking: null,
   chatAtBottom: true,
   activity: [],
   debugLogs: []
@@ -138,6 +139,7 @@ async function initialize() {
   await restoreProviderSettings();
   await restoreSession();
   applyTheme();
+  chrome.runtime.onMessage.addListener(handleRuntimeMessage);
   render();
   checkConnector();
   loadUserMemory();
@@ -893,6 +895,16 @@ function renderChatTimeline() {
   const items = [
     ...state.messages.map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
     ...getQueuedMessageTimelineEntries().map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
+    ...(state.liveThinking?.text ? [{
+      kind: "note",
+      createdAt: state.liveThinking.createdAt || Date.now(),
+      item: {
+        summary: "Thinking",
+        details: [state.liveThinking.text],
+        variant: "thinking",
+        open: true
+      }
+    }] : []),
     ...state.actionNotes.map((item) => ({ kind: "note", createdAt: item.createdAt || 0, item }))
   ].sort((a, b) => a.createdAt - b.createdAt);
 
@@ -913,8 +925,10 @@ function getQueuedMessageTimelineEntries() {
 
 function renderActionNote(note) {
   const details = note.details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  const variantClass = note.variant === "thinking" ? " action-thinking" : "";
+  const openAttr = note.open ? " open" : "";
   return `
-    <details class="action-note">
+    <details class="action-note${variantClass}"${openAttr}>
       <summary>${escapeHtml(note.summary)}</summary>
       <ul>${details}</ul>
     </details>
@@ -2130,6 +2144,7 @@ async function processOutboundQueue() {
   state.isProcessingQueue = true;
   state.stopProcessingRequested = false;
   state.stopRequestInFlight = false;
+  state.liveThinking = null;
   render();
 
   try {
@@ -2171,6 +2186,7 @@ async function processOutboundQueue() {
     state.isProcessingQueue = false;
     state.stopProcessingRequested = false;
     state.stopRequestInFlight = false;
+    state.liveThinking = null;
     state.currentProcessingMessageId = null;
     state.pendingSteeredMessageId = null;
     render();
@@ -2197,11 +2213,33 @@ async function processQueuedMessage(item) {
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
 
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
+  state.liveThinking = null;
   const agentResult = await getAgentResult(text, { planContext });
   await handleAgentResult(agentResult, { planContext });
   return {
     stopped: isUserStoppedResult(agentResult)
   };
+}
+
+function handleRuntimeMessage(message) {
+  if (message?.type !== MESSAGE_TYPES.PROVIDER_PROGRESS) {
+    return false;
+  }
+
+  const payload = message.payload || {};
+  const thinking = String(payload.thinking || "").trim();
+  if (!thinking) {
+    return false;
+  }
+
+  state.liveThinking = {
+    requestId: payload.requestId || "",
+    text: thinking,
+    createdAt: state.liveThinking?.createdAt || Date.now(),
+    updatedAt: Date.now()
+  };
+  render();
+  return false;
 }
 
 async function stopCurrentProcessing() {
