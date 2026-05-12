@@ -200,6 +200,7 @@ function render() {
     </section>
     <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" aria-label="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>&#8595;</button>
 
+    ${renderLiveThinkingPanel()}
     ${renderComposer()}
   `;
 
@@ -740,6 +741,21 @@ function renderComposer() {
         <button type="submit">${escapeHtml(submitLabel)}</button>
       </form>
       ${queueLabel ? `<p class="composer-meta">${escapeHtml(queueLabel)}</p>` : ""}
+    </div>
+  `;
+}
+
+function renderLiveThinkingPanel() {
+  if (!state.liveThinking?.text) {
+    return "";
+  }
+
+  return `
+    <div class="live-thinking-wrap">
+      <details class="action-note action-thinking" open>
+        <summary>Thinking</summary>
+        <ul><li>${escapeHtml(state.liveThinking.text)}</li></ul>
+      </details>
     </div>
   `;
 }
@@ -2238,6 +2254,10 @@ function handleRuntimeMessage(message) {
     createdAt: state.liveThinking?.createdAt || Date.now(),
     updatedAt: Date.now()
   };
+  addDebugLog("provider.progress", {
+    requestId: payload.requestId || "",
+    thinkingLength: thinking.length
+  }, "Received provider thinking progress.");
   render();
   return false;
 }

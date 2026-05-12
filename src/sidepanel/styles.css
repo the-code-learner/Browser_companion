@@ -475,6 +475,26 @@ h2 {
   z-index: 5;
 }
 
+.live-thinking-wrap {
+  position: sticky;
+  bottom: 70px;
+  z-index: 4;
+  margin-top: 8px;
+}
+
+.live-thinking-wrap .action-note {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel);
+  box-shadow: 0 -6px 16px rgb(23 32 51 / 8%);
+}
+
+.live-thinking-wrap .action-note[open] {
+  padding-left: 10px;
+}
+
 .composer textarea {
   width: 100%;
   min-height: 42px;
