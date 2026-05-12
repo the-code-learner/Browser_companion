@@ -4656,6 +4656,8 @@ function summarizeSearchArtifact(artifact) {
 async function restoreSession() {
   const stored = await chrome.storage.local.get(["browserCompanionSession", "browserCompanionTheme"]);
   const session = stored.browserCompanionSession;
+  const selectedProvider = state.codex.provider;
+  const selectedModel = state.codex.model;
   state.theme = stored.browserCompanionTheme || "system";
 
   if (!session?.privacy?.persistSession) {
@@ -4669,6 +4671,8 @@ async function restoreSession() {
     model: "gpt-5.5",
     ...(session.codex || {})
   };
+  state.codex.provider = selectedProvider;
+  state.codex.model = selectedModel;
   state.attachments = session.attachments || [];
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];
