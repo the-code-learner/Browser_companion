@@ -1443,6 +1443,7 @@ function runHttpProviderSynthesisRequest(provider, payload = {}) {
 
 async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
+  const useStreaming = Boolean(provider.useStreaming);
   const initialMaxTokens = wantsJson ? 4096 : 4096;
   const requestBody = {
     model: provider.model,
@@ -1456,7 +1457,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
     ],
     temperature: 0.2,
     max_tokens: initialMaxTokens,
-    stream: false
+    stream: useStreaming
   };
 
   if (wantsJson) {
@@ -1490,7 +1491,9 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
     body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(360000)
   });
-  let text = await response.text();
+  let text = requestBody.stream
+    ? await readStreamingChatCompletion(response)
+    : await response.text();
 
   if (!response.ok && canRetryWithoutResponseFormat && /response_format|json_object|unsupported/i.test(text)) {
     delete requestBody.response_format;
@@ -1503,7 +1506,9 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
       body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(360000)
     });
-    text = await response.text();
+    text = requestBody.stream
+      ? await readStreamingChatCompletion(response)
+      : await response.text();
   }
 
   if (!response.ok) {
@@ -1511,6 +1516,97 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
   }
 
   return JSON.parse(text);
+}
+
+async function readStreamingChatCompletion(response) {
+  if (!response.body) {
+    return response.text();
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let aggregatedContent = "";
+  let aggregatedReasoning = "";
+  let finishReason = "";
+  let usage = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const rawEvent = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      consumeStreamingEvent(rawEvent);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    consumeStreamingEvent(buffer);
+  }
+
+  return JSON.stringify({
+    choices: [
+      {
+        index: 0,
+        finish_reason: finishReason || "stop",
+        message: {
+          role: "assistant",
+          content: aggregatedContent,
+          ...(aggregatedReasoning ? { reasoning_content: aggregatedReasoning } : {})
+        }
+      }
+    ],
+    ...(usage ? { usage } : {})
+  });
+
+  function consumeStreamingEvent(rawEvent) {
+    const lines = String(rawEvent || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+
+      const choice = parsed?.choices?.[0];
+      const delta = choice?.delta || {};
+      const message = choice?.message || {};
+      const deltaContent = normalizeStreamText(delta.content) || normalizeStreamText(choice?.text) || normalizeStreamText(message.content);
+      const deltaReasoning = normalizeStreamText(delta.reasoning_content) || normalizeStreamText(message.reasoning_content);
+
+      if (deltaContent) aggregatedContent += deltaContent;
+      if (deltaReasoning) aggregatedReasoning += deltaReasoning;
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      if (parsed?.usage) usage = parsed.usage;
+    }
+  }
+}
+
+function normalizeStreamText(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item.text === "string") return item.text;
+      return "";
+    }).join("");
+  }
+  return "";
 }
 
 function extractChatCompletionText(json) {

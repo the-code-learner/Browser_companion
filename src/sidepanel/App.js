@@ -86,7 +86,8 @@ const state = {
     baseUrl: "",
     username: "",
     password: "",
-    model: ""
+    model: "",
+    useStreaming: false
   },
   userMemory: {
     status: "unknown",
@@ -550,6 +551,10 @@ function renderHttpProviderSettings() {
         <input id="http-provider-username" type="text" placeholder="Basic auth username" value="${escapeHtml(state.httpProviderDraft.username)}">
         <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password)}">
         ${renderHttpProviderModelControl()}
+        <label class="toggle-row">
+          <input id="http-provider-use-streaming" type="checkbox" ${state.httpProviderDraft.useStreaming ? "checked" : ""}>
+          <span>Use streaming responses when the server supports them</span>
+        </label>
         <div class="button-row">
           <button id="test-http-provider" type="button">Refresh Models</button>
           <button type="submit">${state.httpProviderDraft.id ? "Save Changes" : "Save HTTP Provider"}</button>
@@ -586,7 +591,7 @@ function renderHttpProviderItem(provider) {
   return `
     <li>
       <strong>${escapeHtml(provider.name)}</strong>
-      <span>${escapeHtml(provider.baseUrl)} - ${escapeHtml(provider.model || "No model selected")}</span>
+      <span>${escapeHtml(provider.baseUrl)} - ${escapeHtml(provider.model || "No model selected")}${provider.useStreaming ? " - streaming on" : ""}</span>
       <div class="button-row">
         <button type="button" data-http-provider-edit="${escapeHtml(provider.id)}">Edit</button>
         <button type="button" data-http-provider-delete="${escapeHtml(provider.id)}">Delete</button>
@@ -1705,7 +1710,7 @@ async function saveHttpProviderFromForm(event) {
   } else {
     state.httpProviders.push(provider);
   }
-  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "" };
+  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "", useStreaming: false };
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
   if (state.codex.provider === `http:${provider.id}` || existingIndex < 0) {
     state.codex.provider = `http:${provider.id}`;
@@ -1726,6 +1731,7 @@ function readHttpProviderDraft() {
   const username = document.getElementById("http-provider-username")?.value.trim() || "";
   const password = document.getElementById("http-provider-password")?.value || "";
   const model = document.getElementById("http-provider-model")?.value.trim() || state.httpProviderDraft.model || "";
+  const useStreaming = Boolean(document.getElementById("http-provider-use-streaming")?.checked);
   return {
     ...state.httpProviderDraft,
     id: existingId || crypto.randomUUID(),
@@ -1735,6 +1741,7 @@ function readHttpProviderDraft() {
     password,
     authType: username || password ? "basic" : "none",
     model,
+    useStreaming,
     models: state.httpProviderDraft.models?.length
       ? Array.from(new Set([...state.httpProviderDraft.models, ...(model ? [model] : [])]))
       : (model ? [model] : []),
@@ -1752,7 +1759,7 @@ function editHttpProvider(id) {
 }
 
 function cancelHttpProviderEdit() {
-  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "" };
+  state.httpProviderDraft = { id: "", name: "", baseUrl: "", username: "", password: "", model: "", useStreaming: false };
   render();
 }
 
@@ -4927,7 +4934,12 @@ async function restoreSession() {
 async function restoreProviderSettings() {
   const stored = await chrome.storage.local.get(["browserCompanionProviderSettings"]);
   const settings = stored.browserCompanionProviderSettings || {};
-  state.httpProviders = Array.isArray(settings.httpProviders) ? settings.httpProviders : [];
+  state.httpProviders = Array.isArray(settings.httpProviders)
+    ? settings.httpProviders.map((provider) => ({
+      ...provider,
+      useStreaming: Boolean(provider.useStreaming)
+    }))
+    : [];
   state.codex = {
     ...state.codex,
     ...(settings.selectedProvider ? { provider: settings.selectedProvider } : {}),
