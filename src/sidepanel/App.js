@@ -101,6 +101,7 @@ const state = {
   outboundQueue: [],
   isProcessingQueue: false,
   currentProcessingMessageId: null,
+  pendingSteeredMessageId: null,
   chatAtBottom: true,
   activity: [],
   debugLogs: []
@@ -673,10 +674,23 @@ function renderMessage(message) {
 function renderChatTimeline() {
   const items = [
     ...state.messages.map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
+    ...getQueuedMessageTimelineEntries().map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
     ...state.actionNotes.map((item) => ({ kind: "note", createdAt: item.createdAt || 0, item }))
   ].sort((a, b) => a.createdAt - b.createdAt);
 
   return items.map((entry) => entry.kind === "message" ? renderMessage(entry.item) : renderActionNote(entry.item)).join("");
+}
+
+function getQueuedMessageTimelineEntries() {
+  return state.outboundQueue
+    .filter((item) => !isQueuedMessageMaterialized(item.messageId))
+    .map((item) => ({
+      id: item.messageId,
+      role: "user",
+      text: item.text,
+      createdAt: item.createdAt,
+      queueStatus: item.queueStatus || "queued"
+    }));
 }
 
 function renderActionNote(note) {
@@ -1781,13 +1795,13 @@ async function handleChatSubmit(event) {
   const createdAt = Date.now();
 
   state.composerDraft = "";
-  state.messages.push({ role: "user", id: messageId, text, createdAt, queueStatus: state.isProcessingQueue ? "queued" : "pending" });
   state.outboundQueue.push({
     id: crypto.randomUUID(),
     messageId,
     text,
     createdAt,
-    planContext: questionContext
+    planContext: questionContext,
+    queueStatus: state.isProcessingQueue ? "queued" : "pending"
   });
   render();
 
@@ -1806,7 +1820,7 @@ async function processOutboundQueue() {
     while (state.outboundQueue.length) {
       const item = state.outboundQueue.shift();
       state.currentProcessingMessageId = item?.messageId || null;
-      setMessageQueueStatus(item?.messageId, "processing");
+      materializeQueuedMessage(item, "processing");
       render();
 
       try {
@@ -1826,6 +1840,7 @@ async function processOutboundQueue() {
   } finally {
     state.isProcessingQueue = false;
     state.currentProcessingMessageId = null;
+    state.pendingSteeredMessageId = null;
     render();
   }
 }
@@ -1866,8 +1881,12 @@ function steerQueuedMessage(messageId) {
   }
 
   const [item] = state.outboundQueue.splice(index, 1);
+  item.queueStatus = "steered";
   state.outboundQueue.unshift(item);
   setMessageQueueStatus(targetId, "steered");
+  if (state.isProcessingQueue) {
+    state.pendingSteeredMessageId = targetId;
+  }
   state.activity.unshift("Queued message moved to the front.");
   render();
 }
@@ -1881,6 +1900,11 @@ function setMessageQueueStatus(messageId, status) {
   if (message) {
     message.queueStatus = status;
   }
+
+  const queuedItem = state.outboundQueue.find((entry) => entry.messageId === messageId);
+  if (queuedItem) {
+    queuedItem.queueStatus = status;
+  }
 }
 
 function isQueuedMessageSteerable(messageId) {
@@ -1888,31 +1912,73 @@ function isQueuedMessageSteerable(messageId) {
 }
 
 function getQueuedMessageStatusLabel(message) {
-  if (!message?.queueStatus || message.queueStatus === "sent") {
+  const queuedItem = state.outboundQueue.find((entry) => entry.messageId === message?.id);
+  const status = queuedItem?.queueStatus || message?.queueStatus;
+
+  if (!status || status === "sent") {
     return "";
   }
 
-  if (message.queueStatus === "queued") {
+  if (status === "queued") {
     return "queued";
   }
 
-  if (message.queueStatus === "processing") {
+  if (status === "processing") {
     return "processing";
   }
 
-  if (message.queueStatus === "steered") {
+  if (status === "steered") {
     return "steered";
   }
 
-  if (message.queueStatus === "failed") {
+  if (status === "failed") {
     return "failed";
   }
 
-  if (message.queueStatus === "pending" && state.isProcessingQueue) {
+  if (status === "pending" && state.isProcessingQueue) {
     return "queued";
   }
 
   return "";
+}
+
+function materializeQueuedMessage(item, status = "queued") {
+  if (!item?.messageId) {
+    return;
+  }
+
+  const existing = state.messages.find((entry) => entry.id === item.messageId);
+  if (existing) {
+    existing.queueStatus = status;
+    return;
+  }
+
+  state.messages.push({
+    role: "user",
+    id: item.messageId,
+    text: item.text,
+    createdAt: item.createdAt,
+    queueStatus: status
+  });
+}
+
+function isQueuedMessageMaterialized(messageId) {
+  return state.messages.some((entry) => entry.id === messageId);
+}
+
+function consumePendingSteeredQueueItem() {
+  if (!state.pendingSteeredMessageId) {
+    return null;
+  }
+
+  const queuedItem = state.outboundQueue.find((item) => item.messageId === state.pendingSteeredMessageId);
+  if (!queuedItem) {
+    state.pendingSteeredMessageId = null;
+    return null;
+  }
+
+  state.pendingSteeredMessageId = null;
+  return queuedItem;
 }
 
 async function getAgentResult(goal, options = {}) {
@@ -2408,6 +2474,19 @@ async function executeActionPlan(plan, options = {}) {
   [...httpArtifacts, ...searchArtifacts].forEach((artifact) => {
     addActionNote(getArtifactSummary(artifact), getArtifactDetails(artifact));
   });
+
+  const steeredQueueItem = consumePendingSteeredQueueItem();
+  if (steeredQueueItem) {
+    materializeQueuedMessage(steeredQueueItem, "steered");
+    state.activity.unshift("Steered message injected after the current action.");
+    addDebugLog("agent.steer.injected", {
+      messageId: steeredQueueItem.messageId,
+      text: steeredQueueItem.text
+    }, "Injected the steered queued message after the current action.");
+    render();
+    await refreshPageAfterAction();
+    return;
+  }
 
   if (shouldAutoContinueAfterReadOnlyAction(normalizedPlan, results, options)) {
     await refreshPageAfterAction();
