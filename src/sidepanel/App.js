@@ -115,6 +115,13 @@ let devWatchPollInFlight = false;
 let devWatchFingerprint = "";
 let devWatchInitialized = false;
 
+const PROVIDER_VISIBLE_TEXT_LIMIT = 5000;
+const PROVIDER_ELEMENT_LIMIT = 24;
+const PROVIDER_FORM_LIMIT = 8;
+const PROVIDER_FIELD_LIMIT = 12;
+const PROVIDER_SELECTOR_LIMIT = 3;
+const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
+
 initialize();
 
 async function initialize() {
@@ -2139,7 +2146,7 @@ async function getAgentResult(goal, options = {}) {
   if (state.connector.status === "connected") {
     const selectedHttpProvider = getSelectedHttpProvider();
     const runtimeContext = await buildRuntimeContext(goal, options);
-    const observationForRequest = getObservationForContext(options.planContext);
+    const observationForRequest = compactObservationForProvider(getObservationForContext(options.planContext));
     const payload = {
       goal,
       responseLanguage,
@@ -2154,7 +2161,7 @@ async function getAgentResult(goal, options = {}) {
         content: item.content,
         updatedAt: item.updatedAt
       })),
-      attachments: state.attachments.map((file) => ({
+      attachments: (options.omitAttachmentsForProvider ? [] : state.attachments).map((file) => ({
         id: file.id,
         name: file.name,
         type: file.type,
@@ -2169,6 +2176,24 @@ async function getAgentResult(goal, options = {}) {
       error: response.error || "",
       result: response.envelope?.payload || null
     }, response.ok ? response.envelope?.payload?.type || "provider response" : response.error);
+
+    if (
+      response.ok
+      && isProviderTimeoutResult(response.envelope?.payload)
+      && !options.omitAttachmentsForProvider
+      && state.attachments.length
+    ) {
+      state.activity.unshift("HTTP provider timed out; retrying once without attachments.");
+      addDebugLog("provider.agent_request.retry", {
+        reason: "timeout_524",
+        omitAttachmentsForProvider: true
+      }, "Retrying provider request without attachments after timeout.");
+      return getAgentResult(goal, {
+        ...options,
+        omitAttachmentsForProvider: true,
+        continuationReason: compact(`${options.continuationReason || ""}\nThe previous provider attempt timed out. Retry with lighter context and no attachments. If the answer still depends on missing material, ask for the rest explicitly.`)
+      });
+    }
 
     if (response.ok) {
       return response.envelope.payload;
@@ -2210,6 +2235,7 @@ async function buildRuntimeContext(goal, options = {}) {
   const continuationReason = compact(options.continuationReason || "");
   const currentTab = await getCurrentActiveTab();
   const questionContext = options.planContext || getObservedPageContext();
+  const observation = getObservationForContext(options.planContext);
 
   if (continuationReason) {
     lines.push(continuationReason);
@@ -2231,6 +2257,10 @@ async function buildRuntimeContext(goal, options = {}) {
   const recentTabs = getRecentAccessibleTabs(currentTab?.id);
   if (recentTabs.length) {
     lines.push(`Recently known tabs (observed tabs have page access; active-only tabs may need permission): ${recentTabs.map(formatTabContextForPrompt).join(" | ")}.`);
+  }
+
+  if (String(observation?.visible_text || "").length > PROVIDER_VISIBLE_TEXT_LIMIT) {
+    lines.push("Observed page text is excerpted to fit the provider context window. Treat missing sections as unknown. If the excerpt is not enough, ask for the rest or return a read-only plan to inspect more page context before answering.");
   }
 
   lines.push("Tab rule: bind page-specific questions and actions to the question context tab. If the user changes tabs while you are thinking, do not reinterpret the request as referring to the new active tab unless the user explicitly says so. If a page-bound action would target a different tab, ask for clarification or use the original tab context.");
@@ -2261,6 +2291,129 @@ function getObservationForContext(context) {
   const sameUrl = normalizeUrlForContext(context.url) === normalizeUrlForContext(observedTab.url || state.page.url);
 
   return sameTab || sameUrl ? observation : null;
+}
+
+function compactObservationForProvider(observation) {
+  if (!observation) return null;
+
+  const visibleText = String(observation.visible_text || "");
+  const visibleTextExcerpt = smartExcerptForProvider(visibleText, PROVIDER_VISIBLE_TEXT_LIMIT);
+
+  return {
+    type: observation.type || "page_observation",
+    tab: compactTabForProvider(observation.tab || {}),
+    viewport: observation.viewport || null,
+    capturedAt: observation.capturedAt || "",
+    visible_text: visibleTextExcerpt.text,
+    visibleTextLength: visibleText.length,
+    visibleTextTruncated: visibleTextExcerpt.truncated,
+    visibleTextExcerptStrategy: visibleTextExcerpt.strategy,
+    headings: compactElementsForProvider(observation.headings, PROVIDER_ELEMENT_LIMIT),
+    links: compactElementsForProvider(observation.links, PROVIDER_ELEMENT_LIMIT),
+    buttons: compactElementsForProvider(observation.buttons, PROVIDER_ELEMENT_LIMIT),
+    forms: compactFormsForProvider(observation.forms),
+    counts: {
+      headings: observation.headings?.length || 0,
+      links: observation.links?.length || 0,
+      buttons: observation.buttons?.length || 0,
+      forms: observation.forms?.length || 0,
+      interactive_elements: observation.interactive_elements?.length || 0
+    },
+    note: "Observation compacted before provider request to fit local model context."
+  };
+}
+
+function compactTabForProvider(tab) {
+  return {
+    id: tab.id || null,
+    url: tab.url || "",
+    title: tab.title || ""
+  };
+}
+
+function compactElementsForProvider(elements, limit) {
+  return (Array.isArray(elements) ? elements : []).slice(0, limit).map((element) => ({
+    agent_id: element.agent_id || "",
+    role: element.role || "",
+    name: element.name || element.text || "",
+    text: element.text || "",
+    href: element.href || "",
+    level: element.level || "",
+    selector_candidates: compactSelectorsForProvider(element.selector_candidates)
+  }));
+}
+
+function compactFormsForProvider(forms) {
+  return (Array.isArray(forms) ? forms : []).slice(0, PROVIDER_FORM_LIMIT).map((form) => ({
+    agent_id: form.agent_id || "",
+    title: form.title || "",
+    fields: (Array.isArray(form.fields) ? form.fields : []).slice(0, PROVIDER_FIELD_LIMIT).map((field) => ({
+      agent_id: field.agent_id || "",
+      role: field.role || "",
+      tag: field.tag || "",
+      type: field.type || "",
+      name: field.name || "",
+      value: field.value || "",
+      disabled: Boolean(field.disabled),
+      required: Boolean(field.required),
+      selector_candidates: compactSelectorsForProvider(field.selector_candidates),
+      options: Array.isArray(field.options) ? field.options.slice(0, 12) : []
+    }))
+  }));
+}
+
+function compactSelectorsForProvider(selectors) {
+  return (Array.isArray(selectors) ? selectors : [])
+    .slice(0, PROVIDER_SELECTOR_LIMIT)
+    .map((selector) => String(selector || "").slice(0, 220));
+}
+
+function smartExcerptForProvider(text, limit) {
+  const raw = String(text || "");
+  if (raw.length <= limit) {
+    return {
+      text: raw,
+      truncated: false,
+      strategy: "full"
+    };
+  }
+
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const headTarget = Math.max(1200, Math.floor(limit * PROVIDER_VISIBLE_TEXT_HEAD_RATIO));
+  const tailTarget = Math.max(800, limit - headTarget);
+  const head = trimExcerptBoundary(normalized.slice(0, headTarget), "end");
+  const tail = trimExcerptBoundary(normalized.slice(-tailTarget), "start");
+  const omittedChars = Math.max(0, normalized.length - head.length - tail.length);
+  const divider = `\n\n[... omitted ${omittedChars} chars from the middle of the page text ...]\n\n`;
+
+  return {
+    text: `${head}${divider}${tail}`.slice(0, limit + divider.length),
+    truncated: true,
+    strategy: "head_tail_with_middle_gap"
+  };
+}
+
+function trimExcerptBoundary(text, side) {
+  const raw = String(text || "");
+  if (!raw) return "";
+
+  if (side === "end") {
+    const lastBreak = Math.max(raw.lastIndexOf("\n"), raw.lastIndexOf(". "), raw.lastIndexOf(" "));
+    return lastBreak > raw.length * 0.7 ? raw.slice(0, lastBreak).trim() : raw.trim();
+  }
+
+  const firstNewline = raw.indexOf("\n");
+  if (firstNewline >= 0 && firstNewline < raw.length * 0.3) {
+    return raw.slice(firstNewline + 1).trim();
+  }
+
+  const firstSentence = raw.indexOf(". ");
+  if (firstSentence >= 0 && firstSentence < raw.length * 0.3) {
+    return raw.slice(firstSentence + 2).trim();
+  }
+
+  const firstSpace = raw.indexOf(" ");
+  return firstSpace >= 0 && firstSpace < raw.length * 0.2 ? raw.slice(firstSpace + 1).trim() : raw.trim();
 }
 
 function isSimpleConversationalMessage(goal) {
@@ -2391,7 +2544,7 @@ async function handleAgentResult(result, options = {}) {
     const provider = getSelectedProviderStatus();
     state.messages.push({
       role: "assistant",
-      text: result.message || "The selected local provider is not ready, so I used only local page context.",
+      text: formatProviderAgentErrorMessage(result),
       createdAt: Date.now()
     });
     state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
@@ -2464,6 +2617,25 @@ function normalizeAgentControlFlow(result) {
     type: "ask_user",
     question: text || "I need one more confirmation before continuing."
   };
+}
+
+function isProviderTimeoutResult(result) {
+  const text = `${result?.message || ""} ${result?.error || ""}`;
+  return result?.type === "agent_error" && (/\b524\b/.test(text) || /timeout occurred|timed out/i.test(text));
+}
+
+function formatProviderAgentErrorMessage(result) {
+  const raw = String(result?.message || "").trim();
+
+  if (/\b524\b/.test(raw) || /timeout occurred|timed out/i.test(raw)) {
+    return "Il provider HTTP ha risposto con un timeout 524: la richiesta arriva al server, ma il modello non completa la risposta in tempo. Se ricapita anche senza allegati, il collo di bottiglia e' lato upstream oppure il modello scelto e' troppo lento per questa pagina.";
+  }
+
+  if (/exceeds the available context size|exceed_context_size_error/i.test(raw)) {
+    return "Il provider HTTP ha rifiutato la richiesta perche' il contesto inviato supera la finestra disponibile del modello.";
+  }
+
+  return raw || "The selected local provider is not ready, so I used only local page context.";
 }
 
 function isMemoryProposalLike(result, action) {
@@ -2876,7 +3048,7 @@ function shouldContinueAfterActionPlan(plan, results, synthesized, options = {})
 }
 
 function buildPostActionContinuationReason(plan, results, synthesized) {
-  const latestObservation = getLatestObservationFromResults(results);
+  const latestObservation = compactObservationForProvider(getLatestObservationFromResults(results));
   const actionSummary = results
     .slice(0, 6)
     .map((result) => {
@@ -4554,7 +4726,7 @@ async function maybeSynthesizeResults(plan, results) {
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
   const selectedHttpProvider = getSelectedHttpProvider();
-  const latestObservation = getLatestObservationFromResults(results);
+  const latestObservation = compactObservationForProvider(getLatestObservationFromResults(results));
   const payload = {
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
