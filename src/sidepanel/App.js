@@ -97,6 +97,10 @@ const state = {
   },
   pendingMemoryIntent: null,
   pendingMemoryProposal: null,
+  composerDraft: "",
+  outboundQueue: [],
+  isProcessingQueue: false,
+  currentProcessingMessageId: null,
   chatAtBottom: true,
   activity: [],
   debugLogs: []
@@ -284,7 +288,11 @@ function render() {
   });
   document.getElementById("attachment-input").addEventListener("change", handleAttachments);
   document.getElementById("chat-form").addEventListener("submit", handleChatSubmit);
+  document.getElementById("chat-input").addEventListener("input", handleComposerInput);
   document.getElementById("chat-input").addEventListener("keydown", handleComposerKeydown);
+  document.querySelectorAll("[data-steer-message]").forEach((button) => {
+    button.addEventListener("click", () => steerQueuedMessage(button.dataset.steerMessage));
+  });
 
   if (state.pendingPlan) {
     document.getElementById("confirm-plan").addEventListener("click", confirmPendingPlan);
@@ -570,15 +578,23 @@ function summarizeObservationForLog(observation = {}) {
 }
 
 function renderComposer() {
+  const queueLabel = state.isProcessingQueue
+    ? (state.outboundQueue.length ? `Working, ${state.outboundQueue.length} queued` : "Working")
+    : (state.outboundQueue.length ? `${state.outboundQueue.length} queued` : "");
+  const submitLabel = state.isProcessingQueue ? "Queue" : "Send";
+
   return `
-    <form id="chat-form" class="composer">
-      <label class="file-input">
-        <input id="attachment-input" type="file" multiple>
-        <span>Attach</span>
-      </label>
-      <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page"></textarea>
-      <button type="submit">Send</button>
-    </form>
+    <div class="composer-wrap">
+      <form id="chat-form" class="composer">
+        <label class="file-input">
+          <input id="attachment-input" type="file" multiple>
+          <span>Attach</span>
+        </label>
+        <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page">${escapeHtml(state.composerDraft)}</textarea>
+        <button type="submit">${escapeHtml(submitLabel)}</button>
+      </form>
+      ${queueLabel ? `<p class="composer-meta">${escapeHtml(queueLabel)}</p>` : ""}
+    </div>
   `;
 }
 
@@ -621,6 +637,10 @@ function handleComposerKeydown(event) {
   document.getElementById("chat-form").requestSubmit();
 }
 
+function handleComposerInput(event) {
+  state.composerDraft = event.target.value;
+}
+
 function updateConfirmButtonState() {
   const button = document.getElementById("confirm-plan");
   if (!button || !state.pendingPlan) {
@@ -634,9 +654,17 @@ function updateConfirmButtonState() {
 }
 
 function renderMessage(message) {
+  const status = getQueuedMessageStatusLabel(message);
+  const canSteer = Boolean(message.role === "user" && isQueuedMessageSteerable(message.id));
   return `
     <article class="message ${message.role}">
-      <span>${message.role === "user" ? "You" : "Companion"}</span>
+      <div class="message-head">
+        <span>${message.role === "user" ? "You" : "Companion"}</span>
+        <div class="message-tools">
+          ${status ? `<em class="message-status">${escapeHtml(status)}</em>` : ""}
+          ${canSteer ? `<button type="button" class="message-steer" data-steer-message="${escapeHtml(message.id)}">Steer</button>` : ""}
+        </div>
+      </div>
       <div class="message-body">${renderRichText(message.text)}</div>
     </article>
   `;
@@ -1740,17 +1768,70 @@ function readFileAsBase64(file) {
 
 async function handleChatSubmit(event) {
   event.preventDefault();
-  const input = document.getElementById("chat-input");
-  const text = input.value.trim();
+  const text = state.composerDraft.trim();
 
   if (!text) {
     return;
   }
 
-  state.messages.push({ role: "user", text, createdAt: Date.now() });
-  input.value = "";
+  const questionTab = await getCurrentActiveTab();
+  const questionContext = tabToPageContext(questionTab);
+  rememberActiveTab(questionTab);
+  const messageId = crypto.randomUUID();
+  const createdAt = Date.now();
+
+  state.composerDraft = "";
+  state.messages.push({ role: "user", id: messageId, text, createdAt, queueStatus: state.isProcessingQueue ? "queued" : "pending" });
+  state.outboundQueue.push({
+    id: crypto.randomUUID(),
+    messageId,
+    text,
+    createdAt,
+    planContext: questionContext
+  });
   render();
 
+  processOutboundQueue();
+}
+
+async function processOutboundQueue() {
+  if (state.isProcessingQueue) {
+    return;
+  }
+
+  state.isProcessingQueue = true;
+  render();
+
+  try {
+    while (state.outboundQueue.length) {
+      const item = state.outboundQueue.shift();
+      state.currentProcessingMessageId = item?.messageId || null;
+      setMessageQueueStatus(item?.messageId, "processing");
+      render();
+
+      try {
+        await processQueuedMessage(item);
+        setMessageQueueStatus(item?.messageId, "sent");
+      } catch (error) {
+        setMessageQueueStatus(item?.messageId, "failed");
+        state.messages.push({
+          role: "assistant",
+          text: error.message || "The queued request could not be completed.",
+          createdAt: Date.now()
+        });
+        state.activity.unshift(`Queued request failed: ${error.message || "Unexpected error."}`);
+        render();
+      }
+    }
+  } finally {
+    state.isProcessingQueue = false;
+    state.currentProcessingMessageId = null;
+    render();
+  }
+}
+
+async function processQueuedMessage(item) {
+  const text = item?.text || "";
   if (state.pendingMemoryProposal) {
     const handled = await handlePendingMemoryProposalReply(text);
     if (handled) {
@@ -1768,12 +1849,70 @@ async function handleChatSubmit(event) {
   }
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
 
-  const questionTab = await getCurrentActiveTab();
-  const questionContext = tabToPageContext(questionTab);
-  rememberActiveTab(questionTab);
+  const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
+  const agentResult = await getAgentResult(text, { planContext });
+  await handleAgentResult(agentResult, { planContext });
+}
 
-  const agentResult = await getAgentResult(text, { planContext: questionContext });
-  await handleAgentResult(agentResult, { planContext: questionContext });
+function steerQueuedMessage(messageId) {
+  const targetId = String(messageId || "");
+  if (!targetId) {
+    return;
+  }
+
+  const index = state.outboundQueue.findIndex((item) => item.messageId === targetId);
+  if (index <= 0) {
+    return;
+  }
+
+  const [item] = state.outboundQueue.splice(index, 1);
+  state.outboundQueue.unshift(item);
+  setMessageQueueStatus(targetId, "steered");
+  state.activity.unshift("Queued message moved to the front.");
+  render();
+}
+
+function setMessageQueueStatus(messageId, status) {
+  if (!messageId) {
+    return;
+  }
+
+  const message = state.messages.find((entry) => entry.id === messageId);
+  if (message) {
+    message.queueStatus = status;
+  }
+}
+
+function isQueuedMessageSteerable(messageId) {
+  return state.outboundQueue.some((item, index) => item.messageId === messageId && index > 0);
+}
+
+function getQueuedMessageStatusLabel(message) {
+  if (!message?.queueStatus || message.queueStatus === "sent") {
+    return "";
+  }
+
+  if (message.queueStatus === "queued") {
+    return "queued";
+  }
+
+  if (message.queueStatus === "processing") {
+    return "processing";
+  }
+
+  if (message.queueStatus === "steered") {
+    return "steered";
+  }
+
+  if (message.queueStatus === "failed") {
+    return "failed";
+  }
+
+  if (message.queueStatus === "pending" && state.isProcessingQueue) {
+    return "queued";
+  }
+
+  return "";
 }
 
 async function getAgentResult(goal, options = {}) {
