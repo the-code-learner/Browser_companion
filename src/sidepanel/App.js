@@ -114,6 +114,7 @@ const state = {
   currentProcessingMessageId: null,
   pendingSteeredMessageId: null,
   liveThinking: null,
+  liveThinkingOpen: false,
   chatAtBottom: true,
   activity: [],
   debugLogs: []
@@ -323,6 +324,12 @@ function render() {
   document.getElementById("chat-input").addEventListener("keydown", handleComposerKeydown);
   const stopProcessingButton = document.getElementById("stop-processing");
   if (stopProcessingButton) stopProcessingButton.addEventListener("click", stopCurrentProcessing);
+  const liveThinkingDetails = document.getElementById("live-thinking-details");
+  if (liveThinkingDetails) {
+    liveThinkingDetails.addEventListener("toggle", () => {
+      state.liveThinkingOpen = liveThinkingDetails.open;
+    });
+  }
   document.querySelectorAll("[data-steer-message]").forEach((button) => {
     button.addEventListener("click", () => steerQueuedMessage(button.dataset.steerMessage));
   });
@@ -902,7 +909,8 @@ function renderChatTimeline() {
         summaryHtml: renderLiveThinkingSummary(state.liveThinking),
         details: [state.liveThinking.text],
         variant: "thinking",
-        open: false
+        open: state.liveThinkingOpen,
+        id: "live-thinking-details"
       }
     }] : []),
     ...state.actionNotes.map((item) => ({ kind: "note", createdAt: item.createdAt || 0, item }))
@@ -927,9 +935,10 @@ function renderActionNote(note) {
   const details = note.details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
   const variantClass = note.variant === "thinking" ? " action-thinking" : "";
   const openAttr = note.open ? " open" : "";
+  const idAttr = note.id ? ` id="${escapeHtml(note.id)}"` : "";
   const summary = note.summaryHtml || escapeHtml(note.summary);
   return `
-    <details class="action-note${variantClass}"${openAttr}>
+    <details${idAttr} class="action-note${variantClass}"${openAttr}>
       <summary>${summary}</summary>
       <ul>${details}</ul>
     </details>
@@ -2153,6 +2162,7 @@ async function processOutboundQueue() {
   state.stopProcessingRequested = false;
   state.stopRequestInFlight = false;
   state.liveThinking = null;
+  state.liveThinkingOpen = false;
   render();
 
   try {
@@ -2195,6 +2205,7 @@ async function processOutboundQueue() {
     state.stopProcessingRequested = false;
     state.stopRequestInFlight = false;
     state.liveThinking = null;
+    state.liveThinkingOpen = false;
     state.currentProcessingMessageId = null;
     state.pendingSteeredMessageId = null;
     render();
@@ -2222,6 +2233,7 @@ async function processQueuedMessage(item) {
 
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
   state.liveThinking = null;
+  state.liveThinkingOpen = false;
   const agentResult = await getAgentResult(text, { planContext });
   if (state.liveThinking) {
     state.liveThinking.streaming = false;
