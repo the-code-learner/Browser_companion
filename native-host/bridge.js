@@ -17,6 +17,7 @@ const npmBin = resolveNpmBin();
 const npmCliPath = resolveNpmCliPath();
 const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
 const providerModelCache = new Map();
+const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -1470,6 +1471,15 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
     requestBody.response_format = { type: "json_object" };
   }
 
+  saveHttpProviderDebugRequest({
+    savedAt: new Date().toISOString(),
+    baseUrl,
+    wantsJson,
+    useStreaming,
+    model: provider.model,
+    requestBody
+  });
+
   let json = await postHttpProviderCompletion(baseUrl, provider, requestBody, wantsJson);
   let extracted = extractChatCompletionText(json);
 
@@ -1488,6 +1498,14 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson) {
   }
 
   throw new Error(extracted.message);
+}
+
+function saveHttpProviderDebugRequest(payload) {
+  try {
+    fs.writeFileSync(httpProviderDebugRequestPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  } catch {
+    // Best-effort debug artifact only.
+  }
 }
 
 async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat) {
