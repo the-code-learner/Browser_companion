@@ -7,6 +7,7 @@ export const MESSAGE_TYPES = Object.freeze({
   INSTALL_PROVIDER: "install_provider",
   INSTALL_NODEJS: "install_nodejs",
   HTTP_PROVIDER_TEST: "http_provider_test",
+  HTTP_PROVIDER_UNLOAD: "http_provider_unload",
   EXTRACT_ATTACHMENT: "extract_attachment",
   HTTP_REQUEST: "http_request",
   WEB_SEARCH: "web_search",

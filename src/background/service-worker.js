@@ -52,6 +52,10 @@ async function handleMessage(message) {
     return testHttpProvider(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.HTTP_PROVIDER_UNLOAD) {
+    return unloadHttpProvider(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.EXTRACT_ATTACHMENT) {
     return extractAttachment(message.payload);
   }
@@ -228,6 +232,24 @@ async function testHttpProvider(payload) {
     return {
       ok: false,
       error: error.message || "HTTP provider test failed."
+    };
+  }
+}
+
+async function unloadHttpProvider(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "http_provider_unload",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.HTTP_PROVIDER_UNLOAD, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "HTTP provider model unload failed."
     };
   }
 }

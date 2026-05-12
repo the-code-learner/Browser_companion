@@ -235,11 +235,13 @@ function render() {
     openExtensions.addEventListener("click", () => chrome.tabs.create({ url: "chrome://extensions" }));
   }
   const codexModel = document.getElementById("codex-model");
-  if (codexModel) codexModel.addEventListener("change", (event) => {
+  if (codexModel) codexModel.addEventListener("change", async (event) => {
+    const previousModel = state.codex.model;
     state.codex.model = event.target.value;
     state.activity.unshift(`Model set to ${state.codex.model}.`);
     persistConnectorSelection();
     render();
+    await maybeOfferHttpModelUnload(previousModel, state.codex.model);
   });
   const providerSelect = document.getElementById("provider-select");
   if (providerSelect) providerSelect.addEventListener("change", (event) => {
@@ -1657,18 +1659,21 @@ async function testHttpProviderFromForm() {
 
   const payload = response.envelope.payload;
   const models = payload.models || [];
+  const loadedModels = payload.loadedModels || [];
   const selectedModel = models.includes(provider.model) ? provider.model : (models[0] || provider.model || "");
   state.httpProviderDraft = {
     ...provider,
     model: selectedModel,
     models,
+    loadedModels,
     lastStatus: payload.status || "ready",
     lastMessage: payload.message || "HTTP provider test completed."
   };
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
   state.codex.provider = `http:${state.httpProviderDraft.id}`;
   state.codex.model = selectedModel || "default";
-  state.connector.message = `${state.httpProviderDraft.lastMessage} Select a model above, then Save HTTP Provider to keep it.`;
+  const loadedMessage = loadedModels.length ? ` Loaded: ${loadedModels.join(", ")}.` : "";
+  state.connector.message = `${state.httpProviderDraft.lastMessage}${loadedMessage} Select a model above, then Save HTTP Provider to keep it.`;
   state.activity.unshift(`HTTP provider ${state.httpProviderDraft.name} found ${models.length} model${models.length === 1 ? "" : "s"}.`);
   persistConnectorSelection();
   render();
@@ -1684,6 +1689,7 @@ async function saveHttpProviderFromForm(event) {
   }
 
   const existingIndex = state.httpProviders.findIndex((item) => item.id === provider.id);
+  const previousModel = existingIndex >= 0 ? state.httpProviders[existingIndex].model : "";
   if (existingIndex >= 0) {
     state.httpProviders[existingIndex] = provider;
   } else {
@@ -1700,6 +1706,7 @@ async function saveHttpProviderFromForm(event) {
   persistSession();
   state.connector.message = `Saved HTTP provider ${provider.name}.`;
   render();
+  await maybeOfferHttpModelUnload(previousModel, provider.model, provider);
 }
 
 function readHttpProviderDraft() {
@@ -1757,6 +1764,57 @@ function getSelectedHttpProvider() {
     ...provider,
     model: state.codex.model || provider.model
   };
+}
+
+async function maybeOfferHttpModelUnload(previousModel, nextModel, providerOverride = null) {
+  if (!previousModel || !nextModel || previousModel === nextModel) {
+    return;
+  }
+
+  const provider = providerOverride || getSelectedHttpProvider();
+  if (!provider?.baseUrl) {
+    return;
+  }
+
+  const loadedModels = provider.loadedModels || [];
+  if (loadedModels.length && !loadedModels.includes(previousModel)) {
+    return;
+  }
+
+  const shouldUnload = window.confirm(
+    `Unload the previous LLM model "${previousModel}" from ${provider.name || provider.baseUrl}?`
+  );
+  if (!shouldUnload) {
+    return;
+  }
+
+  addDebugLog("provider.http_unload.start", {
+    provider: provider.name || provider.baseUrl,
+    model: previousModel
+  }, `Unloading ${previousModel}`);
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.HTTP_PROVIDER_UNLOAD, {
+    provider: {
+      ...provider,
+      model: previousModel
+    },
+    model: previousModel
+  }));
+  const payload = response.envelope?.payload || null;
+  const unloadOk = response.ok && payload?.status !== "error";
+  addDebugLog("provider.http_unload.end", {
+    ok: unloadOk,
+    error: response.error || "",
+    result: payload
+  }, unloadOk ? payload?.message || "HTTP unload request completed." : response.error || payload?.message);
+
+  const message = unloadOk
+    ? payload?.message || `Requested unload for ${previousModel}.`
+    : response.error || payload?.message || `Could not unload ${previousModel}.`;
+  state.activity.unshift(message);
+  state.connector.message = message;
+  persistSession();
+  render();
 }
 
 async function handleAttachments(event) {

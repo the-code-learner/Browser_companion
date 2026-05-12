@@ -66,6 +66,17 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "http_provider_unload") {
+    unloadHttpProviderModel(message.payload)
+      .then(writeMessage)
+      .catch((error) => writeMessage({
+        type: "http_provider_unload",
+        status: "error",
+        message: error.message || "HTTP provider model unload failed."
+      }));
+    return;
+  }
+
   if (message?.type === "nodejs_install") {
     writeMessage(installNodejs());
     return;
@@ -1347,15 +1358,57 @@ async function testHttpProvider(provider = {}) {
   const models = Array.isArray(json.data)
     ? json.data.map((item) => item.id).filter(Boolean)
     : [];
+  const loadedModels = extractLoadedModels(json);
 
   return {
     type: "http_provider_test",
     status: "ready",
     models,
+    loadedModels,
     message: models.length
       ? `HTTP provider is reachable. Found ${models.length} model${models.length === 1 ? "" : "s"}.`
       : "HTTP provider is reachable, but no models were returned."
   };
+}
+
+async function unloadHttpProviderModel(payload = {}) {
+  const provider = payload.provider || {};
+  const model = String(payload.model || provider.model || "").trim();
+  if (!model) {
+    throw new Error("HTTP provider model is required for unload.");
+  }
+
+  const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
+  const response = await fetch(`${baseUrl}/models/unload`, {
+    method: "POST",
+    headers: {
+      ...getHttpProviderHeaders(provider),
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ model }),
+    signal: AbortSignal.timeout(60000)
+  });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`HTTP provider unload returned ${response.status}: ${text.slice(0, 300)}`);
+  }
+
+  return {
+    type: "http_provider_unload",
+    status: "ok",
+    model,
+    message: `Requested unload for ${model}.`
+  };
+}
+
+function extractLoadedModels(json) {
+  if (!Array.isArray(json?.data)) return [];
+
+  return json.data
+    .filter((item) => /loaded|loading/i.test(String(item?.status || item?.state || "")))
+    .map((item) => item.id)
+    .filter(Boolean);
 }
 
 function runHttpProviderAgentRequest(provider, payload = {}) {
