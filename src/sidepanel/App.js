@@ -5272,6 +5272,26 @@ function parseLooseJsonObject(text) {
   return null;
 }
 
+function extractStructuredAgentPayloadFromText(text) {
+  const parsed = parseLooseJsonObject(text);
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const hasActions = Array.isArray(parsed.actions) && parsed.actions.length > 0;
+  const hasControlType = ["agent_plan", "ask_user", "stop_for_human", "memory_proposal"].includes(parsed.type);
+  const hasCompanionFields = typeof parsed.summary_for_user === "string"
+    || typeof parsed.question === "string"
+    || typeof parsed.reason === "string"
+    || typeof parsed.goal === "string";
+
+  if (!hasActions && !hasControlType && !hasCompanionFields) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function extractJsonObjectLiteral(text) {
   const raw = String(text || "");
   const start = raw.indexOf("{");
@@ -6418,8 +6438,21 @@ async function maybeSynthesizeResults(plan, results) {
       };
     }
 
+    const structuredPayload = extractStructuredAgentPayloadFromText(payloadResult.text || "");
+    if (structuredPayload) {
+      addDebugLog("provider.synthesis.unexpected_structured_payload", {
+        mode,
+        payloadResult,
+        structuredPayload
+      }, "Synthesis returned a structured Browser Companion payload instead of final answer text.");
+      return {
+        text: "",
+        error: null
+      };
+    }
+
     return {
-      text: payloadResult.text || "",
+      text: getAgentDisplayText(payloadResult) || "",
       error: null
     };
   };
