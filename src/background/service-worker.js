@@ -10,6 +10,7 @@ let nativePort = null;
 let nativePortSequence = 1;
 const nativePortPending = new Map();
 let activeNativeRequestId = null;
+const AUTO_OBSERVE_OPENED_TAB_LIMIT = 3;
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.windowId) {
@@ -479,40 +480,52 @@ async function executeActionPlan(plan) {
   const results = [];
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
   const requiresCurrentTabAccess = actions.some((action) => usesCurrentActiveTabContext(action));
+  const openInNewTabCount = actions.filter((action) => action?.type === "open_url_new_tab").length;
 
   if (requiresCurrentTabAccess) {
     assertSupportedTab(tab);
   }
 
   for (const action of actions) {
+    const targetTab = await resolveActionExecutionTab(tab, action);
+    if (!targetTab?.id) {
+      return {
+        ok: false,
+        error: "The target tab for this action is not available."
+      };
+    }
+
     if (needsTabScript(action)) {
-      const permission = await ensureTabOriginPermission(tab);
+      const permission = await ensureTabOriginPermission(targetTab);
       if (!permission.ok) {
         return {
           ok: false,
           error: permission.error
         };
       }
-      await ensureActionScripts(tab.id);
+      await ensureActionScripts(targetTab.id);
     }
 
     const beforeTabState = actionMayChangePage(action)
-      ? await chrome.tabs.get(tab.id).catch(() => null)
+      ? await chrome.tabs.get(targetTab.id).catch(() => null)
       : null;
-    const browserLevelResult = await executeBrowserLevelAction(tab, action);
+    const browserLevelResult = await executeBrowserLevelAction(targetTab, action, {
+      currentActiveTab: tab,
+      openInNewTabCount
+    });
     if (browserLevelResult) {
       results.push(browserLevelResult);
       continue;
     }
 
     const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId: targetTab.id },
       func: (browserAction) => window.__browserCompanionActions.execute(browserAction),
       args: [action]
     });
 
     if (result?.status === "success" && beforeTabState) {
-      result.page_changed = await waitForPotentialPageChange(tab.id, beforeTabState);
+      result.page_changed = await waitForPotentialPageChange(targetTab.id, beforeTabState);
     }
 
     results.push(result);
@@ -539,6 +552,10 @@ async function ensureActionScripts(tabId) {
 }
 
 function usesCurrentActiveTabContext(action) {
+  if (Number.isInteger(action?.tab?.tabId)) {
+    return false;
+  }
+
   return ![
     "open_url",
     "open_url_new_tab",
@@ -546,6 +563,22 @@ function usesCurrentActiveTabContext(action) {
     "http_request",
     "web_search"
   ].includes(action?.type);
+}
+
+async function resolveActionExecutionTab(currentActiveTab, action) {
+  const targetTabId = action?.tab?.tabId;
+  if (Number.isInteger(targetTabId)) {
+    return chrome.tabs.get(targetTabId).catch(() => null);
+  }
+
+  if (action?.type === "observe_known_tab") {
+    const legacyTabId = Number.parseInt(String(action.value || action.tabId || action.target?.agent_id || ""), 10);
+    if (Number.isInteger(legacyTabId)) {
+      return chrome.tabs.get(legacyTabId).catch(() => null);
+    }
+  }
+
+  return currentActiveTab;
 }
 
 function needsTabScript(action) {
@@ -568,24 +601,11 @@ function actionMayChangePage(action) {
 }
 
 async function ensureTabOriginPermission(tab) {
-  if (!tab?.url) {
+  const originPattern = getTabOriginPattern(tab);
+  if (!tab?.url || !originPattern) {
     return {
       ok: false,
-      error: "No active tab URL is available."
-    };
-  }
-
-  let originPattern;
-  try {
-    const url = new URL(tab.url);
-    if (!["http:", "https:"].includes(url.protocol)) {
-      return { ok: true };
-    }
-    originPattern = `${url.origin}/*`;
-  } catch {
-    return {
-      ok: false,
-      error: "The current page URL cannot be accessed."
+      error: "The target tab URL cannot be accessed."
     };
   }
 
@@ -609,7 +629,34 @@ async function ensureTabOriginPermission(tab) {
       };
 }
 
-async function executeBrowserLevelAction(tab, action) {
+function getTabOriginPattern(tab) {
+  try {
+    const url = new URL(tab?.url || "");
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return "";
+    }
+    return `${url.origin}/*`;
+  } catch {
+    return "";
+  }
+}
+
+function hasHttpUrl(url) {
+  return /^https?:/i.test(String(url || ""));
+}
+
+async function hasTabOriginPermission(tab) {
+  const originPattern = getTabOriginPattern(tab);
+  if (!originPattern) {
+    return false;
+  }
+
+  return chrome.permissions.contains({
+    origins: [originPattern]
+  }).catch(() => false);
+}
+
+async function executeBrowserLevelAction(tab, action, options = {}) {
   if (action?.type === "observe_page" || action?.type === "get_visible_text" || action?.type === "get_links" || action?.type === "get_buttons" || action?.type === "get_forms" || action?.type === "get_dom_snapshot") {
     return tryObserveTabForAction(tab, action);
   }
@@ -662,6 +709,10 @@ async function executeBrowserLevelAction(tab, action) {
   }
 
   if (action?.type === "capture_viewport") {
+    if (options.currentActiveTab?.id && options.currentActiveTab.id !== tab.id) {
+      await chrome.tabs.update(tab.id, { active: true });
+      await waitForTabSettled(tab.id);
+    }
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     const ocrText = await extractViewportText(dataUrl);
     return {
@@ -705,6 +756,7 @@ async function executeBrowserLevelAction(tab, action) {
       active: false,
       ...(Number.isInteger(tab.index) ? { index: tab.index + 1 } : {})
     });
+    const warmed = await maybeWarmOpenedTab(created, options.openInNewTabCount || 0);
     return {
       type: "execution_result",
       action_id: action.id || action.type,
@@ -712,11 +764,14 @@ async function executeBrowserLevelAction(tab, action) {
       target_verified: true,
       page_changed: false,
       validation_messages: [],
-      log_message: `Opened ${url} in a new tab.`,
+      log_message: warmed?.logMessage || `Opened ${url} in a new tab.`,
       artifact: {
         kind: "tab_opened",
         tabId: created?.id || null,
-        url
+        url,
+        title: warmed?.title || created?.title || "",
+        accessStatus: warmed?.accessStatus || "known",
+        observation: warmed?.observation || null
       }
     };
   }
@@ -797,6 +852,10 @@ async function executeBrowserLevelAction(tab, action) {
   }
 
   if (action?.type === "capture_numbered_overlay") {
+    if (options.currentActiveTab?.id && options.currentActiveTab.id !== tab.id) {
+      await chrome.tabs.update(tab.id, { active: true });
+      await waitForTabSettled(tab.id);
+    }
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => window.__browserCompanionActions.showNumberedOverlay()
@@ -850,6 +909,49 @@ async function executeBrowserLevelAction(tab, action) {
   }
 
   return null;
+}
+
+async function maybeWarmOpenedTab(tab, openInNewTabCount = 0) {
+  const label = tab?.url || "the page";
+
+  if (!tab?.id || openInNewTabCount > AUTO_OBSERVE_OPENED_TAB_LIMIT || !hasHttpUrl(tab?.url || "")) {
+    return {
+      accessStatus: "known",
+      logMessage: `Opened ${label} in a new tab.`
+    };
+  }
+
+  const hasPermission = await hasTabOriginPermission(tab);
+  if (!hasPermission) {
+    return {
+      accessStatus: "needs_permission",
+      logMessage: `Opened ${label} in a new tab. Observation is available on demand after site access is granted.`
+    };
+  }
+
+  await waitForTabSettled(tab.id).catch(() => null);
+  const observed = await tryObserveTabForAction(tab, {
+    id: "auto_observe_opened_tab",
+    type: "observe_page"
+  }, {
+    successMessage: `Opened ${label} in a new tab and warmed its content.`,
+    errorMessage: `Opened ${label} in a new tab, but warming its content failed.`
+  });
+
+  if (observed?.status === "success" && observed.artifact?.observation) {
+    return {
+      accessStatus: "observed",
+      title: observed.artifact.observation?.tab?.title || tab.title || "",
+      observation: observed.artifact.observation,
+      logMessage: observed.log_message
+    };
+  }
+
+  return {
+    accessStatus: "granted",
+    title: tab.title || "",
+    logMessage: observed?.log_message || `Opened ${label} in a new tab.`
+  };
 }
 
 async function tryObserveTabForAction(tab, action, options = {}) {

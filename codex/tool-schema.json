@@ -142,6 +142,29 @@
         }
       }
     },
+    "tab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tabId",
+        "url",
+        "title"
+      ],
+      "properties": {
+        "tabId": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
     "action": {
       "type": "object",
       "additionalProperties": false,
@@ -199,6 +222,9 @@
         },
         "source": {
           "$ref": "#/$defs/source"
+        },
+        "tab": {
+          "$ref": "#/$defs/tab"
         },
         "reason": {
           "type": "string"

@@ -2808,7 +2808,7 @@ async function getAgentResult(goal, options = {}) {
 
     const selectedHttpProvider = getSelectedHttpProvider();
     const runtimeContext = await buildRuntimeContext(goal, options);
-    const recentTabs = await getRecentTabsForProvider();
+    const accessibleTabs = await getAccessibleTabsForProvider();
     const conversationContext = getRecentConversationForProvider(goal);
     const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
     const recentActions = getRecentActionsForProvider();
@@ -2827,7 +2827,7 @@ async function getAgentResult(goal, options = {}) {
       runtimeContext,
       conversationContext,
       recentReferences,
-      recentTabs,
+      accessibleTabs,
       recentActions,
       observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
@@ -2931,7 +2931,7 @@ async function buildRuntimeContext(goal, options = {}) {
 
   const recentTabs = getRecentAccessibleTabs(currentTab?.id);
   if (recentTabs.length) {
-    lines.push(`Recently known tabs (observed tabs have page access; active-only tabs may need permission): ${recentTabs.map(formatTabContextForPrompt).join(" | ")}.`);
+    lines.push(`Accessible tabs known to Browser Companion (observed tabs are ready to inspect; other tabs may still need permission or fresh observation): ${recentTabs.map(formatTabContextForPrompt).join(" | ")}.`);
   }
 
   if (String(observation?.visible_text || "").length > PROVIDER_VISIBLE_TEXT_LIMIT) {
@@ -2950,6 +2950,7 @@ function formatTabContextForPrompt(tab) {
   if (tab.title) parts.push(`title="${String(tab.title).slice(0, 120)}"`);
   if (tab.url) parts.push(`url=${String(tab.url).slice(0, 220)}`);
   if (tab.source) parts.push(`source=${tab.source}`);
+  if (tab.accessStatus) parts.push(`access=${tab.accessStatus}`);
   if (tab.lastObservedAt) parts.push(`lastObservedAt=${tab.lastObservedAt}`);
   if (tab.lastActiveAt) parts.push(`lastActiveAt=${tab.lastActiveAt}`);
   return parts.join(", ");
@@ -3050,7 +3051,7 @@ function getRecentActionsForProvider() {
     }));
 }
 
-async function getRecentTabsForProvider() {
+async function getAccessibleTabsForProvider() {
   const currentTab = await getCurrentActiveTab().catch(() => null);
   if (currentTab) {
     rememberActiveTab(currentTab);
@@ -3064,6 +3065,7 @@ async function getRecentTabsForProvider() {
       url: tab.url || "",
       source: tab.source || "",
       isCurrent: Boolean(tab.isCurrent),
+      accessStatus: tab.accessStatus || "unknown",
       lastObservedAt: tab.lastObservedAt || "",
       lastActiveAt: tab.lastActiveAt || "",
       visibleTextLength: tab.visibleTextLength || 0,
@@ -3084,6 +3086,32 @@ function getObservationForContext(context) {
   const sameUrl = normalizeUrlForContext(context.url) === normalizeUrlForContext(observedTab.url || state.page.url);
 
   return sameTab || sameUrl ? observation : null;
+}
+
+function getActionTargetTabId(action) {
+  const direct = action?.tab?.tabId;
+  if (Number.isInteger(direct)) {
+    return direct;
+  }
+
+  if (action?.type === "observe_known_tab") {
+    const legacy = Number.parseInt(String(action.value || action.tabId || action.target?.agent_id || ""), 10);
+    return Number.isInteger(legacy) ? legacy : null;
+  }
+
+  return null;
+}
+
+function actionUsesCurrentPageContext(action) {
+  return isPageBoundAction(action) && !getActionTargetTabId(action);
+}
+
+function findAccessibleTabById(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return null;
+  }
+
+  return Object.values(state.accessibleTabs || {}).find((tab) => tab.tabId === tabId) || null;
 }
 
 function compactObservationForProvider(observation, context = {}) {
@@ -4359,7 +4387,7 @@ async function getCurrentActiveTab() {
 function createPlanPageContext(plan) {
   const actions = plan?.actions || [];
 
-  if (!actions.some(isPageBoundAction)) {
+  if (!actions.some(actionUsesCurrentPageContext)) {
     return null;
   }
 
@@ -4394,7 +4422,7 @@ function tabToPageContext(tab) {
 }
 
 async function verifyActionPlanPageContext(actions, expectedContext) {
-  if (!actions.some(isPageBoundAction) || !expectedContext) {
+  if (!actions.some(actionUsesCurrentPageContext) || !expectedContext) {
     return { ok: true };
   }
 
@@ -4497,11 +4525,13 @@ function rememberObservedTab(observation, source = "observation") {
     url: tab.url || previous.url || "",
     title: tab.title || previous.title || "",
     source,
+    accessStatus: "observed",
     lastObservedAt: observation.capturedAt || now,
     lastActiveAt: previous.lastActiveAt || "",
     visibleTextLength: String(observation.visible_text || "").length,
     links: Array.isArray(observation.links) ? observation.links.length : 0,
-    buttons: Array.isArray(observation.buttons) ? observation.buttons.length : 0
+    buttons: Array.isArray(observation.buttons) ? observation.buttons.length : 0,
+    lastActionLog: previous.lastActionLog || ""
   };
   pruneAccessibleTabs();
 }
@@ -4519,11 +4549,13 @@ function rememberActiveTab(tab) {
     url: tab.url || previous.url || "",
     title: tab.title || previous.title || "",
     source: previous.source || "active-tab",
+    accessStatus: previous.accessStatus || "unknown",
     lastObservedAt: previous.lastObservedAt || "",
     lastActiveAt: new Date().toISOString(),
     visibleTextLength: previous.visibleTextLength || 0,
     links: previous.links || 0,
-    buttons: previous.buttons || 0
+    buttons: previous.buttons || 0,
+    lastActionLog: previous.lastActionLog || ""
   };
   pruneAccessibleTabs();
 }
@@ -4532,6 +4564,9 @@ function rememberActionResultTabs(results) {
   results.forEach((result) => {
     if (result?.artifact?.kind === "tab_opened") {
       rememberOpenedTab(result.artifact, result);
+      if (result.artifact.observation) {
+        rememberObservedTab(result.artifact.observation, "opened-tab-auto-observe");
+      }
       return;
     }
 
@@ -4553,13 +4588,14 @@ function rememberOpenedTab(artifact, result = null) {
     id,
     tabId: artifact.tabId || previous.tabId || null,
     url: artifact.url || previous.url || "",
-    title: previous.title || "",
+    title: artifact.title || previous.title || "",
     source: "opened-tab",
-    lastObservedAt: previous.lastObservedAt || "",
+    accessStatus: artifact.accessStatus || previous.accessStatus || "known",
+    lastObservedAt: artifact.observation?.capturedAt || previous.lastObservedAt || "",
     lastActiveAt: previous.lastActiveAt || new Date().toISOString(),
-    visibleTextLength: previous.visibleTextLength || 0,
-    links: previous.links || 0,
-    buttons: previous.buttons || 0,
+    visibleTextLength: artifact.observation ? String(artifact.observation.visible_text || "").length : (previous.visibleTextLength || 0),
+    links: artifact.observation && Array.isArray(artifact.observation.links) ? artifact.observation.links.length : (previous.links || 0),
+    buttons: artifact.observation && Array.isArray(artifact.observation.buttons) ? artifact.observation.buttons.length : (previous.buttons || 0),
     lastActionLog: result?.log_message || previous.lastActionLog || ""
   };
   pruneAccessibleTabs();
@@ -4617,7 +4653,10 @@ function summarizeRecentActionArtifact(artifact) {
     return {
       kind: artifact.kind,
       url: artifact.url || "",
-      tabId: artifact.tabId || null
+      tabId: artifact.tabId || null,
+      title: artifact.title || artifact.observation?.tab?.title || "",
+      accessStatus: artifact.accessStatus || "",
+      observed: Boolean(artifact.observation)
     };
   }
 
@@ -4677,7 +4716,7 @@ function dedupeRecentActions(entries) {
 function getRecentAccessibleTabs(currentTabId) {
   return Object.values(state.accessibleTabs || {})
     .sort((a, b) => String(b.lastActiveAt || b.lastObservedAt || "").localeCompare(String(a.lastActiveAt || a.lastObservedAt || "")))
-    .slice(0, 6)
+    .slice(0, 8)
     .map((tab) => ({
       ...tab,
       isCurrent: Boolean(currentTabId && tab.tabId === currentTabId)
@@ -4717,7 +4756,7 @@ function isPageBoundAction(action) {
 }
 
 async function ensurePermissionForActionPlan(actions) {
-  if (!actions.some(needsActiveTabReadPermission)) {
+  if (!actions.some((action) => needsActiveTabReadPermission(action) && !getActionTargetTabId(action))) {
     return { ok: true };
   }
 
@@ -4856,13 +4895,7 @@ function buildSessionApprovalEntries(plan, policy, planContext) {
   if (!actions.length || !results.length) {
     return [];
   }
-
-  const origin = getApprovalOrigin(planContext?.url || state.page.observation?.tab?.url || "");
   const entries = [];
-
-  if (!origin) {
-    return [];
-  }
 
   for (const policyResult of results) {
     if (!policyResult?.requiresConfirmation) {
@@ -4871,6 +4904,11 @@ function buildSessionApprovalEntries(plan, policy, planContext) {
 
     const action = actions[policyResult.index];
     if (!isSessionApprovableAction(action, policyResult)) {
+      return [];
+    }
+
+    const origin = getActionApprovalOrigin(action, planContext);
+    if (!origin) {
       return [];
     }
 
@@ -4920,6 +4958,19 @@ function getApprovalOrigin(url) {
   }
 }
 
+function getActionApprovalOrigin(action, planContext) {
+  const targetTabId = getActionTargetTabId(action);
+  if (targetTabId) {
+    const knownTab = findAccessibleTabById(targetTabId);
+    const targetOrigin = getApprovalOrigin(action?.tab?.url || knownTab?.url || "");
+    if (targetOrigin) {
+      return targetOrigin;
+    }
+  }
+
+  return getApprovalOrigin(planContext?.url || state.page.observation?.tab?.url || "");
+}
+
 function getActionApprovalTargetKey(action) {
   const target = action?.target || {};
   const selectorKey = Array.isArray(target.selector_candidates)
@@ -4952,9 +5003,12 @@ function addActionNote(summary, details = []) {
 }
 
 function formatActionDetail(action) {
+  const tabInfo = action?.tab?.tabId
+    ? ` [tab ${action.tab.tabId}${action.tab.title ? `: ${action.tab.title}` : ""}]`
+    : "";
   const target = action.target?.name ? ` on ${action.target.name}` : "";
   const value = action.value ? ` -> ${action.value}` : "";
-  return `${action.type}${target}${value}${action.reason ? `: ${action.reason}` : ""}`;
+  return `${action.type}${tabInfo}${target}${value}${action.reason ? `: ${action.reason}` : ""}`;
 }
 
 function addDebugLog(event, data = {}, summary = "") {
@@ -6295,7 +6349,7 @@ async function maybeSynthesizeResults(plan, results) {
   }
   const conversationContext = getRecentConversationForProvider(lastUserMessage);
   const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
-  const recentTabs = getRecentAccessibleTabs(null)
+  const accessibleTabs = getRecentAccessibleTabs(null)
     .slice(0, PROVIDER_RECENT_TAB_LIMIT)
     .map((tab) => ({
       tabId: tab.tabId || null,
@@ -6303,6 +6357,7 @@ async function maybeSynthesizeResults(plan, results) {
       url: tab.url || "",
       source: tab.source || "",
       isCurrent: Boolean(tab.isCurrent),
+      accessStatus: tab.accessStatus || "unknown",
       lastObservedAt: tab.lastObservedAt || "",
       lastActiveAt: tab.lastActiveAt || "",
       visibleTextLength: tab.visibleTextLength || 0,
@@ -6319,7 +6374,7 @@ async function maybeSynthesizeResults(plan, results) {
     httpProvider: selectedHttpProvider,
     conversationContext,
     recentReferences,
-    recentTabs,
+    accessibleTabs,
     recentActions,
     observation: compactObservationForSynthesis(latestObservation, mode, {
       goal: lastUserMessage,
@@ -6677,6 +6732,19 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
     return {
       kind: "screenshot",
       ocrText: String(artifact.ocrText || "").slice(0, mode === "compact" ? 700 : 1200)
+    };
+  }
+
+  if (artifact.kind === "tab_opened") {
+    return {
+      kind: "tab_opened",
+      tabId: artifact.tabId || null,
+      url: artifact.url || "",
+      title: artifact.title || artifact.observation?.tab?.title || "",
+      accessStatus: artifact.accessStatus || "",
+      observation: artifact.observation
+        ? summarizeArtifactForSynthesis({ kind: "page_observation", observation: artifact.observation }, latestObservation, mode)
+        : null
     };
   }
 
