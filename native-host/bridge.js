@@ -18,6 +18,7 @@ const npmCliPath = resolveNpmCliPath();
 const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
 const providerModelCache = new Map();
 const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
+const httpProviderDebugErrorPath = path.join(projectRoot, "tmp-http-provider-error.json");
 const activeRequestControllers = new Map();
 const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
 
@@ -1486,11 +1487,21 @@ function runHttpProviderAgentRequest(provider, payload = {}, options = {}) {
       }
       return parsed;
     })
-    .catch((error) => ({
-      type: "agent_error",
-      message: error.message || "HTTP provider request failed.",
-      thinking: error?.partialThinking || ""
-    }));
+    .catch((error) => {
+      saveHttpProviderDebugError(createHttpProviderErrorArtifact({
+        requestId: options.requestId || "",
+        baseUrl: normalizeHttpProviderBaseUrl(provider.baseUrl),
+        provider,
+        requestBody: error?.httpProviderRequestBody || {},
+        error
+      }));
+      return {
+        type: "agent_error",
+        message: error.message || "HTTP provider request failed.",
+        thinking: error?.partialThinking || "",
+        diagnostics: extractHttpProviderErrorDiagnostics(error)
+      };
+    });
 }
 
 function runHttpProviderSynthesisRequest(provider, payload = {}, options = {}) {
@@ -1504,11 +1515,20 @@ function runHttpProviderSynthesisRequest(provider, payload = {}, options = {}) {
       text: compactProviderOutput(text),
       thinking
     }))
-    .catch((error) => ({
-      type: "natural_response",
-      text: error.message || "HTTP provider synthesis failed.",
-      thinking: error?.partialThinking || ""
-    }));
+    .catch((error) => {
+      saveHttpProviderDebugError(createHttpProviderErrorArtifact({
+        requestId: options.requestId || "",
+        baseUrl: normalizeHttpProviderBaseUrl(provider.baseUrl),
+        provider,
+        requestBody: error?.httpProviderRequestBody || {},
+        error
+      }));
+      return {
+        type: "natural_response",
+        text: error.message || "HTTP provider synthesis failed.",
+        thinking: error?.partialThinking || ""
+      };
+    });
 }
 
 async function runHttpProviderCompletion(provider, prompt, wantsJson, options = {}) {
@@ -1547,29 +1567,44 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
     requestBody
   });
 
-  let json = await postHttpProviderCompletion(baseUrl, provider, requestBody, wantsJson, options);
-  let extracted = extractChatCompletionText(json);
+  try {
+    let json = await postHttpProviderCompletion(baseUrl, provider, requestBody, wantsJson, options);
+    let extracted = extractChatCompletionText(json);
 
-  if (!extracted.ok && extracted.retryable) {
-    requestBody.max_tokens = retryMaxTokens;
-    requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
-    json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false, options);
-    extracted = extractChatCompletionText(json);
+    if (!extracted.ok && extracted.retryable) {
+      requestBody.max_tokens = retryMaxTokens;
+      requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
+      json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false, options);
+      extracted = extractChatCompletionText(json);
+    }
+
+    if (extracted.ok) {
+      return {
+        text: extracted.text,
+        thinking: extracted.thinking || ""
+      };
+    }
+
+    throw new Error(extracted.message);
+  } catch (error) {
+    if (error && typeof error === "object" && !error.httpProviderRequestBody) {
+      error.httpProviderRequestBody = JSON.parse(JSON.stringify(requestBody));
+    }
+    throw error;
   }
-
-  if (extracted.ok) {
-    return {
-      text: extracted.text,
-      thinking: extracted.thinking || ""
-    };
-  }
-
-  throw new Error(extracted.message);
 }
 
 function saveHttpProviderDebugRequest(payload) {
   try {
     fs.writeFileSync(httpProviderDebugRequestPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  } catch {
+    // Best-effort debug artifact only.
+  }
+}
+
+function saveHttpProviderDebugError(payload) {
+  try {
+    fs.writeFileSync(httpProviderDebugErrorPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   } catch {
     // Best-effort debug artifact only.
   }
@@ -1719,6 +1754,123 @@ function makeProviderAbortError(kind, partialThinking = "", partialContent = "",
   return error;
 }
 
+function makeHttpProviderStreamError(error, diagnostics = {}) {
+  const transportError = serializeErrorForDiagnostics(error);
+  const transportLabel = compact([
+    transportError.name,
+    transportError.message
+  ].filter(Boolean).join(": "));
+  const message = [
+    "HTTP provider stream terminated unexpectedly while waiting for the final assistant content.",
+    transportLabel ? `Transport error: ${transportLabel}.` : "",
+    `Response status: ${diagnostics.responseStatus ?? "unknown"}.`,
+    `Content-Type: ${diagnostics.contentType || "unknown"}.`,
+    `Reasoning chars: ${diagnostics.partialThinkingLength || 0}.`,
+    `Content chars: ${diagnostics.partialContentLength || 0}.`,
+    `Finish reason: ${diagnostics.finishReason || "none"}.`,
+    `Chunks: ${diagnostics.chunksReceived || 0}.`,
+    `SSE events: ${diagnostics.sseEvents || 0}.`,
+    `Bytes: ${diagnostics.bytesReceived || 0}.`
+  ].filter(Boolean).join(" ");
+  const wrapped = new Error(message);
+  wrapped.name = "HttpProviderStreamError";
+  wrapped.partialThinking = diagnostics.partialThinking || "";
+  wrapped.partialContent = diagnostics.partialContent || "";
+  wrapped.finishReason = diagnostics.finishReason || "";
+  wrapped.httpProviderDiagnostics = {
+    ...diagnostics,
+    transportError
+  };
+  return wrapped;
+}
+
+function serializeErrorForDiagnostics(error, depth = 0) {
+  if (!error || typeof error !== "object") {
+    return {
+      message: String(error || "")
+    };
+  }
+
+  if (depth > 2) {
+    return {
+      name: String(error.name || ""),
+      message: String(error.message || "")
+    };
+  }
+
+  const serialized = {
+    name: String(error.name || ""),
+    message: String(error.message || "")
+  };
+
+  if (typeof error.code === "string" || typeof error.code === "number") {
+    serialized.code = error.code;
+  }
+  if (typeof error.type === "string") {
+    serialized.type = error.type;
+  }
+  if (typeof error.errno === "string" || typeof error.errno === "number") {
+    serialized.errno = error.errno;
+  }
+  if (typeof error.stack === "string") {
+    serialized.stack = error.stack.slice(0, 4000);
+  }
+  if (error.cause && error.cause !== error) {
+    serialized.cause = serializeErrorForDiagnostics(error.cause, depth + 1);
+  }
+
+  return serialized;
+}
+
+function extractHttpProviderErrorDiagnostics(error) {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const diagnostics = error.httpProviderDiagnostics && typeof error.httpProviderDiagnostics === "object"
+    ? { ...error.httpProviderDiagnostics }
+    : {};
+
+  if (!diagnostics.transportError) {
+    diagnostics.transportError = serializeErrorForDiagnostics(error);
+  }
+  if (typeof error.abortKind === "string" && !diagnostics.abortKind) {
+    diagnostics.abortKind = error.abortKind;
+  }
+  if (typeof error.finishReason === "string" && !diagnostics.finishReason) {
+    diagnostics.finishReason = error.finishReason;
+  }
+  if (typeof error.partialThinking === "string" && !diagnostics.partialThinkingLength) {
+    diagnostics.partialThinkingLength = error.partialThinking.length;
+  }
+  if (typeof error.partialContent === "string" && !diagnostics.partialContentLength) {
+    diagnostics.partialContentLength = error.partialContent.length;
+  }
+
+  return Object.keys(diagnostics).length ? diagnostics : null;
+}
+
+function createHttpProviderErrorArtifact({
+  requestId = "",
+  baseUrl = "",
+  provider = {},
+  requestBody = {},
+  error = null
+} = {}) {
+  return {
+    savedAt: new Date().toISOString(),
+    requestId,
+    baseUrl,
+    model: provider.model || "",
+    useStreaming: Boolean(requestBody.stream),
+    wantsJson: requestBody.response_format?.type === "json_object",
+    timeoutMs: getHttpProviderTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS),
+    maxTokens: requestBody.max_tokens || 0,
+    diagnostics: extractHttpProviderErrorDiagnostics(error),
+    error: serializeErrorForDiagnostics(error)
+  };
+}
+
 async function readStreamingChatCompletion(response, activityTimeout = null) {
   if (!response.body) {
     return response.text();
@@ -1739,11 +1891,16 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
   let lastProgressEmitAt = 0;
   let lastProgressThinkingLength = 0;
   let lastFinishReason = "";
+  let chunksReceived = 0;
+  let bytesReceived = 0;
+  let sseEvents = 0;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      chunksReceived += 1;
+      bytesReceived += value?.byteLength || 0;
       activityTimeout?.markActivity?.();
       buffer += decoder.decode(value, { stream: true });
 
@@ -1764,7 +1921,18 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
         finishReason
       );
     }
-    throw error;
+    throw makeHttpProviderStreamError(error, {
+      responseStatus: response.status,
+      contentType,
+      partialThinking: aggregatedReasoning,
+      partialContent: aggregatedContent,
+      partialThinkingLength: aggregatedReasoning.length,
+      partialContentLength: aggregatedContent.length,
+      finishReason,
+      chunksReceived,
+      bytesReceived,
+      sseEvents
+    });
   }
 
   buffer += decoder.decode();
@@ -1804,6 +1972,7 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
       } catch {
         continue;
       }
+      sseEvents += 1;
 
       const choice = parsed?.choices?.[0];
       const delta = choice?.delta || {};
