@@ -2211,23 +2211,24 @@ function buildAgentPrompt(payload, options = {}) {
 }
 
 function compactObservationForPrompt(observation = {}) {
+  const safeObservation = observation && typeof observation === "object" ? observation : {};
   return {
-    type: observation.type || "page_observation",
-    tab: observation.tab || {},
-    viewport: observation.viewport || {},
-    visible_text: String(observation.visible_text || "").slice(0, 6000),
-    headings: (observation.headings || []).slice(0, 20),
-    links: (observation.links || []).slice(0, 80).map(compactElementForPrompt),
-    buttons: (observation.buttons || []).slice(0, 80).map(compactElementForPrompt),
-    forms: (observation.forms || []).slice(0, 10),
-    interactive_elements: (observation.interactive_elements || []).slice(0, 120).map(compactElementForPrompt),
-    counts: observation.counts || null,
-    page_outline: compactPageOutlineForPrompt(observation.page_outline || null),
-    structured_items: (observation.structured_items || []).slice(0, 24).map(compactStructuredItemForPrompt),
-    focused_context: (observation.focused_context || []).slice(0, 12).map(compactFocusedContextForPrompt),
-    content_blocks: (observation.content_blocks || []).slice(0, 16).map(compactFocusedContextForPrompt),
-    note: observation.note || "",
-    capturedAt: observation.capturedAt || ""
+    type: safeObservation.type || "page_observation",
+    tab: safeObservation.tab || {},
+    viewport: safeObservation.viewport || {},
+    visible_text: String(safeObservation.visible_text || "").slice(0, 6000),
+    headings: (safeObservation.headings || []).slice(0, 20),
+    links: (safeObservation.links || []).slice(0, 80).map(compactElementForPrompt),
+    buttons: (safeObservation.buttons || []).slice(0, 80).map(compactElementForPrompt),
+    forms: (safeObservation.forms || []).slice(0, 10),
+    interactive_elements: (safeObservation.interactive_elements || []).slice(0, 120).map(compactElementForPrompt),
+    counts: safeObservation.counts || null,
+    page_outline: compactPageOutlineForPrompt(safeObservation.page_outline || null),
+    structured_items: (safeObservation.structured_items || []).slice(0, 24).map(compactStructuredItemForPrompt),
+    focused_context: (safeObservation.focused_context || []).slice(0, 12).map(compactFocusedContextForPrompt),
+    content_blocks: (safeObservation.content_blocks || []).slice(0, 16).map(compactFocusedContextForPrompt),
+    note: safeObservation.note || "",
+    capturedAt: safeObservation.capturedAt || ""
   };
 }
 
