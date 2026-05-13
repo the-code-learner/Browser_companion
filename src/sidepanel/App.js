@@ -160,6 +160,7 @@ async function initialize() {
 }
 
 function render() {
+  const transientInputState = captureTransientInputState();
   app.innerHTML = `
     <section class="topbar">
       <button id="theme-toggle" class="theme-toggle" type="button" title="${escapeHtml(getThemeTitle())}">${escapeHtml(getThemeIcon())}</button>
@@ -358,6 +359,46 @@ function render() {
         state.confirmationText = event.target.value.trim();
         updateConfirmButtonState();
       });
+    }
+  }
+
+  restoreTransientInputState(transientInputState);
+}
+
+function captureTransientInputState() {
+  const activeElement = document.activeElement;
+  const chatInput = document.getElementById("chat-input");
+
+  if (chatInput) {
+    state.composerDraft = chatInput.value;
+  }
+
+  return {
+    activeId: activeElement?.id || "",
+    chatInput: chatInput
+      ? {
+          value: chatInput.value,
+          selectionStart: chatInput.selectionStart,
+          selectionEnd: chatInput.selectionEnd
+        }
+      : null
+  };
+}
+
+function restoreTransientInputState(snapshot) {
+  const chatInput = document.getElementById("chat-input");
+  if (chatInput && snapshot?.chatInput) {
+    chatInput.value = snapshot.chatInput.value;
+    state.composerDraft = snapshot.chatInput.value;
+
+    if (snapshot.activeId === "chat-input") {
+      chatInput.focus({ preventScroll: true });
+      if (
+        Number.isInteger(snapshot.chatInput.selectionStart)
+        && Number.isInteger(snapshot.chatInput.selectionEnd)
+      ) {
+        chatInput.setSelectionRange(snapshot.chatInput.selectionStart, snapshot.chatInput.selectionEnd);
+      }
     }
   }
 }
