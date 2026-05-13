@@ -1454,6 +1454,40 @@ async function observePage(options = {}) {
   return observation;
 }
 
+async function recoverObservationForProvider(reason, options = {}) {
+  const planContext = options.planContext || null;
+  const existing = getObservationForContext(planContext);
+  if (existing) {
+    return existing;
+  }
+
+  if (planContext) {
+    await restoreExpectedTab(planContext);
+  }
+
+  addDebugLog("observe.recovery.start", {
+    reason,
+    planContext
+  }, "Observation missing; attempting recovery before provider request.");
+
+  const recovered = await observePage({
+    reason,
+    silent: true,
+    skipWaitingMessage: true
+  });
+
+  addDebugLog("observe.recovery.end", {
+    ok: Boolean(recovered),
+    reason,
+    planContext,
+    observation: recovered ? summarizeObservationForLog(recovered) : null
+  }, recovered
+    ? "Recovered missing observation before provider request."
+    : "Observation recovery failed before provider request.");
+
+  return getObservationForContext(planContext) || recovered || null;
+}
+
 async function enrichGoogleDocObservation() {
   const observation = state.page.observation;
   const docId = extractGoogleDocId(observation?.tab?.url || state.page.url);
@@ -2579,9 +2613,16 @@ async function getAgentResult(goal, options = {}) {
   }
 
   if (state.connector.status === "connected") {
+    const needsPageRecovery = !isSimpleConversationalMessage(goal);
+    let rawObservation = getObservationForContext(options.planContext);
+    if (!rawObservation && needsPageRecovery) {
+      rawObservation = await recoverObservationForProvider("read this page before sending the provider request", {
+        planContext: options.planContext
+      });
+    }
+
     const selectedHttpProvider = getSelectedHttpProvider();
     const runtimeContext = await buildRuntimeContext(goal, options);
-    const rawObservation = getObservationForContext(options.planContext);
     const conversationContext = getRecentConversationForProvider(goal);
     const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
     const observationForRequest = compactObservationForProvider(rawObservation, {
@@ -5827,7 +5868,10 @@ async function maybeSynthesizeResults(plan, results) {
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
   const selectedHttpProvider = getSelectedHttpProvider();
-  const latestObservation = getLatestObservationFromResults(results);
+  let latestObservation = getLatestObservationFromResults(results);
+  if (!latestObservation) {
+    latestObservation = await recoverObservationForProvider("refresh page context before synthesis");
+  }
   const conversationContext = getRecentConversationForProvider(lastUserMessage);
   const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
   const buildPayload = (mode = "full") => ({
