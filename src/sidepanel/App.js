@@ -3238,6 +3238,14 @@ function compactElementsForProvider(elements, limit) {
           item_count: Number(element.controlled_region.item_count || 0),
           titles: Array.isArray(element.controlled_region.titles)
             ? element.controlled_region.titles.slice(0, 6).map((title) => String(title || "").slice(0, 120))
+            : [],
+          actions: Array.isArray(element.controlled_region.actions)
+            ? element.controlled_region.actions.slice(0, 8).map((action) => ({
+                role: action.role || "",
+                label: String(action.label || "").slice(0, 120),
+                href: action.href || "",
+                value: String(action.value || "").slice(0, 120)
+              }))
             : []
         }
       : null,
@@ -5210,6 +5218,7 @@ function buildLocalAgentResult(goal, responseLanguage) {
 
 function buildNavigationPlan(goal, responseLanguage) {
   const preferNewTab = shouldPreferNewTabNavigation(goal);
+  const imperativeNavigation = /\b(open|apri|go to|vai su|naviga a)\b/i.test(goal);
   const searchMatch = goal.match(/\b(?:open|apri)\s+((?:https?:\/\/)?(?:www\.)?(?:google|bing|duckduckgo|brave|yahoo)(?:\.[a-z]{2,})?)\b.*\b(?:search|cerca)\b.*["“”']([^"“”']+)["“”']/i)
     || goal.match(/\b(?:search|cerca)\b.*["“”']([^"“”']+)["“”'].*\b(?:on|su)\s+((?:https?:\/\/)?(?:www\.)?(?:google|bing|duckduckgo|brave|yahoo)(?:\.[a-z]{2,})?)/i);
 
@@ -5252,12 +5261,13 @@ function buildNavigationPlan(goal, responseLanguage) {
   }
 
   const explicitUrls = extractExplicitUrls(goal);
-  if (/\b(open|apri|go to|vai su|naviga a)\b/i.test(goal) && explicitUrls.length > 1) {
+  if (imperativeNavigation && explicitUrls.length > 1) {
     return buildOpenUrlsInNewTabsPlan(goal, explicitUrls, responseLanguage);
   }
 
-  const openMatch = goal.match(/\b(?:open|apri|go to|vai su|naviga a)\s+((?:https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s]*)?)/i)
-    || goal.match(/\b((?:https?:\/\/)[^\s]+)\b/i);
+  const openMatch = imperativeNavigation
+    ? goal.match(/\b(?:open|apri|go to|vai su|naviga a)\s+((?:https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s]*)?)/i)
+    : null;
   if (!openMatch) {
     return null;
   }

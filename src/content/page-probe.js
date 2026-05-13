@@ -21,6 +21,8 @@
   const MAX_STRUCTURED_ITEMS = 36;
   const MAX_CONTENT_BLOCKS = 48;
   const NAVIGATION_LABEL_RE = /\b(home|career guide|podcast|videos|job board|resources|faq|feedback|search jobs|recommended jobs|collections|about|meet people|new releases|all articles|subscribe|set up alerts|ranked|open menu|menu|login|sign in|sign up)\b/i;
+  const assignedAgentIds = new Set();
+  const elementAgentIds = new WeakMap();
 
   const headingEntries = collectHeadings();
   const linkEntries = collectLinks(headingEntries);
@@ -602,7 +604,8 @@
       label: getAccessibleName(region) || compactText(region.getAttribute("aria-label") || region.getAttribute("title") || ""),
       hidden: !isVisible(region),
       item_count: countControlledRegionItems(region),
-      titles: texts.slice(0, 6)
+      titles: texts.slice(0, 6),
+      actions: extractControlledRegionActions(region).slice(0, 8)
     };
   }
 
@@ -649,6 +652,43 @@
     return titles;
   }
 
+  function extractControlledRegionActions(region) {
+    const selector = [
+      "a[href]",
+      "button",
+      "[role='menuitem']",
+      "[role='menuitemcheckbox']",
+      "[role='menuitemradio']",
+      "[role='option']",
+      "option",
+      "li"
+    ].join(",");
+    const actions = [];
+    const seen = new Set();
+
+    for (const node of Array.from(region.querySelectorAll(selector))) {
+      const label = compactText(getElementRawText(node) || getAccessibleName(node) || "").slice(0, 120);
+      const href = normalizePossibleUrl(node?.href || node?.getAttribute?.("href") || "");
+      const value = compactText(node.getAttribute?.("value") || node.value || "").slice(0, 120);
+      const role = node.getAttribute?.("role") || node.tagName.toLowerCase();
+      const key = `${role}|${label}|${href}|${value}`;
+
+      if (seen.has(key) || (!label && !href && !value)) {
+        continue;
+      }
+
+      seen.add(key);
+      actions.push({
+        role,
+        label,
+        href,
+        value
+      });
+    }
+
+    return actions;
+  }
+
   function getSelectorCandidates(element) {
     const selectors = [];
 
@@ -665,11 +705,24 @@
   }
 
   function ensureAgentId(element, prefix, index) {
-    if (!element.dataset.browserCompanionId) {
-      element.dataset.browserCompanionId = `${prefix}_${index + 1}`;
+    const existing = elementAgentIds.get(element);
+    if (existing) {
+      return existing;
     }
 
-    return element.dataset.browserCompanionId;
+    const preferred = element.dataset.browserCompanionId || `${prefix}_${index + 1}`;
+    let candidate = preferred;
+    let suffix = 2;
+
+    while (assignedAgentIds.has(candidate)) {
+      candidate = `${preferred}_${suffix}`;
+      suffix += 1;
+    }
+
+    element.dataset.browserCompanionId = candidate;
+    assignedAgentIds.add(candidate);
+    elementAgentIds.set(element, candidate);
+    return candidate;
   }
 
   function getBox(element) {
@@ -822,25 +875,44 @@
     const ctaPattern = /\b(view|details|detail|opportunity|apply|application|job|role|learn more|open|read more|view opportunity details|vedi|dettagli|offerta|candid|apri|scopri)\b/i;
     const weakPattern = /\b(share|copy|bookmark|save|feedback|expand|collapse|menu|organization|profile|open roles|largest funder)\b/i;
 
-    return items
+    const ranked = items
       .map((candidate) => {
         const combined = compactText([candidate.text, candidate.aria_label, candidate.title].filter(Boolean).join(" "));
         const normalized = normalizeTokenKey(combined);
+        const href = String(candidate.href || "");
         let score = 0;
         if (ctaPattern.test(combined)) score += 8;
         if (weakPattern.test(combined)) score -= 4;
         if (titleKey && normalized.includes(titleKey)) score += 5;
         if (metadataKey && metadataKey.length >= 10 && normalized.includes(metadataKey)) score += 2;
         if (previewKey && previewKey.length >= 10 && previewKey.includes(normalized)) score += 1;
-        if (!combined) score += 1;
+        if (!combined) score -= 2;
+        if (/\/job\/conversation(?:\/|\?|$)/i.test(href)) score -= 12;
+        if (/discuss this opportunity with ai/i.test(combined)) score -= 10;
+        if (/utm_medium=job_card_manage_button/i.test(href)) score -= 8;
+        if (/\/organisations?\//i.test(href)) score -= 4;
+        if (/\/problem-profiles?\//i.test(href)) score -= 4;
+        if (/\/career-reviews?\//i.test(href)) score -= 4;
+        if (/^https?:\/\/[^/]+\/?(?:[?#].*)?$/i.test(href)) score -= 6;
+        if (/\/forms\//i.test(href) && /view job details|details|apply|application|job/i.test(combined)) score += 10;
+        if (/view job details|view details|job details|apply now|apply here|open role/i.test(combined)) score += 10;
         return {
-          href: candidate.href,
+          href,
           score,
           textLength: combined.length
         };
       })
-      .sort((a, b) => b.score - a.score || b.textLength - a.textLength)
-      .map((entry) => entry.href)[0] || "";
+      .sort((a, b) => b.score - a.score || b.textLength - a.textLength);
+
+    if (!ranked.length) {
+      return "";
+    }
+
+    if (ranked[0].score <= 0 && ranked.length > 1) {
+      return "";
+    }
+
+    return ranked[0].href || "";
   }
 
   function extractAttributeUrlCandidate(element) {
