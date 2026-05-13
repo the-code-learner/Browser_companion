@@ -128,11 +128,15 @@ let devWatchFingerprint = "";
 let devWatchInitialized = false;
 
 const PROVIDER_VISIBLE_TEXT_LIMIT = 5000;
+const PROVIDER_FULL_OBSERVATION_TEXT_LIMIT = 7000;
 const PROVIDER_ELEMENT_LIMIT = 24;
+const PROVIDER_FULL_OBSERVATION_ELEMENT_TOTAL_LIMIT = 80;
 const PROVIDER_FORM_LIMIT = 8;
 const PROVIDER_FIELD_LIMIT = 12;
 const PROVIDER_SELECTOR_LIMIT = 3;
 const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
+const PROVIDER_CONVERSATION_CONTEXT_LIMIT = 8;
+const PROVIDER_CONVERSATION_TEXT_LIMIT = 1200;
 
 initialize();
 
@@ -2583,6 +2587,7 @@ async function getAgentResult(goal, options = {}) {
       model: state.codex.model,
       httpProvider: selectedHttpProvider,
       runtimeContext,
+      conversationContext: getRecentConversationForProvider(goal),
       observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
@@ -2709,6 +2714,42 @@ function formatTabContextForPrompt(tab) {
   return parts.join(", ");
 }
 
+function getRecentConversationForProvider(currentGoal) {
+  const normalizedGoal = compact(currentGoal || "");
+  const messages = state.messages
+    .filter((message) => String(message?.text || "").trim())
+    .map((message) => ({
+      role: message.role || "assistant",
+      text: String(message.text || ""),
+      createdAt: message.createdAt || 0
+    }));
+
+  let skippedCurrentUserMessage = false;
+  const trimmed = messages
+    .slice()
+    .reverse()
+    .filter((message) => {
+      if (
+        !skippedCurrentUserMessage
+        && message.role === "user"
+        && compact(message.text || "") === normalizedGoal
+      ) {
+        skippedCurrentUserMessage = true;
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, PROVIDER_CONVERSATION_CONTEXT_LIMIT)
+    .reverse();
+
+  return trimmed.map((message) => ({
+    role: message.role,
+    text: String(message.text || "").slice(0, PROVIDER_CONVERSATION_TEXT_LIMIT),
+    createdAt: message.createdAt || 0
+  }));
+}
+
 function getObservationForContext(context) {
   const observation = state.page.observation || null;
   if (!observation || !context) {
@@ -2726,7 +2767,16 @@ function compactObservationForProvider(observation) {
   if (!observation) return null;
 
   const visibleText = String(observation.visible_text || "");
-  const visibleTextExcerpt = smartExcerptForProvider(visibleText, PROVIDER_VISIBLE_TEXT_LIMIT);
+  const useFullDump = shouldUseFullObservationDump(observation);
+  const visibleTextExcerpt = useFullDump
+    ? {
+        text: visibleText,
+        truncated: false,
+        strategy: "full_dump_small_page"
+      }
+    : smartExcerptForProvider(visibleText, PROVIDER_VISIBLE_TEXT_LIMIT);
+  const elementLimit = useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_ELEMENT_LIMIT;
+  const formLimit = useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_FORM_LIMIT;
 
   return {
     type: observation.type || "page_observation",
@@ -2737,10 +2787,10 @@ function compactObservationForProvider(observation) {
     visibleTextLength: visibleText.length,
     visibleTextTruncated: visibleTextExcerpt.truncated,
     visibleTextExcerptStrategy: visibleTextExcerpt.strategy,
-    headings: compactElementsForProvider(observation.headings, PROVIDER_ELEMENT_LIMIT),
-    links: compactElementsForProvider(observation.links, PROVIDER_ELEMENT_LIMIT),
-    buttons: compactElementsForProvider(observation.buttons, PROVIDER_ELEMENT_LIMIT),
-    forms: compactFormsForProvider(observation.forms),
+    headings: compactElementsForProvider(observation.headings, elementLimit),
+    links: compactElementsForProvider(observation.links, elementLimit),
+    buttons: compactElementsForProvider(observation.buttons, elementLimit),
+    forms: compactFormsForProvider(observation.forms, formLimit),
     counts: {
       headings: observation.headings?.length || 0,
       links: observation.links?.length || 0,
@@ -2748,8 +2798,21 @@ function compactObservationForProvider(observation) {
       forms: observation.forms?.length || 0,
       interactive_elements: observation.interactive_elements?.length || 0
     },
-    note: "Observation compacted before provider request to fit local model context."
+    note: useFullDump
+      ? "Observation kept in full because the page is small enough for the local model context."
+      : "Observation compacted before provider request to fit local model context."
   };
+}
+
+function shouldUseFullObservationDump(observation) {
+  const visibleTextLength = String(observation?.visible_text || "").length;
+  const totalElements = (observation?.headings?.length || 0)
+    + (observation?.links?.length || 0)
+    + (observation?.buttons?.length || 0)
+    + (observation?.forms?.length || 0);
+
+  return visibleTextLength <= PROVIDER_FULL_OBSERVATION_TEXT_LIMIT
+    && totalElements <= PROVIDER_FULL_OBSERVATION_ELEMENT_TOTAL_LIMIT;
 }
 
 function compactTabForProvider(tab) {
@@ -2772,8 +2835,8 @@ function compactElementsForProvider(elements, limit) {
   }));
 }
 
-function compactFormsForProvider(forms) {
-  return (Array.isArray(forms) ? forms : []).slice(0, PROVIDER_FORM_LIMIT).map((form) => ({
+function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT) {
+  return (Array.isArray(forms) ? forms : []).slice(0, limit).map((form) => ({
     agent_id: form.agent_id || "",
     title: form.title || "",
     fields: (Array.isArray(form.fields) ? form.fields : []).slice(0, PROVIDER_FIELD_LIMIT).map((field) => ({
