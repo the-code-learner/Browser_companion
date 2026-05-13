@@ -219,7 +219,7 @@ function render(options = {}) {
 
     ${state.pendingPlan ? renderActionPreview() : ""}
 
-    <section class="chat-log" aria-label="Chat messages">
+    <section id="chat-log" class="chat-log" aria-label="Chat messages">
       ${renderChatTimeline()}
     </section>
     <button id="jump-to-latest" class="jump-to-latest" type="button" title="Jump to latest message" aria-label="Jump to latest message" ${state.chatAtBottom ? "hidden" : ""}>&#8595;</button>
@@ -347,15 +347,7 @@ function render(options = {}) {
   document.getElementById("chat-input").addEventListener("keydown", handleComposerKeydown);
   const stopProcessingButton = document.getElementById("stop-processing");
   if (stopProcessingButton) stopProcessingButton.addEventListener("click", stopCurrentProcessing);
-  const liveThinkingDetails = document.getElementById("live-thinking-details");
-  if (liveThinkingDetails) {
-    liveThinkingDetails.addEventListener("toggle", () => {
-      state.liveThinkingOpen = liveThinkingDetails.open;
-    });
-  }
-  document.querySelectorAll("[data-steer-message]").forEach((button) => {
-    button.addEventListener("click", () => steerQueuedMessage(button.dataset.steerMessage));
-  });
+  bindChatTimelineControls();
 
   if (state.pendingPlan) {
     document.getElementById("confirm-plan").addEventListener("click", confirmPendingPlan);
@@ -846,33 +838,136 @@ function renderComposer() {
 }
 
 function setupChatScrollControls() {
-  const chatLog = document.querySelector(".chat-log");
+  const chatLog = document.getElementById("chat-log");
   const jumpButton = document.getElementById("jump-to-latest");
 
   if (!chatLog || !jumpButton) {
     return;
   }
 
-  const update = () => {
-    const distanceFromBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight;
-    const atBottom = distanceFromBottom < 48;
-    state.chatAtBottom = atBottom;
-    jumpButton.hidden = atBottom;
-  };
+  const update = () => syncChatScrollState(chatLog, jumpButton);
 
   chatLog.addEventListener("scroll", update);
   jumpButton.addEventListener("click", () => {
-    chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: "smooth" });
+    scrollChatLogToBottom(chatLog, "smooth");
     state.chatAtBottom = true;
     jumpButton.hidden = true;
   });
 
   requestAnimationFrame(() => {
     if (state.chatAtBottom) {
-      chatLog.scrollTop = chatLog.scrollHeight;
+      scrollChatLogToBottom(chatLog);
     }
     update();
   });
+}
+
+function bindChatTimelineControls() {
+  const liveThinkingDetails = document.getElementById("live-thinking-details");
+  if (liveThinkingDetails) {
+    liveThinkingDetails.addEventListener("toggle", () => {
+      state.liveThinkingOpen = liveThinkingDetails.open;
+    });
+  }
+
+  document.querySelectorAll("[data-steer-message]").forEach((button) => {
+    button.addEventListener("click", () => steerQueuedMessage(button.dataset.steerMessage));
+  });
+}
+
+function getActionNotePersistKey(note) {
+  if (note?.id) {
+    return `note:${note.id}`;
+  }
+  if (note?.createdAt) {
+    return `note:${note.createdAt}`;
+  }
+  return "";
+}
+
+function getMessageThinkingPersistKey(message) {
+  return `message-thinking:${message?.id || message?.createdAt || ""}`;
+}
+
+function getErrorNotePersistKey(message) {
+  return `message-error:${message?.id || message?.createdAt || ""}`;
+}
+
+function captureOpenChatDisclosureState(chatLog) {
+  if (!chatLog) {
+    return new Set();
+  }
+
+  return new Set(
+    Array.from(chatLog.querySelectorAll("details[data-chat-persist-key][open]"))
+      .map((item) => String(item.dataset.chatPersistKey || "").trim())
+      .filter(Boolean)
+  );
+}
+
+function restoreOpenChatDisclosureState(chatLog, openKeys) {
+  if (!chatLog || !(openKeys instanceof Set) || !openKeys.size) {
+    return;
+  }
+
+  Array.from(chatLog.querySelectorAll("details[data-chat-persist-key]")).forEach((item) => {
+    const key = String(item.dataset.chatPersistKey || "").trim();
+    item.open = openKeys.has(key);
+  });
+}
+
+function syncChatScrollState(chatLog = document.getElementById("chat-log"), jumpButton = document.getElementById("jump-to-latest")) {
+  if (!chatLog || !jumpButton) {
+    return;
+  }
+
+  const distanceFromBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight;
+  const atBottom = distanceFromBottom < 48;
+  state.chatAtBottom = atBottom;
+  jumpButton.hidden = atBottom;
+}
+
+function scrollChatLogToBottom(chatLog = document.getElementById("chat-log"), behavior = "auto") {
+  if (!chatLog) {
+    return;
+  }
+
+  if (behavior === "smooth") {
+    chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: "smooth" });
+    return;
+  }
+
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function refreshChatLog(options = {}) {
+  const chatLog = document.getElementById("chat-log");
+  if (!chatLog) {
+    return false;
+  }
+
+  const jumpButton = document.getElementById("jump-to-latest");
+  const preserveScroll = options.preserveScroll !== false;
+  const shouldStickToBottom = options.scrollToBottom === true || state.chatAtBottom;
+  const previousScrollTop = chatLog.scrollTop;
+  const openDetails = captureOpenChatDisclosureState(chatLog);
+
+  chatLog.innerHTML = renderChatTimeline();
+  restoreOpenChatDisclosureState(chatLog, openDetails);
+  bindChatTimelineControls();
+
+  requestAnimationFrame(() => {
+    if (shouldStickToBottom) {
+      scrollChatLogToBottom(chatLog);
+      state.chatAtBottom = true;
+    } else if (preserveScroll) {
+      chatLog.scrollTop = previousScrollTop;
+    }
+
+    syncChatScrollState(chatLog, jumpButton);
+  });
+
+  return true;
 }
 
 function handleComposerKeydown(event) {
@@ -930,9 +1025,11 @@ function renderMessage(message) {
 function renderErrorNote(message) {
   const details = buildErrorNoteDetails(message);
   const items = details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  const persistKey = getErrorNotePersistKey(message);
+  const persistAttr = persistKey ? ` data-chat-persist-key="${escapeHtml(persistKey)}"` : "";
   return `
     <div class="message-error-stack">
-      <details class="action-note action-error">
+      <details class="action-note action-error"${persistAttr}>
         <summary>${escapeHtml(getErrorNoteSummary(message))}</summary>
         <ul>${items}</ul>
       </details>
@@ -978,8 +1075,10 @@ function renderMessageThinking(message) {
     return "";
   }
 
+  const persistKey = getMessageThinkingPersistKey(message);
+
   return `
-    <details class="action-note message-thinking">
+    <details class="action-note message-thinking" data-chat-persist-key="${escapeHtml(persistKey)}">
       <summary>Thinking</summary>
       <div class="message-thinking-body">${renderRichText(message.thinking)}</div>
     </details>
@@ -1034,9 +1133,11 @@ function renderActionNote(note) {
   const variantClass = note.variant === "thinking" ? " action-thinking" : "";
   const openAttr = note.open ? " open" : "";
   const idAttr = note.id ? ` id="${escapeHtml(note.id)}"` : "";
+  const persistKey = getActionNotePersistKey(note);
+  const persistAttr = persistKey ? ` data-chat-persist-key="${escapeHtml(persistKey)}"` : "";
   const summary = note.summaryHtml || escapeHtml(note.summary);
   return `
-    <details${idAttr} class="action-note${variantClass}"${openAttr}>
+    <details${idAttr}${persistAttr} class="action-note${variantClass}"${openAttr}>
       <summary>${summary}</summary>
       <ul>${details}</ul>
     </details>
@@ -2434,7 +2535,9 @@ async function processQueuedMessage(item) {
   const agentResult = await getAgentResult(text, { planContext });
   if (state.liveThinking) {
     state.liveThinking.streaming = false;
-    render();
+    if (!refreshChatLog()) {
+      render();
+    }
   }
   await handleAgentResult(agentResult, { planContext });
   return {
@@ -2464,7 +2567,9 @@ function handleRuntimeMessage(message) {
     requestId: payload.requestId || "",
     thinkingLength: thinking.length
   }, "Received provider thinking progress.");
-  render();
+  if (!refreshChatLog()) {
+    render();
+  }
   return false;
 }
 
