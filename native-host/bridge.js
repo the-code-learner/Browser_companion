@@ -1725,6 +1725,7 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
   let usage = null;
   let lastProgressEmitAt = 0;
   let lastProgressThinkingLength = 0;
+  let lastFinishReason = "";
 
   try {
     while (true) {
@@ -1796,20 +1797,32 @@ async function readStreamingChatCompletion(response, activityTimeout = null) {
       const message = choice?.message || {};
       const deltaContent = normalizeStreamText(delta.content) || normalizeStreamText(choice?.text) || normalizeStreamText(message.content);
       const deltaReasoning = normalizeStreamText(delta.reasoning_content) || normalizeStreamText(message.reasoning_content);
+      const previousContentLength = aggregatedContent.length;
+      const previousReasoningLength = aggregatedReasoning.length;
 
       if (deltaContent) aggregatedContent += deltaContent;
       if (deltaReasoning) aggregatedReasoning += deltaReasoning;
       if (choice?.finish_reason) finishReason = choice.finish_reason;
       if (parsed?.usage) usage = parsed.usage;
 
+      const contentGrew = aggregatedContent.length > previousContentLength;
+      const reasoningGrew = aggregatedReasoning.length > previousReasoningLength;
+      const finishReasonChanged = finishReason !== lastFinishReason;
+      const hadMeaningfulProgress = contentGrew || reasoningGrew || finishReasonChanged;
+
+      if (hadMeaningfulProgress) {
+        lastFinishReason = finishReason;
+      }
+
       const now = Date.now();
       if (
         typeof activityTimeout?.onProgress === "function"
         && aggregatedReasoning
+        && hadMeaningfulProgress
         && (
           now - lastProgressEmitAt >= 700
           || aggregatedReasoning.length - lastProgressThinkingLength >= 120
-          || Boolean(choice?.finish_reason)
+          || finishReasonChanged
         )
       ) {
         lastProgressEmitAt = now;

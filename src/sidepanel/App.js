@@ -3137,6 +3137,7 @@ function isProviderErrorLikeResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
   return /\b524\b/.test(text)
     || /timeout occurred|timed out|aborted due to timeout/i.test(text)
+    || /stream stalled|terminated/i.test(text)
     || /HTTP provider returned \d+/i.test(text)
     || /<!doctype html>|<html\b|cloudflare/i.test(text);
 }
@@ -3149,6 +3150,8 @@ function extractProviderErrorMeta(result) {
 
   if (/\b524\b/.test(text) || /timeout occurred|timed out|aborted due to timeout/i.test(text)) {
     kind = "timeout";
+  } else if (/stream stalled|terminated/i.test(text)) {
+    kind = "stalled";
   } else if (/<!doctype html>|<html\b|cloudflare/i.test(text)) {
     kind = "upstream_html";
   } else if (/exceeds the available context size|exceed_context_size_error/i.test(text)) {
@@ -3176,6 +3179,9 @@ function buildProviderErrorSummary(meta = {}) {
   if (meta.kind === "timeout") {
     return meta.statusCode ? `Provider timeout (${meta.statusCode})` : "Provider timeout";
   }
+  if (meta.kind === "stalled") {
+    return "Provider stream stalled";
+  }
   if (meta.kind === "upstream_html") {
     return meta.statusCode ? `Provider upstream HTML error (${meta.statusCode})` : "Provider upstream HTML error";
   }
@@ -3198,6 +3204,10 @@ function formatProviderAgentErrorMessage(result) {
 
   if (/\b524\b/.test(raw) || /timeout occurred|timed out|aborted due to timeout/i.test(raw)) {
     return "The HTTP provider timed out before the model completed its response. If this happens often, the model is too slow for this page or the local bridge timeout needs to be increased.";
+  }
+
+  if (/stream stalled/i.test(raw) || /^terminated$/i.test(raw)) {
+    return "The HTTP provider started streaming thinking, but then stopped making real progress before producing a final answer.";
   }
 
   if (/HTTP provider returned \d+/i.test(raw) || /<!doctype html>|<html\b|cloudflare/i.test(raw)) {

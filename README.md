@@ -6,9 +6,11 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 
 - Side panel chat UI
 - Active-tab page observation
+- Full page dump for smaller pages; compacted observation for larger pages
 - DOM, visible text, link, button, and form extraction
 - Attachment registration for local context
 - Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, TypeScript, PDF, DOCX, XLSX, and image OCR attachment extraction through the native connector
+- Local user memory stored in `USER_MEMORY.md`, with preview-before-save confirmation
 - Native host health, sign-in start, and local provider request protocol
 - Safe action preview and confirmation for form filling and final submit or accept actions
 - Typed `SUBMIT` confirmation before high-risk submit, accept, send, publish, or finalize clicks
@@ -19,14 +21,17 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Background reading of search-result pages through `http_request` GET for verification and detail
 - Research behavior encourages reading additional sources or refining the search when the first source is weak
 - Post-tool synthesis turns search and HTTP results into an answer instead of dumping raw results in chat
+- Automatic compact-context retry when post-action synthesis hits provider-style failures
 - Markdown rendering in chat, including Mermaid diagram blocks
 - Enter sends the chat message; Shift+Enter inserts a new line
 - Assistant responses follow the user's language unless the user asks otherwise
 - Side panel connector for Codex, Claude Code, and Gemini CLI provider/model selection
 - OpenAI-compatible HTTP provider configuration for local or private servers such as llama.cpp, LocalAI, LiteLLM, vLLM, or a custom proxy
+- Streaming support for OpenAI-compatible HTTP providers, including live thinking updates in the side panel
 - Opt-in provider CLI installation buttons; missing CLIs are never installed automatically
 - Expandable one-line action notes inside the chat for approvals, executed actions, and results
 - Top-right settings menu for memory, attachments, current page, connector, privacy, and activity
+- Dedicated diagnostic Logs view with sanitized provider, action, and synthesis traces
 - Sticky chat composer pinned to the bottom of the side panel
 - System-aware light/dark theme with a small manual toggle
 - Shared message, schema, and policy modules
@@ -39,7 +44,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 4. Select this project folder.
 5. Open a normal web page and click the Browser Companion extension icon.
 6. If you change extension files during development, click Reload for the extension in `chrome://extensions`.
-7. When observing a new site, approve the site access prompt for that origin.
+7. When observing a new site, approve the site access prompt for that origin if Chrome shows it. If access is still missing, the Observe button changes to `Grant Site Access`.
 
 ## Development
 
@@ -75,6 +80,8 @@ Missing providers show an explicit Install button only. Browser Companion does n
 
 Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector. Opening the Connector settings section refreshes provider status and model metadata automatically; the Check button does the same on demand. The selected provider and model are saved as Connector settings and restored on the next side panel session. Gemini CLI is shown with the provider default model unless the CLI exposes reliable account-specific model discovery.
 
+Connector status in the side panel reflects the currently selected provider. For HTTP providers, Browser Companion refreshes live health when Connector opens, so an offline local server is shown as offline even if Codex or Gemini CLI are available on the same machine.
+
 If provider install says Node/npm is missing but Node is already installed, reload Chrome after re-registering the native host. The Windows installer now writes the Node.js directory into `native-host/bridge-launcher.cmd` so the bridge can find `npm.cmd` even when Chrome starts with a reduced PATH.
 
 For a local or private OpenAI-compatible server, open Connector and add an HTTP provider with:
@@ -84,6 +91,10 @@ For a local or private OpenAI-compatible server, open Connector and add an HTTP 
 - model selected from `GET /v1/models`
 
 HTTP providers use `POST /v1/chat/completions`. When selected, observed page content, allowed attachment text, and local memory context may be sent to that server.
+
+When `Use streaming responses` is enabled for an HTTP provider, Browser Companion sends `stream: true`, reads SSE responses, and shows live thinking progress in the side panel. Requests time out only when streamed activity stops or the user explicitly stops the request.
+
+For smaller observed pages, Browser Companion can send the full page dump to the provider. Larger pages are compacted automatically to stay within a safer local-model context budget.
 
 The extension cannot run this PowerShell command before the native host is registered. When the connector is missing, the side panel shows a Copy Command button with the correct extension ID already filled in.
 
