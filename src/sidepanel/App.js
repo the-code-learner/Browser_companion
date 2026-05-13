@@ -137,6 +137,13 @@ const PROVIDER_SELECTOR_LIMIT = 3;
 const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
 const PROVIDER_CONVERSATION_CONTEXT_LIMIT = 8;
 const PROVIDER_CONVERSATION_TEXT_LIMIT = 1200;
+const PROVIDER_SECTION_LIMIT = 8;
+const PROVIDER_STRUCTURED_ITEM_LIMIT = 18;
+const PROVIDER_FOCUSED_CONTEXT_LIMIT = 10;
+const PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT = 5;
+const PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT = 2600;
+const PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT = 1200;
+const PROVIDER_RECENT_REFERENCE_LIMIT = 8;
 
 initialize();
 
@@ -2574,7 +2581,15 @@ async function getAgentResult(goal, options = {}) {
   if (state.connector.status === "connected") {
     const selectedHttpProvider = getSelectedHttpProvider();
     const runtimeContext = await buildRuntimeContext(goal, options);
-    const observationForRequest = compactObservationForProvider(getObservationForContext(options.planContext));
+    const rawObservation = getObservationForContext(options.planContext);
+    const conversationContext = getRecentConversationForProvider(goal);
+    const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
+    const observationForRequest = compactObservationForProvider(rawObservation, {
+      goal,
+      conversationContext,
+      userMemory: state.userMemory.items,
+      recentReferences
+    });
     const payload = {
       goal,
       responseLanguage,
@@ -2582,7 +2597,8 @@ async function getAgentResult(goal, options = {}) {
       model: state.codex.model,
       httpProvider: selectedHttpProvider,
       runtimeContext,
-      conversationContext: getRecentConversationForProvider(goal),
+      conversationContext,
+      recentReferences,
       observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
@@ -2745,6 +2761,50 @@ function getRecentConversationForProvider(currentGoal) {
   }));
 }
 
+function getRecentReferencesForProvider(currentGoal, observation, conversationContext = []) {
+  const items = Array.isArray(observation?.structured_items) ? observation.structured_items : [];
+  const assistantMessages = (Array.isArray(conversationContext) ? conversationContext : [])
+    .filter((message) => message.role === "assistant" && String(message.text || "").trim());
+  const mentionedItems = [];
+
+  for (const item of items) {
+    const title = String(item.title || item.label || item.text_preview || "").trim();
+    if (!title) {
+      continue;
+    }
+
+    const normalizedTitle = normalizeElementName(title);
+    const matchedMessage = assistantMessages.find((message) => {
+      const messageText = normalizeElementName(message.text || "");
+      return messageText.includes(normalizedTitle) || normalizedTitle.includes(messageText);
+    });
+
+    if (!matchedMessage) {
+      continue;
+    }
+
+    mentionedItems.push({
+      item_id: item.item_id || "",
+      title,
+      metadata: item.metadata || "",
+      section_title: item.section_title || "",
+      destination_url: item.destination_url || item.href || "",
+      matched_message_at: matchedMessage.createdAt || 0
+    });
+  }
+
+  const unresolvedReferences = [];
+  const goal = String(currentGoal || "").trim();
+  if (/\b(those|them|ones|mentioned|earlier|previous|those jobs|those offers|quelle|quelli|quelle offerte|hai menzionato|prima|second[oa]?|terz[oa]?|quart[oa]?)\b/i.test(goal)) {
+    unresolvedReferences.push(goal.slice(0, 240));
+  }
+
+  return {
+    mentioned_items: mentionedItems.slice(0, PROVIDER_RECENT_REFERENCE_LIMIT),
+    unresolved_references: unresolvedReferences
+  };
+}
+
 function getObservationForContext(context) {
   const observation = state.page.observation || null;
   if (!observation || !context) {
@@ -2758,7 +2818,7 @@ function getObservationForContext(context) {
   return sameTab || sameUrl ? observation : null;
 }
 
-function compactObservationForProvider(observation) {
+function compactObservationForProvider(observation, context = {}) {
   if (!observation) return null;
 
   const visibleText = String(observation.visible_text || "");
@@ -2769,9 +2829,22 @@ function compactObservationForProvider(observation) {
         truncated: false,
         strategy: "full_dump_small_page"
       }
-    : smartExcerptForProvider(visibleText, PROVIDER_VISIBLE_TEXT_LIMIT);
+    : buildSegmentAwareVisibleTextExcerpt(observation, context);
   const elementLimit = useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_ELEMENT_LIMIT;
   const formLimit = useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_FORM_LIMIT;
+  const counts = {
+    headings: observation.headings?.length || 0,
+    links: observation.links?.length || 0,
+    buttons: observation.buttons?.length || 0,
+    forms: observation.forms?.length || 0,
+    interactive_elements: observation.interactive_elements?.length || 0,
+    structured_items: observation.structured_items?.length || 0,
+    content_blocks: observation.content_blocks?.length || 0
+  };
+  const pageOutline = compactPageOutlineForProvider(observation.page_outline, useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_SECTION_LIMIT);
+  const structuredItems = compactStructuredItemsForProvider(observation.structured_items, context, useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_STRUCTURED_ITEM_LIMIT);
+  const focusedContext = buildFocusedContextForProvider(observation, context, useFullDump ? "full" : "compact");
+  const contentBlocks = compactContentBlocksForProvider(observation.content_blocks, context, useFullDump ? Number.MAX_SAFE_INTEGER : 16);
 
   return {
     type: observation.type || "page_observation",
@@ -2786,16 +2859,14 @@ function compactObservationForProvider(observation) {
     links: compactElementsForProvider(observation.links, elementLimit),
     buttons: compactElementsForProvider(observation.buttons, elementLimit),
     forms: compactFormsForProvider(observation.forms, formLimit),
-    counts: {
-      headings: observation.headings?.length || 0,
-      links: observation.links?.length || 0,
-      buttons: observation.buttons?.length || 0,
-      forms: observation.forms?.length || 0,
-      interactive_elements: observation.interactive_elements?.length || 0
-    },
+    counts,
+    page_outline: pageOutline,
+    structured_items: structuredItems,
+    focused_context: focusedContext,
+    content_blocks: contentBlocks,
     note: useFullDump
       ? "Observation kept in full because the page is small enough for the local model context."
-      : "Observation compacted before provider request to fit local model context."
+      : "Observation compacted with page outline, structured items, and focused context."
   };
 }
 
@@ -2808,6 +2879,245 @@ function shouldUseFullObservationDump(observation) {
 
   return visibleTextLength <= PROVIDER_FULL_OBSERVATION_TEXT_LIMIT
     && totalElements <= PROVIDER_FULL_OBSERVATION_ELEMENT_TOTAL_LIMIT;
+}
+
+function buildSegmentAwareVisibleTextExcerpt(observation, context = {}) {
+  const visibleText = String(observation?.visible_text || "");
+  const focusedBlocks = buildFocusedContextForProvider(observation, context, "full");
+  if (!visibleText) {
+    return {
+      text: "",
+      truncated: false,
+      strategy: "empty"
+    };
+  }
+
+  if (!focusedBlocks.length) {
+    return smartExcerptForProvider(visibleText, PROVIDER_VISIBLE_TEXT_LIMIT);
+  }
+
+  const snippets = focusedBlocks
+    .map((block) => {
+      const title = String(block.title || block.section_title || "").trim();
+      const body = String(block.text || "").trim();
+      const destination = String(block.destination_url || "").trim();
+      return [title, body, destination].filter(Boolean).join("\n");
+    })
+    .filter(Boolean);
+
+  const stitched = snippets.join("\n\n").slice(0, PROVIDER_VISIBLE_TEXT_LIMIT);
+  if (!stitched) {
+    return smartExcerptForProvider(visibleText, PROVIDER_VISIBLE_TEXT_LIMIT);
+  }
+
+  return {
+    text: stitched,
+    truncated: stitched.length < visibleText.length,
+    strategy: "focused_blocks"
+  };
+}
+
+function compactPageOutlineForProvider(pageOutline = null, limit = PROVIDER_SECTION_LIMIT) {
+  if (!pageOutline) {
+    return null;
+  }
+
+  return {
+    page_type: pageOutline.page_type || "general",
+    repeated_item_summary: String(pageOutline.repeated_item_summary || "").slice(0, 300),
+    counts: pageOutline.counts || null,
+    sections: (Array.isArray(pageOutline.sections) ? pageOutline.sections : [])
+      .slice(0, limit)
+      .map((section) => ({
+        section_id: section.section_id || "",
+        title: section.title || "",
+        preview: String(section.preview || "").slice(0, 220),
+        item_count: Number(section.item_count || 0),
+        level: section.level || ""
+      }))
+  };
+}
+
+function compactStructuredItemsForProvider(items = [], context = {}, limit = PROVIDER_STRUCTURED_ITEM_LIMIT) {
+  const ranked = rankStructuredItems(items, context).slice(0, limit);
+  return ranked.map((item) => ({
+    item_id: item.item_id || "",
+    agent_id: item.agent_id || "",
+    role: item.role || "",
+    title: String(item.title || "").slice(0, 220),
+    label: String(item.label || "").slice(0, 220),
+    metadata: String(item.metadata || "").slice(0, 260),
+    text_preview: String(item.text_preview || "").slice(0, 320),
+    destination_url: item.destination_url || item.href || "",
+    href: item.href || "",
+    section_id: item.section_id || "",
+    section_title: item.section_title || "",
+    selector_candidates: Array.isArray(item.selector_candidates) ? item.selector_candidates.slice(0, PROVIDER_SELECTOR_LIMIT) : [],
+    source_agent_ids: Array.isArray(item.source_agent_ids) ? item.source_agent_ids.slice(0, 4) : []
+  }));
+}
+
+function compactContentBlocksForProvider(blocks = [], context = {}, limit = 16) {
+  const ranked = rankContentBlocks(blocks, context).slice(0, limit);
+  return ranked.map((block) => ({
+    block_id: block.block_id || "",
+    kind: block.kind || "section",
+    section_id: block.section_id || "",
+    section_title: block.section_title || "",
+    item_id: block.item_id || "",
+    title: String(block.title || "").slice(0, 200),
+    text: String(block.text || "").slice(0, 320),
+    destination_url: block.destination_url || ""
+  }));
+}
+
+function buildFocusedContextForProvider(observation, context = {}, mode = "full") {
+  const blocks = buildRetrievalBlocks(observation);
+  if (!blocks.length) {
+    return [];
+  }
+
+  const ranked = rankContentBlocks(blocks, context);
+  const limit = mode === "compact" ? PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_LIMIT;
+  const textBudget = mode === "compact" ? PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT;
+  const output = [];
+  let used = 0;
+
+  for (const block of ranked) {
+    const text = String(block.text || "").trim();
+    if (!text) {
+      continue;
+    }
+    if (used >= textBudget || output.length >= limit) {
+      break;
+    }
+
+    const slice = text.slice(0, Math.max(120, textBudget - used));
+    output.push({
+      block_id: block.block_id || "",
+      kind: block.kind || "section",
+      section_id: block.section_id || "",
+      section_title: block.section_title || "",
+      item_id: block.item_id || "",
+      title: String(block.title || "").slice(0, 200),
+      text: slice,
+      destination_url: block.destination_url || ""
+    });
+    used += slice.length;
+  }
+
+  return output;
+}
+
+function buildRetrievalBlocks(observation) {
+  const blocks = [];
+  for (const block of Array.isArray(observation?.content_blocks) ? observation.content_blocks : []) {
+    blocks.push(block);
+  }
+  for (const item of Array.isArray(observation?.structured_items) ? observation.structured_items : []) {
+    blocks.push({
+      block_id: `item_block_${item.item_id || item.agent_id || blocks.length + 1}`,
+      kind: "item",
+      section_id: item.section_id || "",
+      section_title: item.section_title || "",
+      item_id: item.item_id || "",
+      title: item.title || item.label || "",
+      text: [item.title, item.metadata, item.text_preview].filter(Boolean).join(" | "),
+      destination_url: item.destination_url || item.href || ""
+    });
+  }
+  if (!blocks.length && observation?.visible_text) {
+    blocks.push({
+      block_id: "root_visible_text",
+      kind: "section",
+      section_id: "section_root",
+      section_title: observation.tab?.title || "Current page",
+      title: observation.tab?.title || "Current page",
+      text: String(observation.visible_text || "").slice(0, 500)
+    });
+  }
+  return blocks;
+}
+
+function rankStructuredItems(items = [], context = {}) {
+  return [...(Array.isArray(items) ? items : [])]
+    .map((item) => ({
+      ...item,
+      __score: scoreContextText([
+        item.title,
+        item.label,
+        item.metadata,
+        item.text_preview,
+        item.section_title
+      ].filter(Boolean).join(" "), context) + (item.destination_url ? 2 : 0)
+    }))
+    .sort((a, b) => b.__score - a.__score || String(a.title || "").localeCompare(String(b.title || "")));
+}
+
+function rankContentBlocks(blocks = [], context = {}) {
+  return [...(Array.isArray(blocks) ? blocks : [])]
+    .map((block) => ({
+      ...block,
+      __score: scoreContextText([
+        block.title,
+        block.text,
+        block.section_title
+      ].filter(Boolean).join(" "), context) + (block.kind === "item" ? 1 : 0)
+    }))
+    .sort((a, b) => b.__score - a.__score || String(a.title || "").localeCompare(String(b.title || "")));
+}
+
+function scoreContextText(text, context = {}) {
+  const haystack = normalizeTextBlock(text || "");
+  if (!haystack) {
+    return 0;
+  }
+
+  const queryTerms = deriveObservationQueryTerms(context);
+  let score = 0;
+  for (const term of queryTerms) {
+    if (haystack.includes(term)) {
+      score += term.length >= 10 ? 4 : 2;
+    }
+  }
+
+  const unresolvedReferences = Array.isArray(context?.recentReferences?.unresolved_references)
+    ? context.recentReferences.unresolved_references
+    : [];
+  if (unresolvedReferences.length) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function deriveObservationQueryTerms(context = {}) {
+  const terms = new Set();
+  const addTermsFromText = (value) => {
+    const normalized = normalizeTextBlock(value || "");
+    if (!normalized) {
+      return;
+    }
+    normalized.split(" ")
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 4)
+      .forEach((token) => terms.add(token));
+  };
+
+  addTermsFromText(context.goal || "");
+  for (const message of Array.isArray(context.conversationContext) ? context.conversationContext : []) {
+    addTermsFromText(message.text || "");
+  }
+  for (const memory of Array.isArray(context.userMemory) ? context.userMemory : []) {
+    addTermsFromText(memory.title || "");
+    addTermsFromText(String(memory.content || "").slice(0, 240));
+  }
+  for (const item of Array.isArray(context.recentReferences?.mentioned_items) ? context.recentReferences.mentioned_items : []) {
+    addTermsFromText(item.title || "");
+    addTermsFromText(item.metadata || "");
+  }
+
+  return [...terms].slice(0, 40);
 }
 
 function compactTabForProvider(tab) {
@@ -2825,7 +3135,9 @@ function compactElementsForProvider(elements, limit) {
     name: element.name || element.text || "",
     text: element.text || "",
     href: element.href || "",
+    destination_url: element.destination_url || "",
     level: element.level || "",
+    nearest_heading: element.nearest_heading || null,
     selector_candidates: compactSelectorsForProvider(element.selector_candidates)
   }));
 }
@@ -4970,28 +5282,112 @@ function buildRequestedOpenLinksPlan(goal, observation, responseLanguage) {
   }
 
   const requestedNames = extractQuotedElementNames(goal);
-  if (requestedNames.length < 2) {
+  const openableCandidates = getOpenableObservationTargets(observation);
+
+  if (requestedNames.length >= 2) {
+    const used = new Set();
+    const matches = [];
+
+    for (const name of requestedNames) {
+      const target = findNamedElement(openableCandidates.filter((item) => !used.has(item.agent_id)), name);
+      if (!target?.href) {
+        return null;
+      }
+      used.add(target.agent_id);
+      matches.push(target);
+    }
+
+    return buildOpenTargetsPlan(goal, matches, responseLanguage, {
+      summary: localText(responseLanguage, "openUrlsInNewTabs", matches.length),
+      reasonIt: "L'utente ha chiesto di aprire piu' link osservati, quindi li apro in nuove schede.",
+      reasonEn: "The user asked to open multiple observed links, so I am opening them in new tabs."
+    });
+  }
+
+  if (!hasPriorMentionReference(goal)) {
     return null;
   }
 
-  const candidates = (observation.links || []).filter((item) => item.agent_id && item.name && item.href);
-  const used = new Set();
-  const matches = [];
-
-  for (const name of requestedNames) {
-    const target = findNamedElement(candidates.filter((item) => !used.has(item.agent_id)), name);
-    if (!target?.href) {
-      return null;
-    }
-    used.add(target.agent_id);
-    matches.push(target);
+  const mentionedTargets = getRecentlyMentionedOpenableTargets(observation);
+  if (!mentionedTargets.length) {
+    return null;
   }
 
+  return buildOpenTargetsPlan(goal, mentionedTargets, responseLanguage, {
+    summary: localText(responseLanguage, "openUrlsInNewTabs", mentionedTargets.length),
+    reasonIt: "Apro in nuove schede gli elementi che avevo menzionato in precedenza e per cui ho una destinazione osservata affidabile.",
+    reasonEn: "Open in new tabs the items previously mentioned that have a reliable observed destination."
+  });
+}
+
+function getOpenableObservationTargets(observation) {
+  const structuredItems = (observation?.structured_items || [])
+    .filter((item) => item.agent_id && item.destination_url)
+    .map((item) => ({
+      agent_id: item.agent_id,
+      role: item.role || "button",
+      name: item.title || item.label || "",
+      href: item.destination_url,
+      selector_candidates: item.selector_candidates || []
+    }));
+  const links = (observation?.links || [])
+    .filter((item) => item.agent_id && item.name && (item.destination_url || item.href))
+    .map((item) => ({
+      ...item,
+      href: item.destination_url || item.href
+    }));
+
+  const merged = [];
+  const used = new Set();
+  for (const target of [...structuredItems, ...links]) {
+    const key = `${target.agent_id}|${target.href}`;
+    if (!target.href || used.has(key)) {
+      continue;
+    }
+    used.add(key);
+    merged.push(target);
+  }
+  return merged;
+}
+
+function getRecentlyMentionedOpenableTargets(observation) {
+  const assistantMessages = [...state.messages]
+    .filter((message) => message.role === "assistant" && String(message.text || "").trim())
+    .slice(-PROVIDER_CONVERSATION_CONTEXT_LIMIT);
+  const candidates = getOpenableObservationTargets(observation);
+  const matches = [];
+  const used = new Set();
+
+  for (const candidate of candidates) {
+    const normalizedName = normalizeElementName(candidate.name);
+    if (!normalizedName) {
+      continue;
+    }
+    const mentioned = assistantMessages.some((message) => normalizeElementName(message.text || "").includes(normalizedName));
+    if (!mentioned) {
+      continue;
+    }
+    const key = `${candidate.agent_id}|${candidate.href}`;
+    if (used.has(key)) {
+      continue;
+    }
+    used.add(key);
+    matches.push(candidate);
+  }
+
+  return matches.slice(0, 6);
+}
+
+function hasPriorMentionReference(goal) {
+  return /\b(those|them|ones|mentioned|earlier|previous|recommend(ed)?|those jobs|those offers|quelle|quelli|quelle offerte|hai menzionato|prima|consigliat[eo]|raccomandat[eo]|second[oa]?|terz[oa]?|quart[oa]?)\b/i.test(String(goal || ""));
+}
+
+function buildOpenTargetsPlan(goal, matches, responseLanguage, copy = {}) {
   return {
     type: "agent_plan",
     goal,
     risk_level: "low",
-    summary_for_user: localText(responseLanguage, "openUrlsInNewTabs", matches.length),
+    summary_for_user: copy.summary || localText(responseLanguage, "openUrlsInNewTabs", matches.length),
     needs_clarification: false,
     requires_confirmation: false,
     will_submit: false,
@@ -5010,8 +5406,8 @@ function buildRequestedOpenLinksPlan(goal, observation, responseLanguage) {
         confidence: 0.9
       },
       reason: responseLanguage === "it"
-        ? "L'utente ha chiesto di aprire piu' link osservati, quindi li apro in nuove schede."
-        : "The user asked to open multiple observed links, so I am opening them in new tabs."
+        ? (copy.reasonIt || "L'utente ha chiesto di aprire piu' link osservati, quindi li apro in nuove schede.")
+        : (copy.reasonEn || "The user asked to open multiple observed links, so I am opening them in new tabs.")
     })),
     uncertain_fields: []
   };
@@ -5028,7 +5424,7 @@ function buildRequestedClickPlan(goal, observation, responseLanguage) {
   }
 
   const preferNewTab = shouldPreferNewTabNavigation(goal);
-  const linkCandidates = (observation.links || []).filter((item) => item.agent_id && item.name && item.href);
+  const linkCandidates = getOpenableObservationTargets(observation);
   const linkTarget = findNamedElement(linkCandidates, wanted);
 
   if (preferNewTab && linkTarget?.href) {
@@ -5392,13 +5788,23 @@ async function maybeSynthesizeResults(plan, results) {
 
   const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
   const selectedHttpProvider = getSelectedHttpProvider();
+  const latestObservation = getLatestObservationFromResults(results);
+  const conversationContext = getRecentConversationForProvider(lastUserMessage);
+  const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
   const buildPayload = (mode = "full") => ({
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
     provider: state.codex.provider,
     model: state.codex.model,
     httpProvider: selectedHttpProvider,
-    observation: compactObservationForSynthesis(getLatestObservationFromResults(results), mode),
+    conversationContext,
+    recentReferences,
+    observation: compactObservationForSynthesis(latestObservation, mode, {
+      goal: lastUserMessage,
+      conversationContext,
+      userMemory: state.userMemory.items,
+      recentReferences
+    }),
     userMemory: getUserMemoryForSynthesis(mode),
     results: compactResultsForSynthesis(results, mode)
   });
@@ -5472,8 +5878,8 @@ function getUserMemoryForSynthesis(mode = "full") {
     }));
 }
 
-function compactObservationForSynthesis(observation, mode = "full") {
-  const compacted = compactObservationForProvider(observation);
+function compactObservationForSynthesis(observation, mode = "full", context = {}) {
+  const compacted = compactObservationForProvider(observation, context);
   if (!compacted) {
     return compacted;
   }
@@ -5514,6 +5920,9 @@ function compactObservationForSynthesis(observation, mode = "full") {
       }))
     })) : [],
     counts: baseObservation.counts,
+    page_outline: compactPageOutlineForProvider(baseObservation.page_outline, 6),
+    structured_items: compactStructuredItemsForProvider(baseObservation.structured_items, context, 8),
+    focused_context: buildFocusedContextForProvider(observation, context, "compact"),
     note: "Observation compacted aggressively for synthesis retry."
   };
 }
@@ -5719,7 +6128,9 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
       title: observation.tab?.title || "",
       url: observation.tab?.url || "",
       visibleTextLength: observation.visibleTextLength || String(observation.visible_text || "").length,
-      counts: observation.counts || null
+      counts: observation.counts || null,
+      page_outline: compactPageOutlineForProvider(observation.page_outline, mode === "compact" ? 4 : 6),
+      structured_items: compactStructuredItemsForProvider(observation.structured_items, {}, mode === "compact" ? 4 : 6)
     };
   }
 

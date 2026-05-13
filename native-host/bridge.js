@@ -2187,6 +2187,9 @@ function buildAgentPrompt(payload, options = {}) {
     "Recent conversation context JSON:",
     JSON.stringify(payload.conversationContext || [], null, 2),
     "",
+    "Recent structured references JSON:",
+    JSON.stringify(payload.recentReferences || {}, null, 2),
+    "",
     "Current page observation available:",
     hasObservation ? "yes" : "no",
     "",
@@ -2198,6 +2201,8 @@ function buildAgentPrompt(payload, options = {}) {
     "",
     "Local attachment context JSON:",
     JSON.stringify(attachments, null, 2),
+    "",
+    "When structured_items or focused_context include destination_url values observed on the page, treat those URLs as authoritative candidates for open_url_new_tab. Prefer those URLs over guessing. If no trustworthy destination URL is present, do not invent one.",
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions or memory proposals are needed."
   ].filter((line) => line !== "").join("\n");
@@ -2214,6 +2219,12 @@ function compactObservationForPrompt(observation = {}) {
     buttons: (observation.buttons || []).slice(0, 80).map(compactElementForPrompt),
     forms: (observation.forms || []).slice(0, 10),
     interactive_elements: (observation.interactive_elements || []).slice(0, 120).map(compactElementForPrompt),
+    counts: observation.counts || null,
+    page_outline: compactPageOutlineForPrompt(observation.page_outline || null),
+    structured_items: (observation.structured_items || []).slice(0, 24).map(compactStructuredItemForPrompt),
+    focused_context: (observation.focused_context || []).slice(0, 12).map(compactFocusedContextForPrompt),
+    content_blocks: (observation.content_blocks || []).slice(0, 16).map(compactFocusedContextForPrompt),
+    note: observation.note || "",
     capturedAt: observation.capturedAt || ""
   };
 }
@@ -2224,8 +2235,60 @@ function compactElementForPrompt(element = {}) {
     role: element.role || "",
     name: element.name || "",
     href: element.href || "",
+    destination_url: element.destination_url || "",
+    nearest_heading: element.nearest_heading || null,
     type: element.type || "",
     selector_candidates: (element.selector_candidates || []).slice(0, 3)
+  };
+}
+
+function compactPageOutlineForPrompt(pageOutline = null) {
+  if (!pageOutline) {
+    return null;
+  }
+
+  return {
+    page_type: pageOutline.page_type || "general",
+    repeated_item_summary: String(pageOutline.repeated_item_summary || "").slice(0, 300),
+    counts: pageOutline.counts || null,
+    sections: (pageOutline.sections || []).slice(0, 10).map((section) => ({
+      section_id: section.section_id || "",
+      title: section.title || "",
+      preview: String(section.preview || "").slice(0, 220),
+      item_count: Number(section.item_count || 0),
+      level: section.level || ""
+    }))
+  };
+}
+
+function compactStructuredItemForPrompt(item = {}) {
+  return {
+    item_id: item.item_id || "",
+    agent_id: item.agent_id || "",
+    role: item.role || "",
+    title: String(item.title || "").slice(0, 220),
+    label: String(item.label || "").slice(0, 220),
+    metadata: String(item.metadata || "").slice(0, 260),
+    text_preview: String(item.text_preview || "").slice(0, 320),
+    destination_url: item.destination_url || item.href || "",
+    href: item.href || "",
+    section_id: item.section_id || "",
+    section_title: item.section_title || "",
+    selector_candidates: (item.selector_candidates || []).slice(0, 3),
+    source_agent_ids: (item.source_agent_ids || []).slice(0, 4)
+  };
+}
+
+function compactFocusedContextForPrompt(block = {}) {
+  return {
+    block_id: block.block_id || "",
+    kind: block.kind || "section",
+    section_id: block.section_id || "",
+    section_title: block.section_title || "",
+    item_id: block.item_id || "",
+    title: String(block.title || "").slice(0, 200),
+    text: String(block.text || "").slice(0, 360),
+    destination_url: block.destination_url || ""
   };
 }
 
@@ -2285,6 +2348,12 @@ function buildSynthesisPrompt(payload) {
     "",
     "Response language:",
     payload.responseLanguage || "same language as the user",
+    "",
+    "Recent conversation context JSON:",
+    JSON.stringify(payload.conversationContext || [], null, 2),
+    "",
+    "Recent structured references JSON:",
+    JSON.stringify(payload.recentReferences || {}, null, 2),
     "",
     "Current page observation JSON:",
     JSON.stringify(payload.observation || {}, null, 2),

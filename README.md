@@ -6,8 +6,8 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 
 - Side panel chat UI
 - Active-tab page observation
-- Full page dump for smaller pages; compacted observation for larger pages
-- DOM, visible text, link, button, and form extraction
+- Full page dump for smaller pages; outline-plus-retrieval compaction for larger pages
+- DOM, visible text, link, button, form, section, and structured item extraction
 - Attachment registration for local context
 - Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, TypeScript, PDF, DOCX, XLSX, and image OCR attachment extraction through the native connector
 - Local user memory stored in `USER_MEMORY.md`, with preview-before-save confirmation
@@ -94,7 +94,9 @@ HTTP providers use `POST /v1/chat/completions`. When selected, observed page con
 
 When `Use streaming responses` is enabled for an HTTP provider, Browser Companion sends `stream: true`, reads SSE responses, and shows live thinking progress in the side panel. Requests time out only when streamed activity stops or the user explicitly stops the request.
 
-For smaller observed pages, Browser Companion can send the full page dump to the provider. Larger pages are compacted automatically to stay within a safer local-model context budget.
+For smaller observed pages, Browser Companion can send the full page dump to the provider. Larger pages are compacted automatically into a page outline, structured items, focused context, and a smaller text dump so important middle-of-page content is less likely to disappear.
+
+Listing-style cards on SPA sites are observed conservatively. When Browser Companion can deterministically recover a canonical destination URL from the DOM, that destination is preserved and can be used for `open_url_new_tab` instead of falling back to a plain button click.
 
 The extension cannot run this PowerShell command before the native host is registered. When the connector is missing, the side panel shows a Copy Command button with the correct extension ID already filled in.
 

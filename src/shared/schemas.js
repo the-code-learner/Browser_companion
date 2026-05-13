@@ -49,6 +49,9 @@ export function createObservation(tab, pageData) {
     buttons: pageData.buttons,
     forms: pageData.forms,
     interactive_elements: pageData.interactiveElements,
+    page_outline: pageData.pageOutline || null,
+    structured_items: pageData.structuredItems || [],
+    content_blocks: pageData.contentBlocks || [],
     capturedAt: new Date().toISOString()
   };
 }
