@@ -11,12 +11,13 @@
     "[contenteditable='true']"
   ].join(",");
   const HEADING_SELECTOR = "h1,h2,h3,[role='heading']";
-  const MAX_VISIBLE_TEXT = 12000;
+  const MAX_VISIBLE_TEXT = 30000;
   const MAX_HEADINGS = 60;
-  const MAX_LINKS = 80;
-  const MAX_BUTTONS = 80;
-  const MAX_INTERACTIVE = 160;
+  const MAX_LINKS = 200;
+  const MAX_BUTTONS = 200;
+  const MAX_INTERACTIVE = 400;
   const MAX_FORMS = 20;
+  const MAX_FORM_FIELDS = 120;
   const MAX_SECTIONS = 12;
   const MAX_STRUCTURED_ITEMS = 36;
   const MAX_CONTENT_BLOCKS = 48;
@@ -24,19 +25,36 @@
   const assignedAgentIds = new Set();
   const elementAgentIds = new WeakMap();
 
-  const headingEntries = collectHeadings();
-  const linkEntries = collectLinks(headingEntries);
-  const buttonEntries = collectButtons(headingEntries);
-  const interactiveEntries = collectInteractiveElements(headingEntries);
-  const forms = getForms();
-  const visibleText = getVisibleText();
+  const rawVisibleText = compactText(document.body?.innerText || "");
+  const headingElements = getVisibleElements(HEADING_SELECTOR);
+  const linkElements = getVisibleElements("a[href]");
+  const buttonElements = getVisibleElements("button,[role='button'],input[type='button'],input[type='submit']");
+  const interactiveElementsRaw = getVisibleElements(INTERACTIVE_SELECTOR);
+  const formElements = Array.from(document.querySelectorAll("form"));
+  const formLikeFields = Array.from(document.querySelectorAll("input,select,textarea,[contenteditable='true']"));
+  const headingEntries = collectHeadings(headingElements);
+  const linkEntries = collectLinks(linkElements, headingEntries);
+  const buttonEntries = collectButtons(buttonElements, headingEntries);
+  const interactiveEntries = collectInteractiveElements(interactiveElementsRaw, headingEntries);
+  const forms = getForms(formElements, formLikeFields);
+  const visibleText = getVisibleText(rawVisibleText);
   const structuredItems = buildStructuredItems(linkEntries, buttonEntries, interactiveEntries, headingEntries);
   const pageOutline = buildPageOutline(visibleText, headingEntries, structuredItems, forms, linkEntries, buttonEntries);
   const contentBlocks = buildContentBlocks(visibleText, pageOutline, structuredItems);
+  const captureMeta = buildCaptureMeta({
+    rawVisibleText,
+    headingElements,
+    linkElements,
+    buttonElements,
+    interactiveElementsRaw,
+    formElements,
+    formLikeFields
+  });
 
   return {
     viewport: getViewport(),
     visibleText,
+    capture_meta: captureMeta,
     headings: headingEntries.map((entry) => entry.model),
     links: linkEntries.map((entry) => entry.model),
     buttons: buttonEntries.map((entry) => entry.model),
@@ -57,13 +75,16 @@
     };
   }
 
-  function getVisibleText() {
-    return compactText(document.body?.innerText || "").slice(0, MAX_VISIBLE_TEXT);
+  function getVisibleElements(selector) {
+    return Array.from(document.querySelectorAll(selector)).filter(isVisible);
   }
 
-  function collectHeadings() {
-    return Array.from(document.querySelectorAll(HEADING_SELECTOR))
-      .filter(isVisible)
+  function getVisibleText(rawText) {
+    return String(rawText || "").slice(0, MAX_VISIBLE_TEXT);
+  }
+
+  function collectHeadings(elements) {
+    return elements
       .slice(0, MAX_HEADINGS)
       .map((element, index) => ({
         element,
@@ -80,23 +101,20 @@
       }));
   }
 
-  function collectLinks(headingEntries) {
-    return Array.from(document.querySelectorAll("a[href]"))
-      .filter(isVisible)
+  function collectLinks(elements, headingEntries) {
+    return elements
       .slice(0, MAX_LINKS)
       .map((element, index) => buildInteractiveEntry(element, "link", index, headingEntries));
   }
 
-  function collectButtons(headingEntries) {
-    return Array.from(document.querySelectorAll("button,[role='button'],input[type='button'],input[type='submit']"))
-      .filter(isVisible)
+  function collectButtons(elements, headingEntries) {
+    return elements
       .slice(0, MAX_BUTTONS)
       .map((element, index) => buildInteractiveEntry(element, "button", index, headingEntries));
   }
 
-  function collectInteractiveElements(headingEntries) {
-    return Array.from(document.querySelectorAll(INTERACTIVE_SELECTOR))
-      .filter(isVisible)
+  function collectInteractiveElements(elements, headingEntries) {
+    return elements
       .slice(0, MAX_INTERACTIVE)
       .map((element, index) => buildInteractiveEntry(element, "el", index, headingEntries));
   }
@@ -144,10 +162,7 @@
     return { element, model };
   }
 
-  function getForms() {
-    const forms = Array.from(document.querySelectorAll("form"));
-    const formLikeFields = Array.from(document.querySelectorAll("input,select,textarea,[contenteditable='true']"));
-
+  function getForms(forms, formLikeFields) {
     if (forms.length === 0 && formLikeFields.length > 0) {
       return [buildFormModel(document.body, "form_1", formLikeFields)];
     }
@@ -162,7 +177,7 @@
     return {
       agent_id: agentId,
       title: inferSectionTitle(container),
-      fields: fields.filter(isVisible).slice(0, 120).map((field, index) => ({
+      fields: fields.filter(isVisible).slice(0, MAX_FORM_FIELDS).map((field, index) => ({
         agent_id: ensureAgentId(field, `${agentId}_field`, index),
         tag: field.tagName.toLowerCase(),
         type: field.getAttribute("type") || field.getAttribute("role") || field.tagName.toLowerCase(),
@@ -176,6 +191,46 @@
         bbox: getBox(field),
         nearby_text: compactText(getNearbyText(field)).slice(0, 240)
       }))
+    };
+  }
+
+  function buildCaptureMeta({
+    rawVisibleText,
+    headingElements,
+    linkElements,
+    buttonElements,
+    interactiveElementsRaw,
+    formElements,
+    formLikeFields
+  }) {
+    const pseudoFormCount = formElements.length === 0 && formLikeFields.length > 0 ? 1 : 0;
+
+    return {
+      limits: {
+        visible_text: MAX_VISIBLE_TEXT,
+        headings: MAX_HEADINGS,
+        links: MAX_LINKS,
+        buttons: MAX_BUTTONS,
+        interactive_elements: MAX_INTERACTIVE,
+        forms: MAX_FORMS,
+        form_fields_per_form: MAX_FORM_FIELDS
+      },
+      estimated_counts: {
+        headings: headingElements.length,
+        links: linkElements.length,
+        buttons: buttonElements.length,
+        interactive_elements: interactiveElementsRaw.length,
+        forms: formElements.length || pseudoFormCount
+      },
+      truncated: {
+        visible_text: rawVisibleText.length > MAX_VISIBLE_TEXT,
+        headings: headingElements.length > MAX_HEADINGS,
+        links: linkElements.length > MAX_LINKS,
+        buttons: buttonElements.length > MAX_BUTTONS,
+        interactive_elements: interactiveElementsRaw.length > MAX_INTERACTIVE,
+        forms: formElements.length > MAX_FORMS
+      },
+      visible_text_length: rawVisibleText.length
     };
   }
 

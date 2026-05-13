@@ -485,7 +485,7 @@ h2 {
   bottom: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 6px;
   align-items: end;
   border: 1px solid var(--line);
@@ -512,16 +512,30 @@ h2 {
   color: var(--ink);
 }
 
+.composer-actions {
+  display: grid;
+  gap: 6px;
+  align-self: stretch;
+}
+
+.composer-submit,
 .composer button[type="submit"] {
+  min-width: 62px;
   color: #ffffff;
   border-color: var(--accent);
   background: var(--accent);
 }
 
 .composer-stop {
+  justify-self: end;
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
   color: var(--ink);
   border-color: var(--line);
-  background: var(--panel-2);
+  background: var(--panel);
+  font-size: 12px;
+  line-height: 1;
 }
 
 @keyframes thinking-dot-fade {
@@ -554,11 +568,20 @@ h2 {
   display: inline-flex;
   min-height: 30px;
   align-items: center;
+  justify-content: center;
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 0 8px;
   background: var(--panel);
   cursor: pointer;
+}
+
+.file-input-icon span {
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
 }
 
 .utility-drawer {

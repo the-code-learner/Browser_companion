@@ -159,8 +159,18 @@ async function initialize() {
   window.addEventListener("beforeunload", stopDevAutoReloadPolling, { once: true });
 }
 
-function render() {
-  const transientInputState = captureTransientInputState();
+function render(options = {}) {
+  const preserveComposer = options.preserveComposer !== false;
+  const transientInputState = preserveComposer
+    ? captureTransientInputState()
+    : {
+        activeId: options.focusComposer ? "chat-input" : "",
+        chatInput: {
+          value: state.composerDraft,
+          selectionStart: state.composerDraft.length,
+          selectionEnd: state.composerDraft.length
+        }
+      };
   app.innerHTML = `
     <section class="topbar">
       <button id="theme-toggle" class="theme-toggle" type="button" title="${escapeHtml(getThemeTitle())}">${escapeHtml(getThemeIcon())}</button>
@@ -790,19 +800,21 @@ function renderComposer() {
     : (state.outboundQueue.length ? `${state.outboundQueue.length} queued` : "");
   const submitLabel = state.isProcessingQueue ? "Queue" : "Send";
   const stopButton = state.isProcessingQueue
-    ? `<button id="stop-processing" type="button" class="composer-stop" ${state.stopRequestInFlight ? "disabled" : ""}>${escapeHtml(state.stopRequestInFlight ? "Stopping..." : "Stop")}</button>`
+    ? `<button id="stop-processing" type="button" class="composer-stop" title="${escapeHtml(state.stopRequestInFlight ? "Stopping" : "Stop")}" aria-label="${escapeHtml(state.stopRequestInFlight ? "Stopping" : "Stop")}" ${state.stopRequestInFlight ? "disabled" : ""}>${state.stopRequestInFlight ? "..." : "&#9632;"}</button>`
     : "";
 
   return `
     <div class="composer-wrap">
       <form id="chat-form" class="composer">
-        <label class="file-input">
+        <label class="file-input file-input-icon" title="Attach file" aria-label="Attach file">
           <input id="attachment-input" type="file" multiple>
-          <span>Attach</span>
+          <span aria-hidden="true">+</span>
         </label>
         <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page">${escapeHtml(state.composerDraft)}</textarea>
-        ${stopButton}
-        <button type="submit">${escapeHtml(submitLabel)}</button>
+        <div class="composer-actions">
+          ${stopButton}
+          <button type="submit" class="composer-submit">${escapeHtml(submitLabel)}</button>
+        </div>
       </form>
       ${queueLabel ? `<p class="composer-meta">${escapeHtml(queueLabel)}</p>` : ""}
     </div>
@@ -2309,7 +2321,7 @@ async function handleChatSubmit(event) {
     planContext: questionContext,
     queueStatus: state.isProcessingQueue ? "queued" : "pending"
   });
-  render();
+  render({ preserveComposer: false, focusComposer: true });
 
   processOutboundQueue();
 }
@@ -5866,17 +5878,47 @@ function isSensitiveField(field) {
 function summarizePageForUser(observation, responseLanguage) {
   const headings = (observation.headings || []).map((heading) => heading.text).filter(Boolean).slice(0, 5);
   const fieldCount = observation.forms.reduce((total, form) => total + form.fields.length, 0);
+  const linkLabel = formatCapturedCount(observation.links.length, observation.capture_meta?.estimated_counts?.links, "link", "link");
+  const buttonLabel = formatCapturedCount(observation.buttons.length, observation.capture_meta?.estimated_counts?.buttons, "pulsante", "pulsanti");
   const headingText = headings.length ? ` Main sections: ${headings.join("; ")}.` : "";
   if (responseLanguage === "it") {
     const italianHeadingText = headings.length ? ` Sezioni principali: ${headings.join("; ")}.` : "";
-    return `Ho osservato la pagina: ${observation.links.length} link, ${observation.buttons.length} pulsanti e ${fieldCount} campi modulo.${italianHeadingText}`;
+    return `Ho osservato la pagina: ${linkLabel}, ${buttonLabel} e ${fieldCount} campi modulo catturati.${italianHeadingText}`;
   }
-  return `I observed the page: ${observation.links.length} links, ${observation.buttons.length} buttons, and ${fieldCount} form fields.${headingText}`;
+  return `I observed the page: ${formatCapturedCount(observation.links.length, observation.capture_meta?.estimated_counts?.links, "link", "links")}, ${formatCapturedCount(observation.buttons.length, observation.capture_meta?.estimated_counts?.buttons, "button", "buttons")}, and ${fieldCount} captured form fields.${headingText}`;
 }
 
 function summarizeObservation(observation) {
   const fieldCount = observation.forms.reduce((total, form) => total + form.fields.length, 0);
-  return `${observation.links.length} links, ${observation.buttons.length} buttons, ${fieldCount} fields, and ${observation.visible_text.length} characters of visible text captured.`;
+  const meta = observation.capture_meta || {};
+  const linkText = formatCapturedCount(observation.links.length, meta.estimated_counts?.links, "link", "links");
+  const buttonText = formatCapturedCount(observation.buttons.length, meta.estimated_counts?.buttons, "button", "buttons");
+  const fieldText = `${fieldCount} fields`;
+  const visibleTextLength = meta.visible_text_length || observation.visible_text.length;
+  const visibleTextText = meta.truncated?.visible_text && visibleTextLength > observation.visible_text.length
+    ? `${observation.visible_text.length}/${visibleTextLength} visible-text chars`
+    : `${observation.visible_text.length} visible-text chars`;
+  const cappedNote = hasObservationCap(meta)
+    ? " Some page content was capped during observe."
+    : "";
+  return `${linkText}, ${buttonText}, ${fieldText}, and ${visibleTextText} captured.${cappedNote}`;
+}
+
+function formatCapturedCount(captured, estimated, singular, plural) {
+  const safeCaptured = Number(captured) || 0;
+  const safeEstimated = Number(estimated) || 0;
+  const label = safeCaptured === 1 ? singular : plural;
+
+  if (safeEstimated > safeCaptured) {
+    return `${safeCaptured}/${safeEstimated} ${label}`;
+  }
+
+  return `${safeCaptured} ${label}`;
+}
+
+function hasObservationCap(meta = {}) {
+  const truncated = meta.truncated || {};
+  return Object.values(truncated).some(Boolean);
 }
 
 function summarizeHttpArtifact(artifact) {
