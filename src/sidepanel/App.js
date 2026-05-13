@@ -1321,11 +1321,14 @@ function ensureSelectedProviderAvailable() {
   }
 
   const selected = getSelectedProviderStatus();
-  const connectedProviders = state.connector.providers.filter((provider) => provider.connected);
+  const existsInList = state.connector.providers.some((provider) => provider.id === state.codex.provider);
 
-  if (!selected.connected && connectedProviders.length) {
-    const codex = connectedProviders.find((provider) => provider.id === "openai-codex");
-    state.codex.provider = (codex || connectedProviders[0]).id;
+  if (!existsInList) {
+    const connectedProviders = state.connector.providers.filter((provider) => provider.connected);
+    if (connectedProviders.length) {
+      const codex = connectedProviders.find((provider) => provider.id === "openai-codex");
+      state.codex.provider = (codex || connectedProviders[0]).id;
+    }
   }
 
   const provider = getSelectedProviderStatus();
@@ -1582,18 +1585,80 @@ async function checkConnector() {
     }
 
     const status = response.envelope.payload;
-    const providers = normalizeProviderStatuses(status.providers || []);
-    const connected = Boolean(status.connected) || providers.some((provider) => provider.connected);
+    let providers = normalizeProviderStatuses(status.providers || []);
     state.connector = {
-      status: connected ? "connected" : status.status,
+      status: status.status,
       message: status.message || "Local connector status received.",
       providers
     };
+    ensureSelectedProviderAvailable();
+    const httpHealthRefreshed = await refreshSelectedHttpProviderHealth();
+    if (httpHealthRefreshed) {
+      providers = normalizeProviderStatuses(status.providers || []);
+      state.connector.providers = providers;
+    }
+    state.connector.status = getSelectedConnectorState().status;
+    state.connector.message = getSelectedConnectorState().message;
     ensureSelectedProviderAvailable();
     render();
   } finally {
     connectorCheckInFlight = false;
   }
+}
+
+async function refreshSelectedHttpProviderHealth() {
+  const provider = getSelectedHttpProvider();
+  if (!provider?.baseUrl) {
+    return false;
+  }
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.HTTP_PROVIDER_TEST, provider));
+  addDebugLog("connector.http_health", {
+    providerId: provider.id,
+    providerName: provider.name || provider.baseUrl,
+    ok: response.ok,
+    error: response.error || "",
+    result: response.envelope?.payload || null
+  }, response.ok
+    ? (response.envelope?.payload?.message || "HTTP provider health checked.")
+    : (response.error || "HTTP provider health check failed."));
+  const targetId = provider.id;
+  const updateProvider = (item) => (item.id === targetId ? {
+    ...item,
+    ...provider,
+    ...(response.ok ? {
+      model: (response.envelope?.payload?.models || []).includes(state.codex.model)
+        ? state.codex.model
+        : (response.envelope?.payload?.models?.[0] || item.model || provider.model),
+      models: response.envelope?.payload?.models || item.models || [],
+      loadedModels: response.envelope?.payload?.loadedModels || [],
+      lastStatus: response.envelope?.payload?.status || "ready",
+      lastMessage: response.envelope?.payload?.message || "HTTP provider test completed."
+    } : {
+      lastStatus: "error",
+      lastMessage: response.error || "HTTP provider test failed."
+    })
+  } : item);
+
+  let touched = false;
+  state.httpProviders = state.httpProviders.map((item) => {
+    const next = updateProvider(item);
+    if (next !== item) {
+      touched = true;
+    }
+    return next;
+  });
+
+  if (state.httpProviderDraft.id === targetId) {
+    state.httpProviderDraft = updateProvider(state.httpProviderDraft);
+    touched = true;
+  }
+
+  if (touched) {
+    await persistProviderSettings();
+  }
+
+  return touched;
 }
 
 async function loadUserMemory() {
@@ -5915,19 +5980,55 @@ function sendRuntimeMessage(message) {
 }
 
 function getConnectorClass() {
-  if (state.connector.status === "connected") return "ok";
-  if (state.connector.status === "unknown" || state.connector.status === "connecting") return "neutral";
+  const selected = getSelectedConnectorState();
+  if (selected.status === "connected") return "ok";
+  if (selected.status === "unknown" || selected.status === "connecting") return "neutral";
   return "warn";
 }
 
 function getConnectorStatusLabel() {
-  if (state.connector.status !== "connected") {
-    return state.connector.status;
-  }
-
+  const selected = getSelectedConnectorState();
   const provider = getSelectedProviderStatus();
   const name = provider?.label || "Provider";
-  return `${name} connected`;
+
+  if (selected.status === "connected") {
+    return `${name} connected`;
+  }
+
+  if (selected.status === "error") {
+    return `${name} offline`;
+  }
+
+  return selected.status;
+}
+
+function getSelectedConnectorState() {
+  const provider = getSelectedProviderStatus();
+  if (provider?.connected) {
+    return {
+      status: "connected",
+      message: provider.message || `${provider.label || "Provider"} is connected.`
+    };
+  }
+
+  if (provider?.status === "error") {
+    return {
+      status: "error",
+      message: provider.message || `${provider.label || "Provider"} is unavailable.`
+    };
+  }
+
+  if (provider?.status) {
+    return {
+      status: provider.status,
+      message: provider.message || state.connector.message || "Connector status received."
+    };
+  }
+
+  return {
+    status: state.connector.status,
+    message: state.connector.message
+  };
 }
 
 function getHighestRisk(policy) {
