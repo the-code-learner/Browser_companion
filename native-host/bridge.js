@@ -2204,6 +2204,7 @@ function buildAgentPrompt(payload, options = {}) {
     "",
     "When structured_items or focused_context include destination_url values observed on the page, treat those URLs as authoritative candidates for open_url_new_tab. Prefer those URLs over guessing. If no trustworthy destination URL is present, do not invent one.",
     "If structured_items or elements include multiple link_candidates, use their visible link text, aria-label, and title to prefer the true details/apply destination over share, bookmark, organization/profile, menu, or decorative icon links.",
+    "If an observed element is expandable or includes a controlled_region summary, treat that as evidence that more page content exists behind a closed menu, listbox, combobox, accordion, or popup. Do not assume the hidden content is already visible; if needed, propose opening one or more specific controls first.",
     "If the user refers to previously mentioned items and the exact destination still cannot be resolved safely, you may return ask_user. Prefer narrow clarification such as exact title, ordinal position, organization/company, section, visible metadata, or whether opening in the current tab is acceptable.",
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions or memory proposals are needed."
@@ -2239,6 +2240,21 @@ function compactElementForPrompt(element = {}) {
     name: element.name || "",
     href: element.href || "",
     destination_url: element.destination_url || "",
+    expandable: Boolean(element.expandable),
+    expanded: typeof element.expanded === "boolean" ? element.expanded : null,
+    popup_role: element.popup_role || "",
+    controlled_region: element.controlled_region
+      ? {
+          id: element.controlled_region.id || "",
+          role: element.controlled_region.role || "",
+          label: String(element.controlled_region.label || "").slice(0, 120),
+          hidden: Boolean(element.controlled_region.hidden),
+          item_count: Number(element.controlled_region.item_count || 0),
+          titles: Array.isArray(element.controlled_region.titles)
+            ? element.controlled_region.titles.slice(0, 6).map((title) => String(title || "").slice(0, 120))
+            : []
+        }
+      : null,
     link_candidates: (element.link_candidates || []).slice(0, 4).map((candidate) => ({
       href: candidate.href || "",
       text: String(candidate.text || "").slice(0, 180),

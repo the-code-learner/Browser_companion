@@ -3226,6 +3226,21 @@ function compactElementsForProvider(elements, limit) {
     text: element.text || "",
     href: element.href || "",
     destination_url: element.destination_url || "",
+    expandable: Boolean(element.expandable),
+    expanded: typeof element.expanded === "boolean" ? element.expanded : null,
+    popup_role: element.popup_role || "",
+    controlled_region: element.controlled_region
+      ? {
+          id: element.controlled_region.id || "",
+          role: element.controlled_region.role || "",
+          label: String(element.controlled_region.label || "").slice(0, 120),
+          hidden: Boolean(element.controlled_region.hidden),
+          item_count: Number(element.controlled_region.item_count || 0),
+          titles: Array.isArray(element.controlled_region.titles)
+            ? element.controlled_region.titles.slice(0, 6).map((title) => String(title || "").slice(0, 120))
+            : []
+        }
+      : null,
     link_candidates: Array.isArray(element.link_candidates)
       ? element.link_candidates.slice(0, 4).map((candidate) => ({
           href: candidate.href || "",

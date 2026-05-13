@@ -105,6 +105,7 @@
     const nearestHeading = findNearestHeading(box, headingEntries);
     const destinationUrl = extractDestinationUrl(element);
     const linkCandidates = extractLinkCandidates(element);
+    const controlledRegion = summarizeControlledRegion(element);
     const textLines = getElementTextLines(element);
     const accessibleName = getAccessibleName(element);
     const nearbyText = compactText(getNearbyText(element)).slice(0, 320);
@@ -117,6 +118,10 @@
       href: role === "link" ? (destinationUrl || element.href || "") : "",
       destination_url: destinationUrl,
       link_candidates: linkCandidates,
+      expandable: isExpandableControl(element, role, controlledRegion),
+      expanded: getExpandedState(element),
+      popup_role: getPopupRole(element, controlledRegion),
+      controlled_region: controlledRegion,
       selector_candidates: getSelectorCandidates(element),
       bbox: box,
       nearest_heading: nearestHeading
@@ -533,6 +538,115 @@
       value: option.value,
       selected: option.selected
     }));
+  }
+
+  function getExpandedState(element) {
+    const raw = element.getAttribute("aria-expanded");
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    return null;
+  }
+
+  function getPopupRole(element, controlledRegion) {
+    const hasPopup = compactText(element.getAttribute("aria-haspopup") || "");
+    if (hasPopup && hasPopup !== "true") {
+      return hasPopup;
+    }
+
+    if (controlledRegion?.role) {
+      return controlledRegion.role;
+    }
+
+    if (element.matches("select")) {
+      return "listbox";
+    }
+
+    return hasPopup ? "popup" : "";
+  }
+
+  function isExpandableControl(element, role, controlledRegion) {
+    if (element.matches("select")) {
+      return true;
+    }
+
+    if (role === "combobox") {
+      return true;
+    }
+
+    if (element.hasAttribute("aria-expanded") || element.hasAttribute("aria-haspopup")) {
+      return true;
+    }
+
+    return Boolean(controlledRegion);
+  }
+
+  function summarizeControlledRegion(element) {
+    const controlledIds = String(element.getAttribute("aria-controls") || "")
+      .split(/\s+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    const nodes = controlledIds
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+
+    if (!nodes.length) {
+      return null;
+    }
+
+    const region = nodes[0];
+    const texts = extractControlledRegionTitles(region);
+    return {
+      id: region.id || "",
+      role: region.getAttribute("role") || region.tagName.toLowerCase(),
+      label: getAccessibleName(region) || compactText(region.getAttribute("aria-label") || region.getAttribute("title") || ""),
+      hidden: !isVisible(region),
+      item_count: countControlledRegionItems(region),
+      titles: texts.slice(0, 6)
+    };
+  }
+
+  function countControlledRegionItems(region) {
+    const selector = [
+      "[role='option']",
+      "[role='menuitem']",
+      "[role='menuitemcheckbox']",
+      "[role='menuitemradio']",
+      "option",
+      "li",
+      "button",
+      "a[href]"
+    ].join(",");
+    return region.querySelectorAll(selector).length;
+  }
+
+  function extractControlledRegionTitles(region) {
+    const selector = [
+      "[role='option']",
+      "[role='menuitem']",
+      "[role='menuitemcheckbox']",
+      "[role='menuitemradio']",
+      "option",
+      "li",
+      "button",
+      "a[href]"
+    ].join(",");
+    const seen = new Set();
+    const titles = [];
+
+    for (const node of Array.from(region.querySelectorAll(selector))) {
+      const text = compactText(getElementRawText(node) || getAccessibleName(node) || "").slice(0, 120);
+      if (!text || seen.has(text)) {
+        continue;
+      }
+      seen.add(text);
+      titles.push(text);
+      if (titles.length >= 8) {
+        break;
+      }
+    }
+
+    return titles;
   }
 
   function getSelectorCandidates(element) {
