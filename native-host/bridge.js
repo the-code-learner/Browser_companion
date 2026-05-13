@@ -19,6 +19,7 @@ const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-i
 const providerModelCache = new Map();
 const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
 const activeRequestControllers = new Map();
+const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -1540,7 +1541,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
     wantsJson,
     useStreaming,
     model: provider.model,
-    timeoutMs: getHttpProviderPositiveInt(provider.timeoutMs, 360000, 1000),
+    timeoutMs: getHttpProviderTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS),
     maxTokens: initialMaxTokens,
     retryMaxTokens,
     requestBody
@@ -1575,7 +1576,7 @@ function saveHttpProviderDebugRequest(payload) {
 }
 
 async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRetryWithoutResponseFormat, options = {}) {
-  const timeoutMs = getHttpProviderPositiveInt(provider.timeoutMs, 360000, 1000);
+  const timeoutMs = getHttpProviderTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS);
   const activityTimeout = createActivityTimeoutController(timeoutMs, options.abortSignal);
   activityTimeout.onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
 
@@ -1632,6 +1633,18 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
 function getHttpProviderPositiveInt(value, fallback, min = 1) {
   const parsed = Number.parseInt(String(value ?? fallback), 10);
   if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function getHttpProviderTimeoutMs(value, fallback = HTTP_PROVIDER_DEFAULT_TIMEOUT_MS) {
+  const raw = String(value ?? fallback).trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
     return fallback;
   }
   return parsed;
@@ -1695,8 +1708,8 @@ function makeProviderAbortError(kind, partialThinking = "", partialContent = "",
   const message = isUserStop
     ? "The request was stopped by the user."
     : (partialThinking
-      ? "The operation was aborted due to timeout after streamed thinking arrived but before the final assistant answer was completed."
-      : "The operation was aborted due to timeout before the final assistant answer was completed.");
+      ? "The operation was aborted due to the inactivity timeout after streamed thinking arrived but before the final assistant answer was completed."
+      : "The operation was aborted due to the inactivity timeout before the final assistant answer was completed.");
   const error = new Error(message);
   error.name = "AbortError";
   error.partialThinking = partialThinking;

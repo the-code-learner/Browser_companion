@@ -2,7 +2,8 @@ import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
 
 const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
 const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
-const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 360000;
+const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
+const HTTP_PROVIDER_LEGACY_TIMEOUT_MS = 360000;
 
 const state = {
   view: "chat",
@@ -638,8 +639,8 @@ function renderHttpProviderSettings() {
             <input id="http-provider-retry-max-tokens" type="number" min="1" step="1" value="${escapeHtml(String(state.httpProviderDraft.retryMaxTokens ?? HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS))}">
           </label>
           <label class="field-stack compact-field">
-            <span>Request timeout (ms)</span>
-            <input id="http-provider-timeout-ms" type="number" min="1000" step="1000" value="${escapeHtml(String(state.httpProviderDraft.timeoutMs ?? HTTP_PROVIDER_DEFAULT_TIMEOUT_MS))}">
+            <span>Inactivity timeout (ms, 0 = disabled)</span>
+            <input id="http-provider-timeout-ms" type="number" min="0" step="1000" value="${escapeHtml(String(state.httpProviderDraft.timeoutMs ?? HTTP_PROVIDER_DEFAULT_TIMEOUT_MS))}">
           </label>
         </div>
         <label class="toggle-row">
@@ -683,7 +684,7 @@ function renderHttpProviderItem(provider) {
     provider.useStreaming ? "streaming on" : "",
     provider.maxTokens ? `max ${provider.maxTokens}` : "",
     provider.retryMaxTokens ? `retry ${provider.retryMaxTokens}` : "",
-    provider.timeoutMs ? `${provider.timeoutMs} ms timeout` : ""
+    provider.timeoutMs > 0 ? `${provider.timeoutMs} ms inactivity timeout` : "no timeout"
   ].filter(Boolean).join(" - ");
 
   return `
@@ -719,6 +720,29 @@ function sanitizePositiveInteger(value, fallback, defaultValue, min = 1) {
     return defaultValue;
   }
   return parsed;
+}
+
+function sanitizeTimeoutMs(value, fallback, defaultValue = HTTP_PROVIDER_DEFAULT_TIMEOUT_MS) {
+  const raw = String(value ?? fallback ?? defaultValue).trim();
+  if (raw === "") {
+    return defaultValue;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function normalizeStoredTimeoutMs(provider = {}) {
+  if (provider.timeoutConfigured === true) {
+    return sanitizeTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS);
+  }
+  const parsed = Number.parseInt(String(provider.timeoutMs ?? ""), 10);
+  if (parsed === HTTP_PROVIDER_LEGACY_TIMEOUT_MS) {
+    return HTTP_PROVIDER_DEFAULT_TIMEOUT_MS;
+  }
+  return sanitizeTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS);
 }
 
 function renderPrivacySettings() {
@@ -2076,11 +2100,10 @@ function readHttpProviderDraft() {
     state.httpProviderDraft.retryMaxTokens,
     HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS
   );
-  const timeoutMs = sanitizePositiveInteger(
+  const timeoutMs = sanitizeTimeoutMs(
     document.getElementById("http-provider-timeout-ms")?.value,
     state.httpProviderDraft.timeoutMs,
-    HTTP_PROVIDER_DEFAULT_TIMEOUT_MS,
-    1000
+    HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
   );
   return {
     ...state.httpProviderDraft,
@@ -2095,6 +2118,7 @@ function readHttpProviderDraft() {
     maxTokens,
     retryMaxTokens,
     timeoutMs,
+    timeoutConfigured: timeoutMs > 0,
     models: state.httpProviderDraft.models?.length
       ? Array.from(new Set([...state.httpProviderDraft.models, ...(model ? [model] : [])]))
       : (model ? [model] : []),
@@ -2111,7 +2135,7 @@ function editHttpProvider(id) {
     ...provider,
     maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
     retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
-    timeoutMs: sanitizePositiveInteger(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, 1000)
+    timeoutMs: normalizeStoredTimeoutMs(provider)
   };
   render();
 }
@@ -6558,7 +6582,8 @@ async function restoreProviderSettings() {
       useStreaming: Boolean(provider.useStreaming),
       maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
       retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
-      timeoutMs: sanitizePositiveInteger(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS, 1000)
+      timeoutMs: normalizeStoredTimeoutMs(provider),
+      timeoutConfigured: normalizeStoredTimeoutMs(provider) > 0
     }))
     : [];
   state.codex = {
