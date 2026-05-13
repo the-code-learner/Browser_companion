@@ -104,6 +104,7 @@
     const box = getBox(element);
     const nearestHeading = findNearestHeading(box, headingEntries);
     const destinationUrl = extractDestinationUrl(element);
+    const linkCandidates = extractLinkCandidates(element);
     const textLines = getElementTextLines(element);
     const accessibleName = getAccessibleName(element);
     const nearbyText = compactText(getNearbyText(element)).slice(0, 320);
@@ -115,6 +116,7 @@
       text: textLines.join(" ").slice(0, 320),
       href: role === "link" ? (destinationUrl || element.href || "") : "",
       destination_url: destinationUrl,
+      link_candidates: linkCandidates,
       selector_candidates: getSelectorCandidates(element),
       bbox: box,
       nearest_heading: nearestHeading
@@ -213,6 +215,13 @@
     const box = model.bbox || getBox(element);
     const nearestHeading = findNearestHeading(box, headingEntries);
     const preview = compactText(textLines.join(" ").trim() || model.nearby_text || model.name || "").slice(0, 400);
+    const container = findStructuredItemContainer(element);
+    const linkCandidates = extractLinkCandidates(container || element);
+    const preferredDestination = choosePreferredLinkCandidate(linkCandidates, {
+      title,
+      metadata,
+      preview
+    }) || model.destination_url || model.href || "";
 
     if (!title || title.length < 8) {
       return null;
@@ -226,8 +235,9 @@
       label: model.name || title,
       metadata: metadata.slice(0, 240),
       text_preview: preview,
-      destination_url: model.destination_url || model.href || "",
+      destination_url: preferredDestination,
       href: model.href || "",
+      link_candidates: linkCandidates,
       section_id: nearestHeading ? `section_${nearestHeading.agent_id}` : "section_root",
       section_title: nearestHeading?.name || nearestHeading?.text || document.title || "Current page",
       selector_candidates: model.selector_candidates || [],
@@ -614,9 +624,12 @@
       return normalizePossibleUrl(ancestorLink.href);
     }
 
-    const descendantLink = element.querySelector?.("a[href]");
-    if (descendantLink?.href) {
-      return normalizePossibleUrl(descendantLink.href);
+    const preferredCandidate = choosePreferredLinkCandidate(extractLinkCandidates(element), {
+      title: getAccessibleName(element),
+      metadata: compactText(getNearbyText(element)).slice(0, 220)
+    });
+    if (preferredCandidate) {
+      return preferredCandidate;
     }
 
     const attrCandidate = extractAttributeUrlCandidate(element);
@@ -630,6 +643,90 @@
     }
 
     return "";
+  }
+
+  function extractLinkCandidates(element) {
+    if (!element) {
+      return [];
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    const container = findStructuredItemContainer(element) || element;
+    const nodes = [];
+
+    if (element.matches?.("a[href]")) {
+      nodes.push(element);
+    }
+    if (container.closest?.("a[href]")) {
+      nodes.push(container.closest("a[href]"));
+    }
+    nodes.push(...Array.from(container.querySelectorAll?.("a[href]") || []));
+
+    for (const node of nodes) {
+      const href = normalizePossibleUrl(node?.href || node?.getAttribute?.("href") || "");
+      if (!href) {
+        continue;
+      }
+      const text = compactText(getElementRawText(node) || getAccessibleName(node) || "").slice(0, 220);
+      const ariaLabel = compactText(node.getAttribute?.("aria-label") || "").slice(0, 160);
+      const title = compactText(node.getAttribute?.("title") || "").slice(0, 160);
+      const key = `${href}|${text}|${ariaLabel}|${title}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      candidates.push({
+        href,
+        text,
+        aria_label: ariaLabel,
+        title,
+        role: node.getAttribute?.("role") || "link"
+      });
+    }
+
+    return candidates.slice(0, 8);
+  }
+
+  function findStructuredItemContainer(element) {
+    if (!element) {
+      return null;
+    }
+
+    return element.closest?.("article,li,[role='article'],[data-testid],section,div") || element.parentElement || element;
+  }
+
+  function choosePreferredLinkCandidate(candidates, context = {}) {
+    const items = Array.isArray(candidates) ? candidates : [];
+    if (!items.length) {
+      return "";
+    }
+
+    const titleKey = normalizeTokenKey(context.title || "");
+    const metadataKey = normalizeTokenKey(context.metadata || "");
+    const previewKey = normalizeTokenKey(context.preview || "");
+    const ctaPattern = /\b(view|details|detail|opportunity|apply|application|job|role|learn more|open|read more|view opportunity details|vedi|dettagli|offerta|candid|apri|scopri)\b/i;
+    const weakPattern = /\b(share|copy|bookmark|save|feedback|expand|collapse|menu|organization|profile|open roles|largest funder)\b/i;
+
+    return items
+      .map((candidate) => {
+        const combined = compactText([candidate.text, candidate.aria_label, candidate.title].filter(Boolean).join(" "));
+        const normalized = normalizeTokenKey(combined);
+        let score = 0;
+        if (ctaPattern.test(combined)) score += 8;
+        if (weakPattern.test(combined)) score -= 4;
+        if (titleKey && normalized.includes(titleKey)) score += 5;
+        if (metadataKey && metadataKey.length >= 10 && normalized.includes(metadataKey)) score += 2;
+        if (previewKey && previewKey.length >= 10 && previewKey.includes(normalized)) score += 1;
+        if (!combined) score += 1;
+        return {
+          href: candidate.href,
+          score,
+          textLength: combined.length
+        };
+      })
+      .sort((a, b) => b.score - a.score || b.textLength - a.textLength)
+      .map((entry) => entry.href)[0] || "";
   }
 
   function extractAttributeUrlCandidate(element) {

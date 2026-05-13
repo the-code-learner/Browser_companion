@@ -2203,6 +2203,8 @@ function buildAgentPrompt(payload, options = {}) {
     JSON.stringify(attachments, null, 2),
     "",
     "When structured_items or focused_context include destination_url values observed on the page, treat those URLs as authoritative candidates for open_url_new_tab. Prefer those URLs over guessing. If no trustworthy destination URL is present, do not invent one.",
+    "If structured_items or elements include multiple link_candidates, use their visible link text, aria-label, and title to prefer the true details/apply destination over share, bookmark, organization/profile, menu, or decorative icon links.",
+    "If the user refers to previously mentioned items and the exact destination still cannot be resolved safely, you may return ask_user. Prefer narrow clarification such as exact title, ordinal position, organization/company, section, visible metadata, or whether opening in the current tab is acceptable.",
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions or memory proposals are needed."
   ].filter((line) => line !== "").join("\n");
@@ -2236,6 +2238,12 @@ function compactElementForPrompt(element = {}) {
     name: element.name || "",
     href: element.href || "",
     destination_url: element.destination_url || "",
+    link_candidates: (element.link_candidates || []).slice(0, 4).map((candidate) => ({
+      href: candidate.href || "",
+      text: String(candidate.text || "").slice(0, 180),
+      aria_label: String(candidate.aria_label || "").slice(0, 120),
+      title: String(candidate.title || "").slice(0, 120)
+    })),
     nearest_heading: element.nearest_heading || null,
     type: element.type || "",
     selector_candidates: (element.selector_candidates || []).slice(0, 3)
@@ -2271,6 +2279,12 @@ function compactStructuredItemForPrompt(item = {}) {
     metadata: String(item.metadata || "").slice(0, 260),
     text_preview: String(item.text_preview || "").slice(0, 320),
     destination_url: item.destination_url || item.href || "",
+    link_candidates: (item.link_candidates || []).slice(0, 6).map((candidate) => ({
+      href: candidate.href || "",
+      text: String(candidate.text || "").slice(0, 180),
+      aria_label: String(candidate.aria_label || "").slice(0, 120),
+      title: String(candidate.title || "").slice(0, 120)
+    })),
     href: item.href || "",
     section_id: item.section_id || "",
     section_title: item.section_title || "",

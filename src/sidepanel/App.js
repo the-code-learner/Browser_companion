@@ -2949,6 +2949,14 @@ function compactStructuredItemsForProvider(items = [], context = {}, limit = PRO
     metadata: String(item.metadata || "").slice(0, 260),
     text_preview: String(item.text_preview || "").slice(0, 320),
     destination_url: item.destination_url || item.href || "",
+    link_candidates: Array.isArray(item.link_candidates)
+      ? item.link_candidates.slice(0, 6).map((candidate) => ({
+          href: candidate.href || "",
+          text: String(candidate.text || "").slice(0, 180),
+          aria_label: String(candidate.aria_label || "").slice(0, 120),
+          title: String(candidate.title || "").slice(0, 120)
+        }))
+      : [],
     href: item.href || "",
     section_id: item.section_id || "",
     section_title: item.section_title || "",
@@ -3136,6 +3144,14 @@ function compactElementsForProvider(elements, limit) {
     text: element.text || "",
     href: element.href || "",
     destination_url: element.destination_url || "",
+    link_candidates: Array.isArray(element.link_candidates)
+      ? element.link_candidates.slice(0, 4).map((candidate) => ({
+          href: candidate.href || "",
+          text: String(candidate.text || "").slice(0, 180),
+          aria_label: String(candidate.aria_label || "").slice(0, 120),
+          title: String(candidate.title || "").slice(0, 120)
+        }))
+      : [],
     level: element.level || "",
     nearest_heading: element.nearest_heading || null,
     selector_candidates: compactSelectorsForProvider(element.selector_candidates)
@@ -5322,19 +5338,19 @@ function buildRequestedOpenLinksPlan(goal, observation, responseLanguage) {
 
 function getOpenableObservationTargets(observation) {
   const structuredItems = (observation?.structured_items || [])
-    .filter((item) => item.agent_id && item.destination_url)
+    .filter((item) => item.agent_id && (item.destination_url || chooseBestObservedLinkCandidate(item.link_candidates)))
     .map((item) => ({
       agent_id: item.agent_id,
       role: item.role || "button",
       name: item.title || item.label || "",
-      href: item.destination_url,
+      href: item.destination_url || chooseBestObservedLinkCandidate(item.link_candidates),
       selector_candidates: item.selector_candidates || []
     }));
   const links = (observation?.links || [])
-    .filter((item) => item.agent_id && item.name && (item.destination_url || item.href))
+    .filter((item) => item.agent_id && item.name && (item.destination_url || item.href || chooseBestObservedLinkCandidate(item.link_candidates)))
     .map((item) => ({
       ...item,
-      href: item.destination_url || item.href
+      href: item.destination_url || item.href || chooseBestObservedLinkCandidate(item.link_candidates)
     }));
 
   const merged = [];
@@ -5348,6 +5364,29 @@ function getOpenableObservationTargets(observation) {
     merged.push(target);
   }
   return merged;
+}
+
+function chooseBestObservedLinkCandidate(candidates) {
+  const items = Array.isArray(candidates) ? candidates : [];
+  const ctaPattern = /\b(view|details|detail|opportunity|apply|application|job|role|learn more|open|read more|view opportunity details|vedi|dettagli|offerta|candid|apri|scopri)\b/i;
+  const weakPattern = /\b(share|copy|bookmark|save|feedback|expand|collapse|menu|organization|profile|open roles|largest funder)\b/i;
+
+  return items
+    .map((candidate) => {
+      const text = [candidate.text, candidate.aria_label, candidate.title].filter(Boolean).join(" ").trim();
+      let score = 0;
+      if (ctaPattern.test(text)) score += 8;
+      if (weakPattern.test(text)) score -= 4;
+      if (!text) score += 1;
+      return {
+        href: candidate.href || "",
+        score,
+        textLength: text.length
+      };
+    })
+    .filter((candidate) => candidate.href)
+    .sort((a, b) => b.score - a.score || b.textLength - a.textLength)
+    .map((candidate) => candidate.href)[0] || "";
 }
 
 function getRecentlyMentionedOpenableTargets(observation) {
