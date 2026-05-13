@@ -522,11 +522,6 @@ function renderCurrentPageSettings() {
 }
 
 function getObserveButtonText() {
-  const summary = String(state.page.summary || "");
-  if (state.page.status === "error" && /site access|Chrome could not show|not granted/i.test(summary)) {
-    return "Grant Site Access";
-  }
-
   if (state.page.status === "observing") {
     return "Observing...";
   }

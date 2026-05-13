@@ -44,7 +44,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 4. Select this project folder.
 5. Open a normal web page and click the Browser Companion extension icon.
 6. If you change extension files during development, click Reload for the extension in `chrome://extensions`.
-7. When observing a new site, approve the site access prompt for that origin if Chrome shows it. If access is still missing, the Observe button changes to `Grant Site Access`.
+7. When observing a new site, approve the site access prompt for that origin if Chrome shows it. The `Observe` action itself will request site access when needed; Chrome still controls and confirms the permission prompt.
 
 ## Development
 
