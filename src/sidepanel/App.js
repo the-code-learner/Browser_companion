@@ -70,6 +70,7 @@ const state = {
     }
   ],
   actionNotes: [],
+  recentActions: [],
   accessibleTabs: {},
   pendingPlan: null,
   pendingPlanContext: null,
@@ -138,6 +139,7 @@ const PROVIDER_SELECTOR_LIMIT = 3;
 const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
 const PROVIDER_CONVERSATION_CONTEXT_LIMIT = 8;
 const PROVIDER_CONVERSATION_TEXT_LIMIT = 1200;
+const PROVIDER_RECENT_ACTION_LIMIT = 8;
 const PROVIDER_SECTION_LIMIT = 8;
 const PROVIDER_STRUCTURED_ITEM_LIMIT = 18;
 const PROVIDER_FOCUSED_CONTEXT_LIMIT = 10;
@@ -2807,6 +2809,7 @@ async function getAgentResult(goal, options = {}) {
     const runtimeContext = await buildRuntimeContext(goal, options);
     const conversationContext = getRecentConversationForProvider(goal);
     const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
+    const recentActions = getRecentActionsForProvider();
     const observationForRequest = compactObservationForProvider(rawObservation, {
       goal,
       conversationContext,
@@ -2822,6 +2825,7 @@ async function getAgentResult(goal, options = {}) {
       runtimeContext,
       conversationContext,
       recentReferences,
+      recentActions,
       observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
@@ -3026,6 +3030,21 @@ function getRecentReferencesForProvider(currentGoal, observation, conversationCo
     mentioned_items: mentionedItems.slice(0, PROVIDER_RECENT_REFERENCE_LIMIT),
     unresolved_references: unresolvedReferences
   };
+}
+
+function getRecentActionsForProvider() {
+  return (Array.isArray(state.recentActions) ? state.recentActions : [])
+    .slice(0, PROVIDER_RECENT_ACTION_LIMIT)
+    .map((entry) => ({
+      action_id: entry.action_id || "",
+      action_type: entry.action_type || "",
+      status: entry.status || "",
+      log_message: entry.log_message || "",
+      target_verified: Boolean(entry.target_verified),
+      page_changed: Boolean(entry.page_changed),
+      createdAt: entry.createdAt || "",
+      artifact: entry.artifact || null
+    }));
 }
 
 function getObservationForContext(context) {
@@ -3981,6 +4000,7 @@ async function executeActionPlan(plan, options = {}) {
   }
 
   const results = response.envelope.payload.results || [];
+  rememberRecentActionResults(normalizedPlan, results);
   rememberActionResultTabs(results);
   results.forEach((result) => state.activity.unshift(result.log_message));
   addActionNote("Browser action result", results.map((result) => `${result.status}: ${result.log_message}`));
@@ -4489,6 +4509,115 @@ function rememberActionResultTabs(results) {
       : result?.artifact?.observation;
     rememberObservedTab(observation, "action-artifact");
   });
+}
+
+function rememberRecentActionResults(plan, results) {
+  const actionIndex = new Map(
+    (Array.isArray(plan?.actions) ? plan.actions : [])
+      .filter((action) => action?.id)
+      .map((action) => [action.id, action])
+  );
+  const summarized = (Array.isArray(results) ? results : [])
+    .map((result) => summarizeRecentActionResult(result, actionIndex.get(result?.action_id)))
+    .filter(Boolean);
+
+  if (!summarized.length) {
+    return;
+  }
+
+  state.recentActions = dedupeRecentActions([
+    ...summarized,
+    ...(Array.isArray(state.recentActions) ? state.recentActions : [])
+  ]).slice(0, 24);
+}
+
+function summarizeRecentActionResult(result, action = null) {
+  if (!result) {
+    return null;
+  }
+
+  const artifact = summarizeRecentActionArtifact(result.artifact);
+  const logMessage = String(result.log_message || "").trim();
+  if (!logMessage && !artifact && !result.action_id) {
+    return null;
+  }
+
+  return {
+    action_id: result.action_id || "",
+    action_type: action?.type || result.type || "",
+    status: result.status || "",
+    log_message: logMessage,
+    target_verified: Boolean(result.target_verified),
+    page_changed: Boolean(result.page_changed),
+    createdAt: new Date().toISOString(),
+    artifact
+  };
+}
+
+function summarizeRecentActionArtifact(artifact) {
+  if (!artifact || typeof artifact !== "object") {
+    return null;
+  }
+
+  if (artifact.kind === "tab_opened") {
+    return {
+      kind: artifact.kind,
+      url: artifact.url || "",
+      tabId: artifact.tabId || null
+    };
+  }
+
+  if (artifact.kind === "page_observation") {
+    return {
+      kind: artifact.kind,
+      url: artifact.observation?.tab?.url || "",
+      title: artifact.observation?.tab?.title || ""
+    };
+  }
+
+  if (artifact.kind === "http_response") {
+    return {
+      kind: artifact.kind,
+      url: artifact.finalUrl || artifact.url || "",
+      statusCode: artifact.statusCode || null
+    };
+  }
+
+  if (artifact.kind === "web_search") {
+    return {
+      kind: artifact.kind,
+      query: artifact.query || "",
+      resultCount: Array.isArray(artifact.results) ? artifact.results.length : 0
+    };
+  }
+
+  return {
+    kind: artifact.kind || "",
+    url: artifact.url || "",
+    title: artifact.title || ""
+  };
+}
+
+function dedupeRecentActions(entries) {
+  const seen = new Set();
+  const output = [];
+
+  for (const entry of entries) {
+    const key = JSON.stringify({
+      action_id: entry.action_id || "",
+      action_type: entry.action_type || "",
+      status: entry.status || "",
+      log_message: entry.log_message || "",
+      artifact: entry.artifact || null
+    });
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(entry);
+  }
+
+  return output;
 }
 
 function getRecentAccessibleTabs(currentTabId) {
@@ -6111,6 +6240,7 @@ async function maybeSynthesizeResults(plan, results) {
   }
   const conversationContext = getRecentConversationForProvider(lastUserMessage);
   const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
+  const recentActions = getRecentActionsForProvider();
   const buildPayload = (mode = "full") => ({
     goal: lastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
@@ -6119,6 +6249,7 @@ async function maybeSynthesizeResults(plan, results) {
     httpProvider: selectedHttpProvider,
     conversationContext,
     recentReferences,
+    recentActions,
     observation: compactObservationForSynthesis(latestObservation, mode, {
       goal: lastUserMessage,
       conversationContext,
@@ -6671,6 +6802,7 @@ async function restoreSession() {
   state.attachments = session.attachments || [];
   state.messages = session.messages || state.messages;
   state.actionNotes = session.actionNotes || [];
+  state.recentActions = Array.isArray(session.recentActions) ? session.recentActions : [];
   state.accessibleTabs = session.accessibleTabs || {};
   state.sessionApprovals = Array.isArray(session.sessionApprovals) ? session.sessionApprovals : [];
   state.activity = session.activity || [];
@@ -6729,6 +6861,7 @@ function persistSession() {
       attachments: state.attachments,
       messages: state.messages.slice(-30),
       actionNotes: state.actionNotes.slice(-80),
+      recentActions: state.recentActions.slice(0, 24),
       accessibleTabs: Object.fromEntries(Object.entries(state.accessibleTabs || {}).slice(0, 12)),
       sessionApprovals: state.sessionApprovals.slice(-60),
       activity: state.activity.slice(0, 80),
@@ -6769,6 +6902,7 @@ function clearSession() {
   state.sessionApprovals = [];
   state.confirmationText = "";
   state.actionNotes = [];
+  state.recentActions = [];
   state.debugLogs = [];
   state.activity = ["Local session cleared."];
   chrome.storage.local.remove("browserCompanionSession");
