@@ -2519,7 +2519,7 @@ async function processQueuedMessage(item) {
     }
   }
 
-  const memoryRequest = state.connector.status === "connected" ? null : parseDirectMemoryRequest(text);
+  const memoryRequest = isSelectedProviderConnected() ? null : parseDirectMemoryRequest(text);
   if (memoryRequest) {
     const memoryItem = memoryRequest.synthesize
       ? await synthesizeMemoryRequest(memoryRequest)
@@ -2794,7 +2794,7 @@ async function getAgentResult(goal, options = {}) {
     return navigationPlan;
   }
 
-  if (state.connector.status === "connected") {
+  if (isSelectedProviderConnected()) {
     const needsPageRecovery = !isSimpleConversationalMessage(goal);
     let rawObservation = getObservationForContext(options.planContext);
     if (!rawObservation && needsPageRecovery) {
@@ -4942,7 +4942,7 @@ function parseDirectMemoryRequest(text) {
 async function synthesizeMemoryRequest(intent) {
   const fallback = buildFallbackMemorySynthesis(intent);
 
-  if (state.connector.status !== "connected") {
+  if (!isSelectedProviderConnected()) {
     return fallback;
   }
 
@@ -6094,7 +6094,7 @@ function formatHttpBodyPreview(artifact) {
 async function maybeSynthesizeResults(plan, results) {
   const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation"].includes(result.artifact?.kind));
 
-  if (!hasResearchArtifact || state.connector.status !== "connected") {
+  if (!hasResearchArtifact || !isSelectedProviderConnected()) {
     addDebugLog("provider.synthesis.skipped", {
       hasResearchArtifact,
       connectorStatus: state.connector.status,
@@ -6829,6 +6829,10 @@ function getSelectedConnectorState() {
     status: state.connector.status,
     message: state.connector.message
   };
+}
+
+function isSelectedProviderConnected() {
+  return getSelectedConnectorState().status === "connected";
 }
 
 function getHighestRisk(policy) {
