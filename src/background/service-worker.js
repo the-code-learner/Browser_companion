@@ -476,10 +476,13 @@ async function executeActionPlan(plan) {
     throw new Error("No active tab is available.");
   }
 
-  assertSupportedTab(tab);
-
   const results = [];
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const requiresCurrentTabAccess = actions.some((action) => usesCurrentActiveTabContext(action));
+
+  if (requiresCurrentTabAccess) {
+    assertSupportedTab(tab);
+  }
 
   for (const action of actions) {
     if (needsTabScript(action)) {
@@ -535,10 +538,21 @@ async function ensureActionScripts(tabId) {
   });
 }
 
+function usesCurrentActiveTabContext(action) {
+  return ![
+    "open_url",
+    "open_url_new_tab",
+    "observe_known_tab",
+    "http_request",
+    "web_search"
+  ].includes(action?.type);
+}
+
 function needsTabScript(action) {
   return ![
     "open_url",
     "open_url_new_tab",
+    "observe_known_tab",
     "http_request",
     "web_search",
     "go_back",
@@ -598,6 +612,53 @@ async function ensureTabOriginPermission(tab) {
 async function executeBrowserLevelAction(tab, action) {
   if (action?.type === "observe_page" || action?.type === "get_visible_text" || action?.type === "get_links" || action?.type === "get_buttons" || action?.type === "get_forms" || action?.type === "get_dom_snapshot") {
     return tryObserveTabForAction(tab, action);
+  }
+
+  if (action?.type === "observe_known_tab") {
+    const tabId = Number.parseInt(String(action.value || action.tabId || action.target?.agent_id || ""), 10);
+    if (!Number.isInteger(tabId)) {
+      return {
+        type: "execution_result",
+        action_id: action.id || action.type,
+        status: "error",
+        target_verified: false,
+        page_changed: false,
+        validation_messages: [],
+        log_message: "A valid tab ID is required to observe a known tab."
+      };
+    }
+
+    try {
+      const targetTab = await chrome.tabs.get(tabId);
+      assertSupportedTab(targetTab);
+      const permission = await ensureTabOriginPermission(targetTab);
+      if (!permission.ok) {
+        return {
+          type: "execution_result",
+          action_id: action.id || action.type,
+          status: "error",
+          target_verified: false,
+          page_changed: false,
+          validation_messages: [],
+          log_message: permission.error
+        };
+      }
+      await waitForTabSettled(targetTab.id);
+      return tryObserveTabForAction(targetTab, action, {
+        successMessage: `Observed known tab ${targetTab.url || targetTab.title || tabId}.`,
+        errorMessage: `Could not observe known tab ${tabId}.`
+      });
+    } catch (error) {
+      return {
+        type: "execution_result",
+        action_id: action.id || action.type,
+        status: "error",
+        target_verified: false,
+        page_changed: false,
+        validation_messages: [],
+        log_message: error.message || `Could not access known tab ${tabId}.`
+      };
+    }
   }
 
   if (action?.type === "capture_viewport") {
@@ -791,7 +852,7 @@ async function executeBrowserLevelAction(tab, action) {
   return null;
 }
 
-async function tryObserveTabForAction(tab, action) {
+async function tryObserveTabForAction(tab, action, options = {}) {
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -827,8 +888,10 @@ async function tryObserveTabForAction(tab, action) {
       },
       validation_messages: [],
       log_message: googleDocText
-        ? `Observed the active tab and fetched Google Docs text from ${googleDocText.source}.`
-        : "Observed the active tab."
+        ? (options.successMessage
+            ? `${options.successMessage} Fetched Google Docs text from ${googleDocText.source}.`
+            : `Observed the active tab and fetched Google Docs text from ${googleDocText.source}.`)
+        : (options.successMessage || "Observed the active tab.")
     };
   } catch (error) {
     return {
@@ -838,7 +901,7 @@ async function tryObserveTabForAction(tab, action) {
       target_verified: false,
       page_changed: false,
       validation_messages: [],
-      log_message: error.message || "Could not observe the active tab."
+      log_message: error.message || options.errorMessage || "Could not observe the active tab."
     };
   }
 }

@@ -160,6 +160,7 @@
         "type": {
           "enum": [
             "observe_page",
+            "observe_known_tab",
             "get_visible_text",
             "get_dom_snapshot",
             "get_forms",

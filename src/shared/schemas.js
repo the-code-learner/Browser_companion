@@ -1,5 +1,6 @@
 export const ACTION_TYPES = Object.freeze({
   OBSERVE_PAGE: "observe_page",
+  OBSERVE_KNOWN_TAB: "observe_known_tab",
   GET_VISIBLE_TEXT: "get_visible_text",
   GET_DOM_SNAPSHOT: "get_dom_snapshot",
   GET_FORMS: "get_forms",

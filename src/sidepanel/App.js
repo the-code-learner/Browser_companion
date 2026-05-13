@@ -140,6 +140,7 @@ const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
 const PROVIDER_CONVERSATION_CONTEXT_LIMIT = 8;
 const PROVIDER_CONVERSATION_TEXT_LIMIT = 1200;
 const PROVIDER_RECENT_ACTION_LIMIT = 8;
+const PROVIDER_RECENT_TAB_LIMIT = 8;
 const PROVIDER_SECTION_LIMIT = 8;
 const PROVIDER_STRUCTURED_ITEM_LIMIT = 18;
 const PROVIDER_FOCUSED_CONTEXT_LIMIT = 10;
@@ -2807,6 +2808,7 @@ async function getAgentResult(goal, options = {}) {
 
     const selectedHttpProvider = getSelectedHttpProvider();
     const runtimeContext = await buildRuntimeContext(goal, options);
+    const recentTabs = await getRecentTabsForProvider();
     const conversationContext = getRecentConversationForProvider(goal);
     const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
     const recentActions = getRecentActionsForProvider();
@@ -2825,6 +2827,7 @@ async function getAgentResult(goal, options = {}) {
       runtimeContext,
       conversationContext,
       recentReferences,
+      recentTabs,
       recentActions,
       observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
@@ -3044,6 +3047,29 @@ function getRecentActionsForProvider() {
       page_changed: Boolean(entry.page_changed),
       createdAt: entry.createdAt || "",
       artifact: entry.artifact || null
+    }));
+}
+
+async function getRecentTabsForProvider() {
+  const currentTab = await getCurrentActiveTab().catch(() => null);
+  if (currentTab) {
+    rememberActiveTab(currentTab);
+  }
+
+  return getRecentAccessibleTabs(currentTab?.id || null)
+    .slice(0, PROVIDER_RECENT_TAB_LIMIT)
+    .map((tab) => ({
+      tabId: tab.tabId || null,
+      title: tab.title || "",
+      url: tab.url || "",
+      source: tab.source || "",
+      isCurrent: Boolean(tab.isCurrent),
+      lastObservedAt: tab.lastObservedAt || "",
+      lastActiveAt: tab.lastActiveAt || "",
+      visibleTextLength: tab.visibleTextLength || 0,
+      links: tab.links || 0,
+      buttons: tab.buttons || 0,
+      lastActionLog: tab.lastActionLog || ""
     }));
 }
 
@@ -4504,11 +4530,39 @@ function rememberActiveTab(tab) {
 
 function rememberActionResultTabs(results) {
   results.forEach((result) => {
+    if (result?.artifact?.kind === "tab_opened") {
+      rememberOpenedTab(result.artifact, result);
+      return;
+    }
+
     const observation = result?.artifact?.kind === "page_observation"
       ? result.artifact.observation
       : result?.artifact?.observation;
     rememberObservedTab(observation, "action-artifact");
   });
+}
+
+function rememberOpenedTab(artifact, result = null) {
+  if (!artifact?.tabId && !artifact?.url) {
+    return;
+  }
+
+  const id = String(artifact.tabId || normalizeUrlForContext(artifact.url));
+  const previous = state.accessibleTabs[id] || {};
+  state.accessibleTabs[id] = {
+    id,
+    tabId: artifact.tabId || previous.tabId || null,
+    url: artifact.url || previous.url || "",
+    title: previous.title || "",
+    source: "opened-tab",
+    lastObservedAt: previous.lastObservedAt || "",
+    lastActiveAt: previous.lastActiveAt || new Date().toISOString(),
+    visibleTextLength: previous.visibleTextLength || 0,
+    links: previous.links || 0,
+    buttons: previous.buttons || 0,
+    lastActionLog: result?.log_message || previous.lastActionLog || ""
+  };
+  pruneAccessibleTabs();
 }
 
 function rememberRecentActionResults(plan, results) {
@@ -5292,6 +5346,7 @@ function appendMemorySavedNote(text) {
 
 const READ_ONLY_CONTEXT_ACTION_TYPES = new Set([
   "observe_page",
+  "observe_known_tab",
   "get_visible_text",
   "get_dom_snapshot",
   "get_forms",
@@ -6240,6 +6295,21 @@ async function maybeSynthesizeResults(plan, results) {
   }
   const conversationContext = getRecentConversationForProvider(lastUserMessage);
   const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
+  const recentTabs = getRecentAccessibleTabs(null)
+    .slice(0, PROVIDER_RECENT_TAB_LIMIT)
+    .map((tab) => ({
+      tabId: tab.tabId || null,
+      title: tab.title || "",
+      url: tab.url || "",
+      source: tab.source || "",
+      isCurrent: Boolean(tab.isCurrent),
+      lastObservedAt: tab.lastObservedAt || "",
+      lastActiveAt: tab.lastActiveAt || "",
+      visibleTextLength: tab.visibleTextLength || 0,
+      links: tab.links || 0,
+      buttons: tab.buttons || 0,
+      lastActionLog: tab.lastActionLog || ""
+    }));
   const recentActions = getRecentActionsForProvider();
   const buildPayload = (mode = "full") => ({
     goal: lastUserMessage,
@@ -6249,6 +6319,7 @@ async function maybeSynthesizeResults(plan, results) {
     httpProvider: selectedHttpProvider,
     conversationContext,
     recentReferences,
+    recentTabs,
     recentActions,
     observation: compactObservationForSynthesis(latestObservation, mode, {
       goal: lastUserMessage,
