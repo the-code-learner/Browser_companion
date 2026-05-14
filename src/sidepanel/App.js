@@ -4,6 +4,8 @@ const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
 const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
 const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
 const HTTP_PROVIDER_LEGACY_TIMEOUT_MS = 360000;
+const GEMINI_NANO_PROVIDER_ID = "chrome-gemini-nano";
+const GEMINI_NANO_MODEL_ID = "gemini-nano";
 
 const state = {
   view: "chat",
@@ -97,6 +99,11 @@ const state = {
     maxTokens: HTTP_PROVIDER_DEFAULT_MAX_TOKENS,
     retryMaxTokens: HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS,
     timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
+  },
+  geminiNano: {
+    availability: "unknown",
+    downloadProgress: null,
+    message: "Chrome Gemini Nano availability has not been checked."
   },
   userMemory: {
     status: "unknown",
@@ -256,6 +263,9 @@ function render(options = {}) {
   });
   document.querySelectorAll("[data-install-provider]").forEach((button) => {
     button.addEventListener("click", () => installProvider(button.dataset.installProvider));
+  });
+  document.querySelectorAll("[data-download-gemini-nano]").forEach((button) => {
+    button.addEventListener("click", downloadGeminiNano);
   });
   document.querySelectorAll("[data-copy-provider-command]").forEach((button) => {
     button.addEventListener("click", () => copyProviderInstallCommand(button.dataset.copyProviderCommand));
@@ -602,11 +612,11 @@ function renderConnectorSettings() {
         ${renderModelOptions()}
       </select>
     </label>
-    ${["missing", "error", "unknown"].includes(state.connector.status) ? "" : `
+    ${state.connector.providers.length ? `
       <div class="provider-list">
         ${renderProviderCards()}
       </div>
-    `}
+    ` : ""}
     ${renderHttpProviderSettings()}
     ${renderProviderPrerequisites()}
     ${renderConnectorSetup()}
@@ -1334,6 +1344,20 @@ function renderProviderCards() {
     const status = provider.statusLabel || provider.status || "unknown";
     const canConnect = provider.installed && !provider.connected;
     const selected = provider.id === state.codex.provider ? " selected" : "";
+    const isGeminiNano = provider.id === GEMINI_NANO_PROVIDER_ID;
+    const canDownloadGeminiNano = isGeminiNano && ["downloadable", "downloading"].includes(provider.status);
+    const connectButton = isGeminiNano
+      ? ""
+      : (provider.installed ? `<button type="button" data-connect-provider="${escapeHtml(provider.id)}">${canConnect ? "Connect" : "Reconnect"}</button>` : "");
+    const installButtons = provider.installed || isGeminiNano
+      ? ""
+      : `
+          <button type="button" data-copy-provider-command="${escapeHtml(provider.id)}">Copy Command</button>
+          <button type="button" data-install-provider="${escapeHtml(provider.id)}">Install ${escapeHtml(provider.label)}</button>
+        `;
+    const downloadButton = canDownloadGeminiNano
+      ? `<button type="button" data-download-gemini-nano="${escapeHtml(provider.id)}">${provider.status === "downloading" ? "Continue Download" : "Download Model"}</button>`
+      : "";
 
     return `
       <article class="provider-card${selected}">
@@ -1343,12 +1367,12 @@ function renderProviderCards() {
           <p>${escapeHtml(provider.message || "")}</p>
           ${provider.modelDiscovery?.message ? `<p class="memory-path">${escapeHtml(provider.modelDiscovery.message)}</p>` : ""}
           ${provider.models?.length ? `<p class="memory-path">Models: ${escapeHtml(provider.models.join(", "))}</p>` : ""}
-          ${provider.installed ? "" : `<code>${escapeHtml(provider.installCommand || "")}</code>`}
+          ${provider.installCommand && !provider.installed ? `<code>${escapeHtml(provider.installCommand || "")}</code>` : ""}
         </div>
         <div class="provider-actions">
-          ${provider.installed ? `<button type="button" data-connect-provider="${escapeHtml(provider.id)}">${canConnect ? "Connect" : "Reconnect"}</button>` : ""}
-          ${provider.installed ? "" : `<button type="button" data-copy-provider-command="${escapeHtml(provider.id)}">Copy Command</button>`}
-          ${provider.installed ? "" : `<button type="button" data-install-provider="${escapeHtml(provider.id)}">Install ${escapeHtml(provider.label)}</button>`}
+          ${connectButton}
+          ${downloadButton}
+          ${installButtons}
         </div>
       </article>
     `;
@@ -1356,7 +1380,7 @@ function renderProviderCards() {
 }
 
 function renderProviderPrerequisites() {
-  const missingProviders = state.connector.providers.filter((provider) => !provider.installed);
+  const missingProviders = state.connector.providers.filter((provider) => !provider.installed && provider.installCommand);
   if (!missingProviders.length) {
     return "";
   }
@@ -1394,8 +1418,66 @@ function normalizeProviderStatuses(providers = []) {
 
   return [
     ...cliProviders,
+    getGeminiNanoProviderStatus(),
     ...getHttpProviderStatusSources().map(httpProviderToStatus)
   ];
+}
+
+function getGeminiNanoProviderStatus() {
+  const availability = normalizeGeminiNanoAvailability(state.geminiNano.availability);
+  const progress = state.geminiNano.downloadProgress;
+  const connected = availability === "available";
+  const installed = connected || availability === "downloadable" || availability === "downloading";
+  const progressText = typeof progress === "number"
+    ? ` Download progress: ${Math.round(progress * 100)}%.`
+    : "";
+
+  return {
+    id: GEMINI_NANO_PROVIDER_ID,
+    label: "Chrome Gemini Nano (experimental)",
+    status: availability,
+    statusLabel: getGeminiNanoStatusLabel(availability),
+    installed,
+    connected,
+    command: "Chrome Prompt API",
+    installCommand: "",
+    models: [GEMINI_NANO_MODEL_ID],
+    defaultModel: GEMINI_NANO_MODEL_ID,
+    experimental: true,
+    message: state.geminiNano.message || getGeminiNanoStatusMessage(availability, progressText)
+  };
+}
+
+function normalizeGeminiNanoAvailability(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (["available", "downloadable", "downloading", "unavailable"].includes(normalized)) {
+    return normalized;
+  }
+  return "unknown";
+}
+
+function getGeminiNanoStatusLabel(availability) {
+  if (availability === "available") return "Available";
+  if (availability === "downloadable") return "Downloadable";
+  if (availability === "downloading") return "Downloading";
+  if (availability === "unavailable") return "Unavailable";
+  return "Unknown";
+}
+
+function getGeminiNanoStatusMessage(availability, progressText = "") {
+  if (availability === "available") {
+    return "Gemini Nano is ready in Chrome and runs on this device through the Prompt API.";
+  }
+  if (availability === "downloadable") {
+    return "Gemini Nano can be downloaded by Chrome for on-device use. Click Download Model to start it explicitly.";
+  }
+  if (availability === "downloading") {
+    return `Chrome is downloading Gemini Nano for on-device use.${progressText}`;
+  }
+  if (availability === "unavailable") {
+    return "Chrome Gemini Nano is not available on this browser or device.";
+  }
+  return "Chrome Gemini Nano availability has not been checked.";
 }
 
 function getHttpProviderStatusSources() {
@@ -1488,6 +1570,9 @@ function getDefaultProviderStatus(id) {
 }
 
 function getProviderStatusLabel(provider) {
+  if (provider.id === GEMINI_NANO_PROVIDER_ID) {
+    return getGeminiNanoStatusLabel(provider.status);
+  }
   if (provider.connected) return "Connected";
   if (!provider.installed || provider.status === "missing") return "Missing";
   if (provider.status === "login_required") return "Login required";
@@ -1498,6 +1583,7 @@ function getProviderStatusLabel(provider) {
 
 function getSelectedProviderStatus() {
   return state.connector.providers.find((provider) => provider.id === state.codex.provider)
+    || (state.codex.provider === GEMINI_NANO_PROVIDER_ID ? getGeminiNanoProviderStatus() : null)
     || getDefaultProviderStatus(state.codex.provider)
     || getDefaultProviderStatus("openai-codex");
 }
@@ -1787,6 +1873,7 @@ async function checkConnector() {
   connectorCheckInFlight = true;
 
   try {
+    await refreshGeminiNanoAvailability();
     addDebugLog("connector.health.start", { selectedProvider: state.codex.provider, selectedModel: state.codex.model }, "Checking connector.");
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.NATIVE_HEALTH));
     addDebugLog("connector.health.end", {
@@ -1824,6 +1911,114 @@ async function checkConnector() {
     render();
   } finally {
     connectorCheckInFlight = false;
+  }
+}
+
+async function refreshGeminiNanoAvailability() {
+  const languageModel = getChromeLanguageModelApi();
+
+  if (!languageModel?.availability) {
+    state.geminiNano = {
+      ...state.geminiNano,
+      availability: "unavailable",
+      downloadProgress: null,
+      message: "Chrome Prompt API is not exposed in this extension context."
+    };
+    state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+    return getGeminiNanoProviderStatus();
+  }
+
+  try {
+    const availability = normalizeGeminiNanoAvailability(await languageModel.availability());
+    state.geminiNano = {
+      ...state.geminiNano,
+      availability,
+      downloadProgress: availability === "downloading" ? state.geminiNano.downloadProgress : null,
+      message: getGeminiNanoStatusMessage(availability)
+    };
+  } catch (error) {
+    state.geminiNano = {
+      ...state.geminiNano,
+      availability: "unavailable",
+      downloadProgress: null,
+      message: error.message || "Chrome Gemini Nano availability check failed."
+    };
+  }
+
+  state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+  return getGeminiNanoProviderStatus();
+}
+
+function getChromeLanguageModelApi() {
+  return globalThis.LanguageModel || globalThis.ai?.languageModel || null;
+}
+
+async function downloadGeminiNano() {
+  const languageModel = getChromeLanguageModelApi();
+
+  if (!languageModel?.create) {
+    state.geminiNano = {
+      ...state.geminiNano,
+      availability: "unavailable",
+      message: "Chrome Prompt API is not available in this extension context."
+    };
+    state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+    render();
+    return;
+  }
+
+  state.codex.provider = GEMINI_NANO_PROVIDER_ID;
+  state.codex.model = GEMINI_NANO_MODEL_ID;
+  state.geminiNano = {
+    ...state.geminiNano,
+    availability: "downloading",
+    downloadProgress: 0,
+    message: "Starting Chrome Gemini Nano download..."
+  };
+  state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+  persistConnectorSelection();
+  render();
+
+  let session = null;
+  try {
+    session = await languageModel.create({
+      monitor(monitor) {
+        monitor.addEventListener("downloadprogress", (event) => {
+          const loaded = Number(event.loaded);
+          state.geminiNano = {
+            ...state.geminiNano,
+            availability: "downloading",
+            downloadProgress: Number.isFinite(loaded) ? loaded : state.geminiNano.downloadProgress,
+            message: getGeminiNanoStatusMessage("downloading", Number.isFinite(loaded) ? ` Download progress: ${Math.round(loaded * 100)}%.` : "")
+          };
+          state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+          render({ preserveComposer: true });
+        });
+      }
+    });
+    session?.destroy?.();
+    state.geminiNano = {
+      ...state.geminiNano,
+      availability: "available",
+      downloadProgress: null,
+      message: "Chrome Gemini Nano is ready for on-device use."
+    };
+    state.activity.unshift("Chrome Gemini Nano is ready.");
+  } catch (error) {
+    state.geminiNano = {
+      ...state.geminiNano,
+      availability: "downloadable",
+      downloadProgress: null,
+      message: error.message || "Chrome Gemini Nano download could not be started."
+    };
+    state.activity.unshift(`Chrome Gemini Nano download failed: ${state.geminiNano.message}`);
+  } finally {
+    session?.destroy?.();
+    await refreshGeminiNanoAvailability();
+    state.codex.provider = GEMINI_NANO_PROVIDER_ID;
+    state.codex.model = GEMINI_NANO_MODEL_ID;
+    persistConnectorSelection();
+    render();
   }
 }
 
@@ -2000,6 +2195,15 @@ function applyUserMemoryPayload(payload = {}) {
 
 async function connectProvider(providerId = state.codex.provider) {
   const provider = state.connector.providers.find((item) => item.id === providerId) || getDefaultProviderStatus(providerId);
+  if (providerId === GEMINI_NANO_PROVIDER_ID) {
+    state.codex.provider = GEMINI_NANO_PROVIDER_ID;
+    state.codex.model = GEMINI_NANO_MODEL_ID;
+    await refreshGeminiNanoAvailability();
+    persistConnectorSelection();
+    render();
+    return;
+  }
+
   state.codex.provider = provider.id;
   state.connector = {
     ...state.connector,
@@ -2788,6 +2992,195 @@ function injectSteeredMessageIntoCurrentFlow(steeredQueueItem) {
   }, "Injected the steered queued message into the current flow.");
 }
 
+function isGeminiNanoProviderSelected() {
+  return state.codex.provider === GEMINI_NANO_PROVIDER_ID;
+}
+
+async function requestSelectedProviderAgent(payload) {
+  if (isGeminiNanoProviderSelected()) {
+    const result = await runGeminiNanoAgentRequest(payload).catch((error) => ({
+      type: "agent_error",
+      text: error.message || "Chrome Gemini Nano request failed.",
+      message: error.message || "Chrome Gemini Nano request failed."
+    }));
+    return { ok: true, envelope: { payload: result } };
+  }
+
+  return sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, payload));
+}
+
+async function requestSelectedProviderSynthesis(payload) {
+  if (isGeminiNanoProviderSelected()) {
+    const result = await runGeminiNanoSynthesisRequest(payload).catch((error) => ({
+      type: "agent_error",
+      text: error.message || "Chrome Gemini Nano synthesis failed.",
+      message: error.message || "Chrome Gemini Nano synthesis failed."
+    }));
+    return { ok: true, envelope: { payload: result } };
+  }
+
+  return sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
+}
+
+async function runGeminiNanoAgentRequest(payload = {}) {
+  const ready = await ensureGeminiNanoReady();
+  if (!ready.ok) {
+    return {
+      type: "agent_unavailable",
+      text: ready.message,
+      message: ready.message
+    };
+  }
+
+  const raw = await promptGeminiNano(buildGeminiNanoAgentPrompt(payload), {
+    system: "You are Browser Companion's experimental on-device provider. Return only a single JSON object that follows the requested shape."
+  });
+  const structured = extractStructuredAgentPayloadFromText(raw);
+
+  if (structured) {
+    return normalizeGeminiNanoAgentPayload(structured, payload);
+  }
+
+  return {
+    type: "natural_response",
+    text: compact(raw) || "I could not produce a response with Chrome Gemini Nano.",
+    question: "",
+    reason: "",
+    goal: payload.goal || "",
+    risk_level: "low",
+    summary_for_user: "",
+    needs_clarification: false,
+    requires_confirmation: false,
+    will_submit: false,
+    actions: [],
+    uncertain_fields: []
+  };
+}
+
+async function runGeminiNanoSynthesisRequest(payload = {}) {
+  const ready = await ensureGeminiNanoReady();
+  if (!ready.ok) {
+    return {
+      type: "agent_error",
+      text: ready.message,
+      message: ready.message
+    };
+  }
+
+  const raw = await promptGeminiNano(buildGeminiNanoSynthesisPrompt(payload), {
+    system: "You are Browser Companion's experimental on-device synthesis provider. Return concise user-facing prose, not JSON, unless JSON is explicitly requested."
+  });
+  return {
+    type: "natural_response",
+    text: compact(raw) || "Chrome Gemini Nano did not return a usable answer."
+  };
+}
+
+async function ensureGeminiNanoReady() {
+  const provider = await refreshGeminiNanoAvailability();
+  if (provider.connected) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    message: provider.status === "downloadable"
+      ? "Chrome Gemini Nano is available to download. Open Connector and click Download Model before using it."
+      : (provider.message || "Chrome Gemini Nano is not ready on this device.")
+  };
+}
+
+async function promptGeminiNano(prompt, options = {}) {
+  const languageModel = getChromeLanguageModelApi();
+  if (!languageModel?.create) {
+    throw new Error("Chrome Prompt API is not available.");
+  }
+
+  let session = null;
+  try {
+    try {
+      session = await languageModel.create({
+        initialPrompts: options.system
+          ? [{ role: "system", content: options.system }]
+          : undefined
+      });
+    } catch {
+      session = await languageModel.create();
+    }
+
+    if (typeof session?.prompt !== "function") {
+      throw new Error("Chrome Gemini Nano session does not expose prompt().");
+    }
+
+    return String(await session.prompt(prompt) || "");
+  } finally {
+    session?.destroy?.();
+  }
+}
+
+function buildGeminiNanoAgentPrompt(payload = {}) {
+  return [
+    "You are running locally in Chrome with Gemini Nano as an experimental Browser Companion provider.",
+    "Return exactly one JSON object. Do not wrap it in Markdown.",
+    "Allowed top-level type values: natural_response, ask_user, stop_for_human, memory_proposal, agent_plan.",
+    "Always include these keys: type, text, question, reason, goal, risk_level, summary_for_user, needs_clarification, requires_confirmation, will_submit, actions, uncertain_fields.",
+    "For natural_response, put the answer in text and keep actions empty.",
+    "For ask_user, put the smallest needed question in question.",
+    "For stop_for_human, put the stop reason in reason.",
+    "For memory_proposal, include memory_title and memory_content.",
+    "For agent_plan, use only Browser Companion action types and never invent arbitrary JavaScript. Prefer read-only actions before write actions.",
+    "Action objects must include id, type, target, value, source, and reason. If a field does not apply, use empty strings, empty arrays, or confidence 0.",
+    "Browser Companion will validate policy and require confirmation before executing actions.",
+    "Reply in the user's language.",
+    "",
+    "Runtime payload:",
+    JSON.stringify(payload, null, 2)
+  ].join("\n");
+}
+
+function buildGeminiNanoSynthesisPrompt(payload = {}) {
+  if (payload.task === "user_memory") {
+    return [
+      "Create a compact local user-memory item from the request below.",
+      "Return only JSON with keys title and content. Do not wrap it in Markdown.",
+      "Keep stable self-reported facts. Preserve uncertainty when facts are not source-backed.",
+      "",
+      JSON.stringify(payload, null, 2)
+    ].join("\n");
+  }
+
+  return [
+    "Answer the user's request using the compact Browser Companion context below.",
+    "Keep the answer concise, useful, and in the user's language.",
+    "Do not dump raw tool results. Mention uncertainty when the context is incomplete.",
+    "",
+    JSON.stringify(payload, null, 2)
+  ].join("\n");
+}
+
+function normalizeGeminiNanoAgentPayload(result, payload = {}) {
+  const type = ["natural_response", "ask_user", "stop_for_human", "memory_proposal", "agent_plan"].includes(result?.type)
+    ? result.type
+    : (Array.isArray(result?.actions) && result.actions.length ? "agent_plan" : "natural_response");
+
+  return {
+    type,
+    text: String(result?.text || result?.answer || result?.response || ""),
+    question: String(result?.question || ""),
+    reason: String(result?.reason || ""),
+    goal: String(result?.goal || payload.goal || ""),
+    risk_level: ["low", "medium", "high", "sensitive", "blocked"].includes(result?.risk_level) ? result.risk_level : "low",
+    summary_for_user: String(result?.summary_for_user || result?.summary || result?.text || ""),
+    needs_clarification: Boolean(result?.needs_clarification),
+    requires_confirmation: Boolean(result?.requires_confirmation),
+    will_submit: Boolean(result?.will_submit),
+    actions: Array.isArray(result?.actions) ? result.actions : [],
+    uncertain_fields: Array.isArray(result?.uncertain_fields) ? result.uncertain_fields : [],
+    ...(result?.memory_title ? { memory_title: String(result.memory_title) } : {}),
+    ...(result?.memory_content ? { memory_content: String(result.memory_content) } : {})
+  };
+}
+
 async function getAgentResult(goal, options = {}) {
   const responseLanguage = detectUserLanguage(goal);
   const navigationPlan = buildNavigationPlan(goal, responseLanguage);
@@ -2845,7 +3238,7 @@ async function getAgentResult(goal, options = {}) {
       }))
     };
     addDebugLog("provider.agent_request.start", payload, `${state.codex.provider} / ${state.codex.model}`);
-    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.AGENT_REQUEST, payload));
+    const response = await requestSelectedProviderAgent(payload);
     addDebugLog("provider.agent_request.end", {
       ok: response.ok,
       error: response.error || "",
@@ -5208,7 +5601,7 @@ async function synthesizeMemoryRequest(intent) {
     }))
   };
   addDebugLog("provider.memory_synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}`);
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
+  const response = await requestSelectedProviderSynthesis(payload);
   addDebugLog("provider.memory_synthesis.end", {
     ok: response.ok,
     error: response.error || "",
@@ -6409,7 +6802,7 @@ async function maybeSynthesizeResults(plan, results) {
   const runSynthesisAttempt = async (mode = "full") => {
     const payload = buildPayload(mode);
     addDebugLog("provider.synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}${mode === "compact" ? " (compact retry)" : ""}`);
-    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
+    const response = await requestSelectedProviderSynthesis(payload);
     addDebugLog("provider.synthesis.end", {
       ok: response.ok,
       error: response.error || "",

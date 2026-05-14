@@ -26,6 +26,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Enter sends the chat message; Shift+Enter inserts a new line
 - Assistant responses follow the user's language unless the user asks otherwise
 - Side panel connector for Codex, Claude Code, and Gemini CLI provider/model selection
+- Experimental Chrome Gemini Nano on-device provider through Chrome's Prompt API when available or downloadable on the device
 - OpenAI-compatible HTTP provider configuration for local or private servers such as llama.cpp, LocalAI, LiteLLM, vLLM, or a custom proxy
 - Streaming support for OpenAI-compatible HTTP providers, including live thinking updates in the side panel
 - Opt-in provider CLI installation buttons; missing CLIs are never installed automatically
@@ -81,6 +82,8 @@ Missing providers show an explicit Install button only. Browser Companion does n
 Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector. Opening the Connector settings section refreshes provider status and model metadata automatically; the Check button does the same on demand. The selected provider and model are saved as Connector settings and restored on the next side panel session. Gemini CLI is shown with the provider default model unless the CLI exposes reliable account-specific model discovery.
 
 Connector status in the side panel reflects the currently selected provider. For HTTP providers, Browser Companion refreshes live health when Connector opens, so an offline local server is shown as offline even if Codex or Gemini CLI are available on the same machine.
+
+The Connector also checks Chrome's built-in Prompt API for an experimental on-device Gemini Nano provider. If Chrome reports Gemini Nano as available, it can be selected like other ready providers. If Chrome reports it as downloadable, the provider card appears with an explicit Download Model button; Browser Companion does not start that model download automatically. Gemini Nano requests run in the extension context rather than through the native host.
 
 If provider install says Node/npm is missing but Node is already installed, reload Chrome after re-registering the native host. The Windows installer now writes the Node.js directory into `native-host/bridge-launcher.cmd` so the bridge can find `npm.cmd` even when Chrome starts with a reduced PATH.
 
