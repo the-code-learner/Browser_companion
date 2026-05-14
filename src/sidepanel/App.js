@@ -1876,18 +1876,19 @@ async function checkConnector() {
     await refreshGeminiNanoAvailability();
     addDebugLog("connector.health.start", { selectedProvider: state.codex.provider, selectedModel: state.codex.model }, "Checking connector.");
     const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.NATIVE_HEALTH));
-    addDebugLog("connector.health.end", {
-      ok: response.ok,
-      error: response.error || "",
-      status: response.envelope?.payload || null
-    }, response.ok ? response.envelope?.payload?.message || "Connector status received." : response.error);
-
     if (!response.ok) {
       state.connector = {
         status: "error",
         message: response.error,
         providers: state.connector.providers
       };
+      addDebugLog("connector.health.end", {
+        ok: response.ok,
+        error: response.error || "",
+        status: response.envelope?.payload || null,
+        selectedProvider: summarizeProviderStatusForLog(getSelectedProviderStatus()),
+        selectedConnectorState: getSelectedConnectorState()
+      }, getConnectorHealthLogSummary(response));
       render();
       return;
     }
@@ -1908,10 +1909,45 @@ async function checkConnector() {
     state.connector.status = getSelectedConnectorState().status;
     state.connector.message = getSelectedConnectorState().message;
     ensureSelectedProviderAvailable();
+    addDebugLog("connector.health.end", {
+      ok: response.ok,
+      error: response.error || "",
+      status: response.envelope?.payload || null,
+      selectedProvider: summarizeProviderStatusForLog(getSelectedProviderStatus()),
+      selectedConnectorState: getSelectedConnectorState()
+    }, getConnectorHealthLogSummary(response));
     render();
   } finally {
     connectorCheckInFlight = false;
   }
+}
+
+function getConnectorHealthLogSummary(response) {
+  if (!response?.ok) {
+    return response?.error || "Connector check failed.";
+  }
+
+  const provider = getSelectedProviderStatus();
+  const connectorState = getSelectedConnectorState();
+  const providerLabel = provider?.label || state.codex.provider || "Provider";
+  const statusLabel = provider?.statusLabel || connectorState.status || "unknown";
+  return `${providerLabel}: ${statusLabel}.`;
+}
+
+function summarizeProviderStatusForLog(provider) {
+  if (!provider) {
+    return null;
+  }
+
+  return {
+    id: provider.id || "",
+    label: provider.label || "",
+    status: provider.status || "",
+    statusLabel: provider.statusLabel || "",
+    connected: Boolean(provider.connected),
+    message: provider.message || "",
+    model: state.codex.model || provider.defaultModel || ""
+  };
 }
 
 async function refreshGeminiNanoAvailability() {
