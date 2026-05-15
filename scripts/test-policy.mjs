@@ -135,6 +135,8 @@ const captchaPlan = {
   ]
 };
 
-assert.equal(validateActionPlan(captchaPlan).allowed, false);
+assert.equal(validateActionPlan(captchaPlan).allowed, true);
+assert.equal(validateActionPlan(captchaPlan).results[0].risk, "blocked");
+assert.equal(validateActionPlan(captchaPlan).results[0].requiresConfirmation, true);
 
 console.log("Policy tests passed.");

@@ -665,6 +665,23 @@ h2 {
   word-break: break-word;
 }
 
+.action-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.action-toggle input {
+  margin: 0;
+}
+
+.action-skipped {
+  opacity: 0.58;
+}
+
 .compact-list strong,
 .compact-list span {
   display: block;
@@ -1037,6 +1054,13 @@ h2 {
   line-height: 1.45;
 }
 
+.action-selection-note {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .confirm-disabled-note {
   margin: 2px 0 0;
   color: var(--muted);
@@ -1133,7 +1157,17 @@ h2 {
 
 .policy-list li {
   border-left: 3px solid var(--line);
+  border-radius: 6px;
   padding-left: 8px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.policy-list li.policy-blocked,
+.policy-list li.policy-high,
+.policy-list li.policy-sensitive {
+  border-left-color: rgb(139 30 35 / 45%);
+  background: rgb(255 226 228 / 38%);
 }
 
 .policy-list strong,

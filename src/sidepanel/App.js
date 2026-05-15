@@ -77,6 +77,7 @@ const state = {
   pendingPlan: null,
   pendingPlanContext: null,
   pendingPolicy: null,
+  pendingActionSelection: [],
   pendingPermissionRequest: null,
   confirmationText: "",
   sessionApprovals: [],
@@ -381,6 +382,9 @@ function render(options = {}) {
         updateConfirmButtonState();
       });
     }
+    document.querySelectorAll("[data-pending-action-index]").forEach((input) => {
+      input.addEventListener("change", handlePendingActionSelectionChange);
+    });
   }
 
   if (state.pendingPermissionRequest) {
@@ -1013,10 +1017,12 @@ function updateConfirmButtonState() {
     return;
   }
 
-  const highestRisk = getHighestRisk(state.pendingPolicy);
+  const selectedPlan = getSelectedPendingPlan();
+  const selectedPolicy = getSelectedPendingPolicy();
+  const highestRisk = getHighestRisk(selectedPolicy);
   const needsTypedConfirmation = highestRisk === "sensitive";
-  const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
-  const disabled = !state.pendingPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
+  const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, selectedPlan);
+  const disabled = !selectedPlan?.actions?.length || !selectedPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
   button.disabled = disabled;
   if (sessionButton) {
     sessionButton.disabled = disabled;
@@ -1239,17 +1245,21 @@ function renderMermaidBlock(source) {
 }
 
 function renderActionPreview() {
-  const policy = state.pendingPolicy;
+  const selectedPlan = getSelectedPendingPlan();
+  const policy = getSelectedPendingPolicy();
+  const totalActions = Array.isArray(state.pendingPlan?.actions) ? state.pendingPlan.actions.length : 0;
+  const selectedActions = Array.isArray(selectedPlan?.actions) ? selectedPlan.actions.length : 0;
+  const showSelectionControls = totalActions > 1;
   const blocked = policy && !policy.allowed;
   const highestRisk = getHighestRisk(policy);
   const riskClass = getPreviewRiskClass(highestRisk, policy);
   const confirmation = getConfirmationLabel(highestRisk, policy);
   const needsTypedConfirmation = highestRisk === "sensitive";
-  const canApproveSession = canOfferSessionApproval(state.pendingPlan, policy, state.pendingPlanContext);
-  const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
-  const confirmDisabled = blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
-  const approvalNote = getActionPreviewNote(highestRisk, policy, state.pendingPlan);
-  const disabledReason = getConfirmDisabledReason(highestRisk, policy, state.pendingPlan);
+  const canApproveSession = canOfferSessionApproval(selectedPlan, policy, state.pendingPlanContext);
+  const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, selectedPlan);
+  const confirmDisabled = !selectedActions || blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
+  const approvalNote = getActionPreviewNote(highestRisk, policy, selectedPlan, totalActions);
+  const disabledReason = getConfirmDisabledReason(highestRisk, policy, selectedPlan);
   const confirmTitle = confirmDisabled && disabledReason ? ` title="${escapeHtml(disabledReason)}"` : "";
 
   return `
@@ -1262,12 +1272,13 @@ function renderActionPreview() {
         <span class="risk ${escapeHtml(riskClass)}">${escapeHtml(riskClass)}</span>
       </div>
       <p>${escapeHtml(state.pendingPlan.summary_for_user)}</p>
+      ${showSelectionControls ? `<p class="action-selection-note">${escapeHtml(`${selectedActions} of ${totalActions} actions selected. Clear any checkbox to skip only that step.`)}</p>` : ""}
       <div class="approval-callout ${escapeHtml(approvalNote.tone)}">
         <strong>${escapeHtml(approvalNote.title)}</strong>
         <span>${escapeHtml(approvalNote.body)}</span>
       </div>
       <ul class="compact-list">
-        ${state.pendingPlan.actions.map(renderAction).join("")}
+        ${state.pendingPlan.actions.map((action, index) => renderAction(action, index, showSelectionControls)).join("")}
       </ul>
       ${renderPolicyDetails(policy)}
       ${disabledReason ? `<p class="confirm-disabled-note">${escapeHtml(disabledReason)}</p>` : ""}
@@ -1317,12 +1328,19 @@ function renderPolicyDetails(policy) {
   `;
 }
 
-function renderAction(action) {
+function renderAction(action, index = -1, showSelectionControls = false) {
   const target = action.target?.name ? ` on ${action.target.name}` : "";
   const valuePreview = summarizeActionValueForPreview(action);
   const reason = String(action.reason || "").trim();
+  const isSelected = !showSelectionControls || isPendingActionSelected(index);
   return `
-    <li>
+    <li class="${!isSelected ? "action-skipped" : ""}">
+      ${showSelectionControls ? `
+        <label class="action-toggle">
+          <input type="checkbox" data-pending-action-index="${escapeHtml(index)}" ${isSelected ? "checked" : ""}>
+          <span>Run this action</span>
+        </label>
+      ` : ""}
       <strong>${escapeHtml(action.type)}${escapeHtml(target)}</strong>
       ${valuePreview ? `<span class="action-value-preview">${escapeHtml(valuePreview)}</span>` : ""}
       ${reason ? `<span>${escapeHtml(reason)}</span>` : ""}
@@ -4446,6 +4464,7 @@ async function handleAgentResult(result, options = {}) {
     state.pendingPlan = result;
     state.pendingPlanContext = planContext;
     state.pendingPolicy = policy;
+    state.pendingActionSelection = (Array.isArray(result.actions) ? result.actions : []).map(() => true);
     state.activity.unshift("Action plan prepared for confirmation.");
     addActionNote("Asked for action approval", [
       result.summary_for_user,
@@ -4823,14 +4842,14 @@ function extractNestedReasoningText(text) {
 }
 
 async function confirmPendingPlan(options = {}) {
-  const plan = normalizePlan(state.pendingPlan);
+  const plan = getSelectedPendingPlan();
 
-  if (!plan) {
+  if (!plan || !Array.isArray(plan.actions) || !plan.actions.length) {
     return;
   }
 
   const planContext = state.pendingPlanContext;
-  const pendingPolicy = state.pendingPolicy;
+  const pendingPolicy = getSelectedPendingPolicy();
   if (options.approvalScope === "session") {
     addSessionApprovalForPlan(plan, pendingPolicy, planContext);
   }
@@ -4838,6 +4857,7 @@ async function confirmPendingPlan(options = {}) {
   state.pendingPlan = null;
   state.pendingPlanContext = null;
   state.pendingPolicy = null;
+  state.pendingActionSelection = [];
   state.confirmationText = "";
 
   try {
@@ -5894,6 +5914,7 @@ function cancelPendingPlan() {
   state.pendingPlan = null;
   state.pendingPlanContext = null;
   state.pendingPolicy = null;
+  state.pendingActionSelection = [];
   state.pendingPermissionRequest = null;
   state.confirmationText = "";
   state.activity.unshift("Action plan canceled.");
@@ -8298,10 +8319,6 @@ function getHighestRisk(policy) {
 }
 
 function getPreviewRiskClass(risk, policy) {
-  if (policy && !policy.allowed) {
-    return "blocked";
-  }
-
   return risk || "low";
 }
 
@@ -8309,19 +8326,20 @@ function getConfirmationLabel(risk, policy) {
   if (!policy?.requiresConfirmation) return "Ready";
   if (risk === "high") return "Explicit final-action confirmation required";
   if (risk === "sensitive") return "Sensitive data confirmation required";
-  if (risk === "blocked") return "Blocked by policy";
+  if (risk === "blocked") return "Strong manual review recommended";
   return "Confirmation required";
 }
 
-function getActionPreviewNote(risk, policy, plan) {
+function getActionPreviewNote(risk, policy, plan, totalActions = 0) {
   const actionCount = Array.isArray(plan?.actions) ? plan.actions.length : 0;
   const actionLabel = actionCount === 1 ? "1 action" : `${actionCount} actions`;
+  const skippedCount = Math.max(0, totalActions - actionCount);
 
-  if (policy && !policy.allowed) {
+  if (risk === "blocked") {
     return {
       tone: "blocked",
-      title: "Confirm is unavailable",
-      body: `At least one requested action is blocked by policy. Review the notes below or adjust the plan before continuing with ${actionLabel}.`
+      title: "Review carefully before confirming",
+      body: `One or more selected actions fall into a high-attention category. You can still approve them, but review the notes below carefully before continuing with ${actionLabel}.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
     };
   }
 
@@ -8329,7 +8347,7 @@ function getActionPreviewNote(risk, policy, plan) {
     return {
       tone: "sensitive",
       title: "Extra confirmation required",
-      body: `Type ${getRequiredConfirmationPhrase(risk, plan)} to continue with ${actionLabel}.`
+      body: `Type ${getRequiredConfirmationPhrase(risk, plan)} to continue with ${actionLabel}.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
     };
   }
 
@@ -8337,20 +8355,20 @@ function getActionPreviewNote(risk, policy, plan) {
     return {
       tone: "high",
       title: "Final acceptance step",
-      body: `Confirm will continue with ${actionLabel} and may accept or submit on the site. Review the target fields before proceeding.`
+      body: `Confirm will continue with ${actionLabel} and may accept or submit on the site. Review the target fields before proceeding.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
     };
   }
 
   return {
     tone: risk === "medium" ? "medium" : "low",
     title: policy?.requiresConfirmation ? "Ready to proceed" : "Ready",
-    body: `Confirm will run ${actionLabel} on this page. It will not click the final submit button.`
+    body: `Confirm will run ${actionLabel} on this page. It will not click the final submit button.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
   };
 }
 
 function getConfirmDisabledReason(risk, policy, plan) {
-  if (policy && !policy.allowed) {
-    return "Confirm is disabled because one or more actions are currently blocked by policy.";
+  if (!plan?.actions?.length) {
+    return "Select at least one action to continue.";
   }
 
   if (risk === "sensitive") {
@@ -8358,6 +8376,75 @@ function getConfirmDisabledReason(risk, policy, plan) {
   }
 
   return "";
+}
+
+function isPendingActionSelected(index) {
+  if (!Number.isInteger(index) || index < 0) {
+    return true;
+  }
+
+  if (!Array.isArray(state.pendingActionSelection) || index >= state.pendingActionSelection.length) {
+    return true;
+  }
+
+  return state.pendingActionSelection[index] !== false;
+}
+
+function handlePendingActionSelectionChange(event) {
+  const index = Number.parseInt(event.target?.dataset?.pendingActionIndex || "", 10);
+  if (!Number.isInteger(index) || index < 0) {
+    return;
+  }
+
+  const next = Array.isArray(state.pendingActionSelection)
+    ? [...state.pendingActionSelection]
+    : (Array.isArray(state.pendingPlan?.actions) ? state.pendingPlan.actions.map(() => true) : []);
+  next[index] = Boolean(event.target.checked);
+  state.pendingActionSelection = next;
+  render();
+}
+
+function getSelectedPendingActionIndexes() {
+  const actions = Array.isArray(state.pendingPlan?.actions) ? state.pendingPlan.actions : [];
+  if (!actions.length) {
+    return [];
+  }
+
+  return actions.reduce((indexes, _action, index) => {
+    if (isPendingActionSelected(index)) {
+      indexes.push(index);
+    }
+    return indexes;
+  }, []);
+}
+
+function getSelectedPendingPlan() {
+  const plan = normalizePlan(state.pendingPlan);
+  if (!plan) {
+    return null;
+  }
+
+  const selectedIndexes = getSelectedPendingActionIndexes();
+  return {
+    ...plan,
+    actions: selectedIndexes.map((index) => plan.actions[index]).filter(Boolean)
+  };
+}
+
+function getSelectedPendingPolicy() {
+  const policy = state.pendingPolicy;
+  const results = Array.isArray(policy?.results) ? policy.results : [];
+  const selectedIndexSet = new Set(getSelectedPendingActionIndexes());
+  const selectedResults = results
+    .filter((result) => selectedIndexSet.has(result.index))
+    .map((result, nextIndex) => ({ ...result, index: nextIndex }));
+
+  return {
+    ...(policy || {}),
+    allowed: selectedResults.every((result) => result.allowed),
+    requiresConfirmation: selectedResults.some((result) => result.requiresConfirmation),
+    results: selectedResults
+  };
 }
 
 function getRequiredConfirmationPhrase(risk, plan) {
