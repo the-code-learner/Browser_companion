@@ -590,6 +590,10 @@
       return "combobox";
     }
 
+    if (looksLikeFieldButton(element)) {
+      return "button";
+    }
+
     if (element.matches("textarea,[contenteditable='true']")) {
       return "textbox";
     }

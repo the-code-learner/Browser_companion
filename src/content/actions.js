@@ -40,7 +40,8 @@
         if (!element) {
           throw new Error("Overlay target could not be resolved.");
         }
-        return success(action, false, `${activateElement(element)} via overlay number ${item.number}.`);
+        const activation = await activateElement(element);
+        return success(action, activation.pageChanged, `${activation.message} via overlay number ${item.number}.`);
       }
 
       const element = resolveElement(action.target);
@@ -90,7 +91,8 @@
       if (action.type === "click_element") {
         element.scrollIntoView({ block: "center", inline: "nearest" });
         verifyElement(element, action.target);
-        return success(action, false, activateElement(element));
+        const activation = await activateElement(element);
+        return success(action, activation.pageChanged, activation.message);
       }
 
       if (action.type === "upload_file_to_field") {
@@ -495,19 +497,209 @@
     };
   }
 
-  function activateElement(element) {
-    if (isSubmitControl(element)) {
-      const form = element.form || element.closest?.("form");
+  async function activateElement(element) {
+    const activationTarget = getPreferredActivationTarget(element);
+    const primaryTarget = activationTarget || element;
+
+    if (isSubmitControl(primaryTarget)) {
+      const form = primaryTarget.form || primaryTarget.closest?.("form");
       if (form && typeof form.requestSubmit === "function") {
-        form.requestSubmit(element.matches("button,input") ? element : undefined);
+        form.requestSubmit(primaryTarget.matches("button,input") ? primaryTarget : undefined);
       } else {
-        element.click();
+        triggerPointerClick(primaryTarget);
       }
-      return `Submitted ${getName(element)}.`;
+      return {
+        message: `Submitted ${getName(primaryTarget)}.`,
+        pageChanged: true
+      };
     }
 
-    element.click();
-    return `Clicked ${getName(element)}.`;
+    const before = captureInteractionState(element, primaryTarget);
+    await triggerActivation(primaryTarget);
+    let after = captureInteractionState(element, primaryTarget);
+    let changed = didInteractionStateChange(before, after);
+
+    if (!changed && isExpandableFieldControl(element, primaryTarget)) {
+      await triggerKeyboardOpen(primaryTarget);
+      after = captureInteractionState(element, primaryTarget);
+      changed = didInteractionStateChange(before, after);
+    }
+
+    if (!changed && primaryTarget !== element) {
+      await triggerActivation(element);
+      after = captureInteractionState(element, element);
+      changed = didInteractionStateChange(before, after);
+    }
+
+    if (!changed && isExpandableFieldControl(element, primaryTarget)) {
+      throw new Error(`Clicked ${getName(element)}, but the control did not visibly open or change state.`);
+    }
+
+    return {
+      message: `Clicked ${getName(primaryTarget)}.`,
+      pageChanged: changed
+    };
+  }
+
+  function getPreferredActivationTarget(element) {
+    if (!element?.matches) {
+      return element;
+    }
+
+    if (isDirectlyActivatable(element)) {
+      return element;
+    }
+
+    const preferredSelectors = [
+      "input",
+      "button",
+      "[role='combobox']",
+      "[role='button']",
+      "[tabindex]:not([tabindex='-1'])",
+      "[contenteditable='true']",
+      ".ts-control",
+      ".ts-input",
+      ".selectize-input"
+    ];
+
+    for (const selector of preferredSelectors) {
+      const candidate = element.querySelector?.(selector);
+      if (candidate instanceof Element && isVisible(candidate)) {
+        return candidate;
+      }
+    }
+
+    return element;
+  }
+
+  function isDirectlyActivatable(element) {
+    if (!element?.matches) {
+      return false;
+    }
+
+    return element.matches(
+      "a[href],button,input,select,textarea,[role='button'],[role='combobox'],[role='link'],[role='searchbox'],[contenteditable='true'],[tabindex]:not([tabindex='-1'])"
+    );
+  }
+
+  function isExpandableFieldControl(element, activationTarget) {
+    return looksLikeCustomCombobox(element)
+      || looksLikeCustomCombobox(activationTarget)
+      || element?.hasAttribute?.("aria-haspopup")
+      || element?.hasAttribute?.("aria-controls")
+      || element?.hasAttribute?.("aria-expanded")
+      || activationTarget?.hasAttribute?.("aria-haspopup")
+      || activationTarget?.hasAttribute?.("aria-controls")
+      || activationTarget?.hasAttribute?.("aria-expanded")
+      || /container$/i.test(String(element?.id || ""))
+      || /container$/i.test(String(activationTarget?.id || ""));
+  }
+
+  function captureInteractionState(element, activationTarget) {
+    const target = activationTarget || element;
+    const roots = getControlledRoots(element, target);
+    return {
+      expanded: readExpandedState(element, target),
+      active: document.activeElement === target || document.activeElement === element,
+      rootVisibility: roots.map((root) => isVisible(root)),
+      rootText: roots.map((root) => compactText(root.innerText || root.textContent || "").slice(0, 200)).join(" || "),
+      bodyMarker: compactText(document.body?.innerText || "").slice(0, 400)
+    };
+  }
+
+  function readExpandedState(element, activationTarget) {
+    const values = [
+      element?.getAttribute?.("aria-expanded"),
+      activationTarget?.getAttribute?.("aria-expanded")
+    ].filter((value) => value === "true" || value === "false");
+
+    return values[0] || "";
+  }
+
+  function getControlledRoots(element, activationTarget) {
+    const roots = [];
+    const seen = new Set();
+    const controls = [element, activationTarget].filter(Boolean);
+    const ids = controls
+      .flatMap((node) => `${node.getAttribute?.("aria-controls") || ""} ${node.getAttribute?.("aria-owns") || ""}`.split(/\s+/))
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    for (const id of ids) {
+      const node = document.getElementById(id);
+      if (node && !seen.has(node)) {
+        seen.add(node);
+        roots.push(node);
+      }
+    }
+
+    for (const node of Array.from(document.querySelectorAll("[role='listbox'],[role='menu'],[role='dialog']"))) {
+      if (isVisible(node) && !seen.has(node)) {
+        seen.add(node);
+        roots.push(node);
+      }
+    }
+
+    return roots;
+  }
+
+  function didInteractionStateChange(before, after) {
+    return before.expanded !== after.expanded
+      || before.active !== after.active
+      || before.rootText !== after.rootText
+      || before.rootVisibility.join(",") !== after.rootVisibility.join(",");
+  }
+
+  async function triggerActivation(element) {
+    element.scrollIntoView?.({ block: "center", inline: "nearest" });
+    element.focus?.();
+    triggerPointerClick(element);
+    await waitForUiUpdate();
+  }
+
+  function triggerPointerClick(element) {
+    dispatchPointerishEvent(element, "pointerdown");
+    dispatchPointerishEvent(element, "mousedown");
+    dispatchPointerishEvent(element, "pointerup");
+    dispatchPointerishEvent(element, "mouseup");
+    element.click?.();
+  }
+
+  function dispatchPointerishEvent(element, type) {
+    try {
+      element.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+    } catch {
+      // Ignore synthetic event failures and continue with the best-effort click path.
+    }
+  }
+
+  async function triggerKeyboardOpen(element) {
+    element.focus?.();
+    for (const key of ["ArrowDown", "Enter", " "]) {
+      dispatchKeyboardEvent(element, "keydown", key);
+      dispatchKeyboardEvent(element, "keyup", key);
+      await waitForUiUpdate();
+      if (element.getAttribute?.("aria-expanded") === "true") {
+        return;
+      }
+    }
+  }
+
+  function dispatchKeyboardEvent(element, type, key) {
+    try {
+      element.dispatchEvent(new KeyboardEvent(type, {
+        key,
+        code: key === " " ? "Space" : key,
+        bubbles: true,
+        cancelable: true
+      }));
+    } catch {
+      // Ignore synthetic keyboard-event failures.
+    }
   }
 
   function isSubmitControl(element) {
