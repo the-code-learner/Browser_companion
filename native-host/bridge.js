@@ -17,6 +17,7 @@ const npmBin = resolveNpmBin();
 const npmCliPath = resolveNpmCliPath();
 const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
 const providerModelCache = new Map();
+const providerRuntimeAlerts = new Map();
 const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
 const httpProviderDebugErrorPath = path.join(projectRoot, "tmp-http-provider-error.json");
 const activeRequestControllers = new Map();
@@ -692,7 +693,7 @@ function getHealth() {
 }
 
 function getProviderStatuses() {
-  return Object.values(providerDefinitions).map(getProviderStatus);
+  return Object.values(providerDefinitions).map((provider) => applyProviderRuntimeState(getProviderStatus(provider)));
 }
 
 function getProviderStatus(provider) {
@@ -900,11 +901,84 @@ function getGeminiModelInfo(provider) {
 
 function summarizeProviders(providers) {
   const connected = providers.filter((provider) => provider.connected).map((provider) => provider.label);
+  const exhausted = providers.filter((provider) => provider.quotaState === "exhausted").map((provider) => provider.label);
+  if (exhausted.length) {
+    return `Usage limit reached for: ${exhausted.join(", ")}.`;
+  }
   if (connected.length) {
     return `Connected providers: ${connected.join(", ")}.`;
   }
 
   return "No connected provider is ready yet.";
+}
+
+function applyProviderRuntimeState(status) {
+  const alert = providerRuntimeAlerts.get(status?.id || "");
+  if (!alert) {
+    return status;
+  }
+
+  return {
+    ...status,
+    quotaState: alert.kind,
+    quotaMessage: alert.message,
+    quotaDetectedAt: alert.detectedAt,
+    message: alert.message
+  };
+}
+
+function noteProviderSuccess(providerId) {
+  if (!providerId) {
+    return;
+  }
+
+  providerRuntimeAlerts.delete(providerId);
+}
+
+function noteProviderFailure(provider, result) {
+  const providerId = provider?.id || "";
+  if (!providerId) {
+    return;
+  }
+
+  const raw = compact(`${result?.error?.message || ""} ${result?.stderr || ""} ${result?.stdout || ""} ${result?.message || ""} ${result?.text || ""}`);
+  if (!isUsageLimitReachedText(raw)) {
+    return;
+  }
+
+  providerRuntimeAlerts.set(providerId, {
+    kind: "exhausted",
+    detectedAt: new Date().toISOString(),
+    message: buildUsageLimitMessage(provider, raw),
+    raw: raw.slice(0, 1200)
+  });
+}
+
+function isUsageLimitReachedText(text) {
+  const raw = String(text || "");
+  return [
+    /\blimit reached\b/i,
+    /insufficient[_\s-]?quota/i,
+    /\bout of credits?\b/i,
+    /\bcredit balance\b.*\b(low|empty|insufficient)\b/i,
+    /\bbilling hard limit\b/i,
+    /\bresource has been exhausted\b/i,
+    /\byou have exhausted your capacity on this model\b/i,
+    /\bquota exceeded\b/i
+  ].some((pattern) => pattern.test(raw));
+}
+
+function buildUsageLimitMessage(provider, text) {
+  const label = provider?.label || "Provider";
+  if (/insufficient[_\s-]?quota|billing hard limit|out of credits?|credit balance/i.test(text)) {
+    return `${label} has no remaining credits or has reached its billing limit. Add credits, wait for reset, or switch provider.`;
+  }
+
+  if (/exhausted your capacity on this model|resource has been exhausted|limit reached|quota exceeded/i.test(text)) {
+    return `${label} has reached its current usage limit. Wait for quota reset or switch provider.`;
+  }
+
+  return `${label} cannot continue because its current usage limit has been reached.`;
 }
 
 function getCapabilities() {
@@ -1469,6 +1543,7 @@ function runAgentRequest(payload = {}, options = {}) {
   });
 
   if (result.error || result.status !== 0) {
+    noteProviderFailure(providerDefinitions["openai-codex"], result);
     return {
       type: "agent_error",
       message: summarizeCodexFailure(result)
@@ -1477,6 +1552,7 @@ function runAgentRequest(payload = {}, options = {}) {
 
   try {
     const responseText = fs.readFileSync(outputPath, "utf8").trim();
+    noteProviderSuccess("openai-codex");
     return JSON.parse(responseText);
   } catch (error) {
     return {
@@ -1528,6 +1604,7 @@ function runSynthesisRequest(payload = {}, options = {}) {
   });
 
   if (result.error || result.status !== 0) {
+    noteProviderFailure(providerDefinitions["openai-codex"], result);
     return {
       type: "natural_response",
       text: summarizeCodexFailure(result)
@@ -1535,6 +1612,7 @@ function runSynthesisRequest(payload = {}, options = {}) {
   }
 
   try {
+    noteProviderSuccess("openai-codex");
     return {
       type: "natural_response",
       text: fs.readFileSync(outputPath, "utf8").trim()
@@ -1556,12 +1634,14 @@ function runCliAgentRequest(provider, payload = {}) {
   const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
   const result = runProviderPromptWithModelFallback(provider, prompt, payload.model, true);
   if (result.error || result.status !== 0) {
+    noteProviderFailure(provider, result);
     return {
       type: "agent_error",
       message: summarizeProviderFailure(provider, result)
     };
   }
 
+  noteProviderSuccess(provider.id);
   const output = compactProviderOutput(result.stdout || result.stderr || "");
   return parseAgentJsonOrNaturalResponse(output);
 }
@@ -1600,12 +1680,14 @@ function runCliSynthesisRequest(provider, payload = {}) {
   const prompt = buildSynthesisPrompt(payload);
   const result = runProviderPromptWithModelFallback(provider, prompt, payload.model, false);
   if (result.error || result.status !== 0) {
+    noteProviderFailure(provider, result);
     return {
       type: "natural_response",
       text: summarizeProviderFailure(provider, result)
     };
   }
 
+  noteProviderSuccess(provider.id);
   return {
     type: "natural_response",
     text: compactProviderOutput(result.stdout || result.stderr || "")
@@ -2588,6 +2670,7 @@ function makeNaturalAgentResponse(text, thinking = "") {
 
 function summarizeProviderFailure(provider, result) {
   const combined = compact(stripProviderNoise(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`));
+  const raw = compact(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`);
   const parsedError = parseProviderErrorMessage(combined);
   const message = parsedError || combined;
 
@@ -2598,8 +2681,8 @@ function summarizeProviderFailure(provider, result) {
   if (/auth|login|sign in|unauthorized|permission/i.test(combined)) {
     return `${provider.label} appears to need sign-in. Open Connector and click Connect for this provider.`;
   }
-  if (/quota|capacity|exhausted/i.test(combined)) {
-    return `${provider.label} is temporarily rate-limited or out of capacity. Try again shortly or switch provider.`;
+  if (isUsageLimitReachedText(raw)) {
+    return buildUsageLimitMessage(provider, raw);
   }
   return message.slice(-800) || `${provider.label} request failed.`;
 }
@@ -3179,6 +3262,10 @@ function summarizeCodexFailure(result) {
 
   if (schemaMessage) {
     return `Codex rejected the response schema: ${schemaMessage}`;
+  }
+
+  if (isUsageLimitReachedText(combined)) {
+    return buildUsageLimitMessage({ label: "Codex" }, combined);
   }
 
   const errorMessage = combined.match(/ERROR:\s*(\{.*?\})(?=\s*ERROR:|\s*$)/i)?.[1];

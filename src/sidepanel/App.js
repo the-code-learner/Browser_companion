@@ -231,6 +231,7 @@ function render(options = {}) {
 
     ${state.pendingPlan ? renderActionPreview() : ""}
     ${state.pendingPermissionRequest ? renderPermissionRequestPreview() : ""}
+    ${renderProviderQuotaNotice()}
 
     <section id="chat-log" class="chat-log" aria-label="Chat messages">
       ${renderChatTimeline()}
@@ -1741,6 +1742,7 @@ function getDefaultProviderStatus(id) {
 }
 
 function getProviderStatusLabel(provider) {
+  if (provider?.quotaState === "exhausted") return "Limit reached";
   if (provider.id === GEMINI_NANO_PROVIDER_ID) {
     return getGeminiNanoStatusLabel(provider.status);
   }
@@ -4519,6 +4521,9 @@ async function handleAgentResult(result, options = {}) {
       createdAt: Date.now()
     });
     state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
+    if (isProviderQuotaExhaustedResult(result)) {
+      queueConnectorRefresh();
+    }
     render();
     return;
   }
@@ -4534,6 +4539,9 @@ async function handleAgentResult(result, options = {}) {
   if (memoryProposal) {
     proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
     return;
+  }
+  if (getSelectedProviderStatus()?.quotaState === "exhausted") {
+    queueConnectorRefresh();
   }
   render();
 }
@@ -4657,6 +4665,17 @@ function isProviderErrorLikeResult(result) {
     || /stream stalled|terminated/i.test(text)
     || /HTTP provider returned \d+/i.test(text)
     || /<!doctype html>|<html\b|cloudflare/i.test(text);
+}
+
+function isProviderQuotaExhaustedResult(result) {
+  const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
+  return /\blimit reached\b/i.test(text)
+    || /insufficient[_\s-]?quota/i.test(text)
+    || /\bout of credits?\b/i.test(text)
+    || /\bbilling hard limit\b/i.test(text)
+    || /\bresource has been exhausted\b/i.test(text)
+    || /\byou have exhausted your capacity on this model\b/i.test(text)
+    || /\bquota exceeded\b/i.test(text);
 }
 
 function extractProviderErrorMeta(result) {
@@ -8239,6 +8258,7 @@ function sendRuntimeMessage(message) {
 
 function getConnectorClass() {
   const selected = getSelectedConnectorState();
+  if (selected.quotaExhausted) return "warn";
   if (selected.status === "connected") return "ok";
   if (selected.status === "unknown" || selected.status === "connecting") return "neutral";
   return "warn";
@@ -8249,6 +8269,10 @@ function getConnectorStatusLabel() {
   const provider = getSelectedProviderStatus();
   const name = provider?.label || "Provider";
   const isHttpProvider = isHttpProviderStatus(provider);
+
+  if (selected.quotaExhausted) {
+    return `${name} limit reached`;
+  }
 
   if (selected.status === "connected") {
     if (isHttpProvider) {
@@ -8278,6 +8302,13 @@ function getConnectorStatusLabel() {
 function getSelectedConnectorState() {
   const provider = getSelectedProviderStatus();
   const isHttpProvider = isHttpProviderStatus(provider);
+  if (provider?.quotaState === "exhausted") {
+    return {
+      status: provider.connected ? "connected" : "quota_exhausted",
+      quotaExhausted: true,
+      message: provider.quotaMessage || provider.message || `${provider.label || "Provider"} has reached its current usage limit.`
+    };
+  }
   if (provider?.connected) {
     return {
       status: "connected",
@@ -8309,6 +8340,20 @@ function getSelectedConnectorState() {
 
 function isSelectedProviderConnected() {
   return getSelectedConnectorState().status === "connected";
+}
+
+function renderProviderQuotaNotice() {
+  const provider = getSelectedProviderStatus();
+  if (provider?.quotaState !== "exhausted") {
+    return "";
+  }
+
+  return `
+    <section class="quota-notice" aria-label="Provider usage limit">
+      <strong>${escapeHtml(provider.label || "Provider")} limit reached</strong>
+      <span>${escapeHtml(provider.quotaMessage || provider.message || "The selected provider has reached its current usage limit.")}</span>
+    </section>
+  `;
 }
 
 function getHighestRisk(policy) {
