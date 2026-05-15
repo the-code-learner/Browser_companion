@@ -751,8 +751,17 @@ async function executeBrowserLevelAction(tab, action, options = {}) {
       await chrome.tabs.update(tab.id, { active: true });
       await waitForTabSettled(tab.id);
     }
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    const ocrText = await extractViewportText(dataUrl);
+    let dataUrl = "";
+    let ocrText = "";
+    let captureError = "";
+
+    try {
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      ocrText = await extractViewportText(dataUrl);
+    } catch (error) {
+      captureError = error?.message || "Chrome blocked the viewport capture.";
+    }
+
     return {
       type: "execution_result",
       action_id: action.id || action.type,
@@ -762,12 +771,17 @@ async function executeBrowserLevelAction(tab, action, options = {}) {
       artifact: {
         kind: "screenshot",
         dataUrl,
-        ocrText
+        ocrText,
+        captureError
       },
       validation_messages: [],
-      log_message: ocrText
-        ? `Captured the visible viewport and extracted ${ocrText.length} OCR characters.`
-        : "Captured the visible viewport."
+      log_message: dataUrl
+        ? (
+          ocrText
+            ? `Captured the visible viewport and extracted ${ocrText.length} OCR characters.`
+            : "Captured the visible viewport."
+        )
+        : `Viewport capture was unavailable, but execution can continue: ${captureError}`
     };
   }
 

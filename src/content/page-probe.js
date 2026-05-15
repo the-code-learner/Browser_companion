@@ -178,14 +178,22 @@
   }
 
   function getForms(forms, formLikeFields) {
+    const orphanFields = getOrphanFormLikeFields(formLikeFields);
+
     if (forms.length === 0 && formLikeFields.length > 0) {
       return [buildFormModel(document.body, "form_1", formLikeFields)];
     }
 
-    return forms.slice(0, MAX_FORMS).map((form, index) => {
+    const formModels = forms.slice(0, MAX_FORMS).map((form, index) => {
       const fields = Array.from(form.querySelectorAll(FIELD_SELECTOR)).filter(isFormFieldElement);
       return buildFormModel(form, `form_${index + 1}`, fields);
     });
+
+    if (orphanFields.length > 0 && formModels.length < MAX_FORMS) {
+      formModels.push(buildFormModel(getOrphanFieldContainer(orphanFields), `form_${formModels.length + 1}`, orphanFields));
+    }
+
+    return formModels;
   }
 
   function buildFormModel(container, agentId, fields) {
@@ -212,6 +220,23 @@
     };
   }
 
+  function getOrphanFormLikeFields(formLikeFields) {
+    return formLikeFields.filter((field) => !field.closest("form"));
+  }
+
+  function getOrphanFieldContainer(fields) {
+    const firstField = fields.find(Boolean);
+    if (!firstField) {
+      return document.body;
+    }
+
+    return (
+      firstField.closest("section,[role='region'],aside,main,article,[data-testid],[aria-label]")
+      || firstField.parentElement
+      || document.body
+    );
+  }
+
   function buildCaptureMeta({
     rawVisibleText,
     headingElements,
@@ -221,7 +246,10 @@
     formElements,
     formLikeFields
   }) {
-    const pseudoFormCount = formElements.length === 0 && formLikeFields.length > 0 ? 1 : 0;
+    const orphanFields = getOrphanFormLikeFields(formLikeFields);
+    const pseudoFormCount = formElements.length === 0
+      ? (formLikeFields.length > 0 ? 1 : 0)
+      : (orphanFields.length > 0 ? 1 : 0);
 
     return {
       limits: {
@@ -238,7 +266,7 @@
         links: linkElements.length,
         buttons: buttonElements.length,
         interactive_elements: interactiveElementsRaw.length,
-        forms: formElements.length || pseudoFormCount
+        forms: Math.min(formElements.length + pseudoFormCount, MAX_FORMS)
       },
       truncated: {
         visible_text: rawVisibleText.length > MAX_VISIBLE_TEXT,
