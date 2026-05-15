@@ -6094,18 +6094,55 @@ function extractStructuredAgentPayloadFromText(text) {
     return null;
   }
 
+  const unwrapped = unwrapStructuredAgentPayload(parsed);
+  if (!unwrapped) {
+    return null;
+  }
+
+  return unwrapped;
+}
+
+function unwrapStructuredAgentPayload(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  if (looksLikeStructuredAgentPayload(parsed)) {
+    return parsed;
+  }
+
+  const wrappedKeys = ["agent_plan", "natural_response", "ask_user", "stop_for_human", "memory_proposal"];
+  for (const key of wrappedKeys) {
+    const nested = parsed[key];
+    if (!nested || typeof nested !== "object") {
+      continue;
+    }
+    if (!looksLikeStructuredAgentPayload(nested) && !Array.isArray(nested?.actions)) {
+      continue;
+    }
+    return {
+      ...nested,
+      type: nested.type || key
+    };
+  }
+
+  return null;
+}
+
+function looksLikeStructuredAgentPayload(parsed) {
   const hasActions = Array.isArray(parsed.actions) && parsed.actions.length > 0;
-  const hasControlType = ["agent_plan", "ask_user", "stop_for_human", "memory_proposal"].includes(parsed.type);
+  const hasControlType = ["agent_plan", "natural_response", "ask_user", "stop_for_human", "memory_proposal"].includes(parsed.type);
   const hasCompanionFields = typeof parsed.summary_for_user === "string"
     || typeof parsed.question === "string"
     || typeof parsed.reason === "string"
-    || typeof parsed.goal === "string";
+    || typeof parsed.goal === "string"
+    || typeof parsed.text === "string";
 
   if (!hasActions && !hasControlType && !hasCompanionFields) {
     return null;
   }
 
-  return parsed;
+  return true;
 }
 
 function extractJsonObjectLiteral(text) {

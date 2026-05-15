@@ -282,9 +282,10 @@
     const role = inferRole(element);
     const name = normalize(getName(element));
     const href = normalize(element.href || "");
+    const nearbyText = normalize(getNearbyContextText(element));
     let score = 0;
 
-    if (wantedRole && role !== wantedRole) {
+    if (wantedRole && !areRolesCompatible(wantedRole, role)) {
       return 0;
     }
 
@@ -298,6 +299,8 @@
       score += 45;
     } else if (href.includes(wantedName.replace(/\s+/g, "-"))) {
       score += 65;
+    } else if (nearbyText.includes(wantedName)) {
+      score += 55;
     } else {
       return 0;
     }
@@ -305,8 +308,28 @@
     if (visible) score += 40;
     if (isInViewport(element)) score += 20;
     if (element.matches("a[href]")) score += 10;
+    if (!name && nearbyText.includes(wantedName)) score += 15;
 
     return score;
+  }
+
+  function areRolesCompatible(wantedRole, actualRole) {
+    if (!wantedRole || !actualRole) {
+      return true;
+    }
+    if (wantedRole === actualRole) {
+      return true;
+    }
+
+    const compatibleGroups = [
+      ["button", "combobox"],
+      ["button", "searchbox"],
+      ["button", "textbox"],
+      ["combobox", "searchbox"],
+      ["combobox", "textbox"]
+    ];
+
+    return compatibleGroups.some((group) => group.includes(wantedRole) && group.includes(actualRole));
   }
 
   function isCssSelectorCandidate(selector) {
@@ -329,15 +352,53 @@
       if (text && (text === wanted || text.includes(wanted) || wanted.includes(text))) {
         const element = closestClickable(node.parentElement) || node.parentElement;
         if (element) matches.push(element);
+        matches.push(...findNearbyInteractiveElements(node.parentElement));
       }
       node = textNodes.nextNode();
     }
 
-    return matches;
+    return Array.from(new Set(matches));
   }
 
   function closestClickable(element) {
     return element?.closest?.("a[href],button,[role='button'],[role='link'],[role='combobox'],[contenteditable='true']");
+  }
+
+  function findNearbyInteractiveElements(element) {
+    const results = [];
+    const seen = new Set();
+    const roots = [
+      element,
+      element?.parentElement,
+      element?.closest?.("label,fieldset,[role='group'],[role='region'],li,section,article,form,div")
+    ].filter(Boolean);
+    const selector = "input,select,textarea,button,[role='button'],[role='combobox'],[role='searchbox'],[aria-haspopup='listbox'],[contenteditable='true']";
+
+    for (const root of roots) {
+      for (const candidate of Array.from(root.querySelectorAll(selector))) {
+        if (!(candidate instanceof Element) || !isVisible(candidate) || seen.has(candidate)) {
+          continue;
+        }
+        seen.add(candidate);
+        results.push(candidate);
+        if (results.length >= 20) {
+          return results;
+        }
+      }
+    }
+
+    return results;
+  }
+
+  function getNearbyContextText(element) {
+    const sources = [
+      element?.getAttribute?.("aria-label"),
+      element?.getAttribute?.("title"),
+      element?.closest?.("label,fieldset,[role='group'],[role='region'],li,section,article,form,div")?.innerText,
+      element?.parentElement?.innerText
+    ];
+
+    return compactText(sources.filter(Boolean).join(" ")).slice(0, 240);
   }
 
   function verifyElement(element, target = {}) {
