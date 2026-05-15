@@ -7,8 +7,23 @@
     "textarea",
     "[role='button']",
     "[role='link']",
+    "[role='combobox']",
+    "[role='searchbox']",
     "[role='textbox']",
+    "[aria-haspopup='listbox']",
     "[contenteditable='true']"
+  ].join(",");
+  const FIELD_SELECTOR = [
+    "input",
+    "select",
+    "textarea",
+    "[contenteditable='true']",
+    "[role='textbox']",
+    "[role='searchbox']",
+    "[role='combobox']",
+    "button[aria-haspopup]",
+    "button[aria-controls]",
+    "[aria-controls][role='button']"
   ].join(",");
   const HEADING_SELECTOR = "h1,h2,h3,[role='heading']";
   const MAX_VISIBLE_TEXT = 30000;
@@ -31,7 +46,7 @@
   const buttonElements = getVisibleElements("button,[role='button'],input[type='button'],input[type='submit']");
   const interactiveElementsRaw = getVisibleElements(INTERACTIVE_SELECTOR);
   const formElements = Array.from(document.querySelectorAll("form"));
-  const formLikeFields = Array.from(document.querySelectorAll("input,select,textarea,[contenteditable='true']"));
+  const formLikeFields = Array.from(document.querySelectorAll(FIELD_SELECTOR)).filter(isFormFieldElement);
   const headingEntries = collectHeadings(headingElements);
   const linkEntries = collectLinks(linkElements, headingEntries);
   const buttonEntries = collectButtons(buttonElements, headingEntries);
@@ -168,7 +183,7 @@
     }
 
     return forms.slice(0, MAX_FORMS).map((form, index) => {
-      const fields = Array.from(form.querySelectorAll("input,select,textarea,[contenteditable='true']"));
+      const fields = Array.from(form.querySelectorAll(FIELD_SELECTOR)).filter(isFormFieldElement);
       return buildFormModel(form, `form_${index + 1}`, fields);
     });
   }
@@ -187,6 +202,9 @@
         disabled: Boolean(field.disabled || field.getAttribute("aria-disabled") === "true"),
         value: getFieldValue(field),
         options: getOptions(field),
+        expanded: getExpandedState(field),
+        popup_role: getPopupRole(field, summarizeControlledRegion(field)),
+        controlled_region: summarizeControlledRegion(field),
         selector_candidates: getSelectorCandidates(field),
         bbox: getBox(field),
         nearby_text: compactText(getNearbyText(field)).slice(0, 240)
@@ -488,8 +506,16 @@
       return "combobox";
     }
 
+    if (looksLikeCustomCombobox(element)) {
+      return "combobox";
+    }
+
     if (element.matches("textarea,[contenteditable='true']")) {
       return "textbox";
+    }
+
+    if (element.matches("input[type='search']")) {
+      return "searchbox";
     }
 
     const type = element.getAttribute("type") || "text";
@@ -574,6 +600,10 @@
       return element.innerText || "";
     }
 
+    if (looksLikeCustomCombobox(element)) {
+      return compactText(getElementRawText(element) || getAccessibleName(element) || "");
+    }
+
     if (element.type === "password") {
       return "";
     }
@@ -586,15 +616,32 @@
   }
 
   function getOptions(element) {
-    if (!element.matches("select")) {
+    if (element.matches("select")) {
+      return Array.from(element.options).map((option) => ({
+        label: compactText(option.text),
+        value: option.value,
+        selected: option.selected
+      }));
+    }
+
+    const controlledRegion = summarizeControlledRegion(element);
+    if (!controlledRegion) {
       return undefined;
     }
 
-    return Array.from(element.options).map((option) => ({
-      label: compactText(option.text),
-      value: option.value,
-      selected: option.selected
-    }));
+    const rawOptions = controlledRegion.actions?.length
+      ? controlledRegion.actions
+      : controlledRegion.titles?.map((title) => ({ label: title, value: title })) || [];
+
+    const options = rawOptions
+      .map((option) => ({
+        label: compactText(option.label || option.value || ""),
+        value: compactText(option.value || option.label || ""),
+        selected: false
+      }))
+      .filter((option) => option.label || option.value);
+
+    return options.length ? options : undefined;
   }
 
   function getExpandedState(element) {
@@ -810,6 +857,39 @@
     const heading = element.querySelector?.(`${HEADING_SELECTOR},legend`);
     if (heading?.innerText) return compactText(heading.innerText).slice(0, 160);
     return document.title || "Current page form";
+  }
+
+  function isFormFieldElement(element) {
+    if (!element || !isVisible(element)) {
+      return false;
+    }
+
+    if (element.matches("input,select,textarea,[contenteditable='true'],[role='textbox'],[role='searchbox'],[role='combobox']")) {
+      return true;
+    }
+
+    return looksLikeCustomCombobox(element);
+  }
+
+  function looksLikeCustomCombobox(element) {
+    if (!element?.matches) {
+      return false;
+    }
+
+    const role = String(element.getAttribute("role") || "").toLowerCase();
+    const popup = String(element.getAttribute("aria-haspopup") || "").toLowerCase();
+    if (role === "combobox") {
+      return true;
+    }
+
+    if (!element.matches("button,[role='button'],div,input")) {
+      return false;
+    }
+
+    return popup === "listbox"
+      || popup === "menu"
+      || element.hasAttribute("aria-controls")
+      || element.hasAttribute("aria-expanded");
   }
 
   function isVisible(element) {

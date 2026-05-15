@@ -894,28 +894,49 @@ async function executeBrowserLevelAction(tab, action, options = {}) {
       await chrome.tabs.update(tab.id, { active: true });
       await waitForTabSettled(tab.id);
     }
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => window.__browserCompanionActions.showNumberedOverlay()
-    });
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    const [{ result: overlayMap }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => window.__browserCompanionActions.getOverlayMap()
-    });
+    let overlayMap = [];
+    let dataUrl = "";
+    let captureError = "";
+
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => window.__browserCompanionActions.showNumberedOverlay()
+      });
+      overlayMap = Array.isArray(result) ? result : [];
+
+      try {
+        dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      } catch (error) {
+        captureError = error?.message || "Chrome blocked the viewport capture.";
+      }
+    } finally {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => window.__browserCompanionActions.clearNumberedOverlay()
+      }).catch(() => undefined);
+    }
+
     return {
       type: "execution_result",
       action_id: action.id || action.type,
-      status: "success",
+      status: overlayMap.length ? "success" : "error",
       target_verified: true,
       page_changed: false,
       artifact: {
         kind: "numbered_overlay",
         dataUrl,
-        overlayMap
+        overlayMap,
+        captureError
       },
       validation_messages: [],
-      log_message: "Captured a numbered overlay of visible controls."
+      log_message: overlayMap.length
+        ? (
+          dataUrl
+            ? "Captured a numbered overlay of visible controls."
+            : `Collected a numbered overlay map, but Chrome blocked the screenshot: ${captureError}`
+        )
+        : "Could not build the numbered overlay for the current page."
     };
   }
 

@@ -4054,8 +4054,20 @@ function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT) {
       value: field.value || "",
       disabled: Boolean(field.disabled),
       required: Boolean(field.required),
+      expanded: typeof field.expanded === "boolean" ? field.expanded : null,
+      popup_role: field.popup_role || "",
+      nearby_text: String(field.nearby_text || "").slice(0, 220),
       selector_candidates: compactSelectorsForProvider(field.selector_candidates),
-      options: Array.isArray(field.options) ? field.options.slice(0, 12) : []
+      options: Array.isArray(field.options) ? field.options.slice(0, 12) : [],
+      controlled_region: field.controlled_region
+        ? {
+            role: field.controlled_region.role || "",
+            label: field.controlled_region.label || "",
+            hidden: Boolean(field.controlled_region.hidden),
+            item_count: field.controlled_region.item_count || 0,
+            titles: Array.isArray(field.controlled_region.titles) ? field.controlled_region.titles.slice(0, 8) : []
+          }
+        : null
     }))
   }));
 }
@@ -6098,7 +6110,7 @@ function shouldRememberAfterResearch(text) {
 
 async function maybeSaveResearchMemory(plan, results, answerText) {
   const goal = state.pendingMemoryIntent?.goal || plan?.goal || [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
-  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "screenshot"].includes(result.artifact?.kind));
+  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "screenshot", "numbered_overlay"].includes(result.artifact?.kind));
 
   if (!shouldRememberAfterResearch(goal) || !hasResearchArtifact || !answerText || /^No browser actions/.test(answerText)) {
     return false;
@@ -6179,7 +6191,8 @@ const ACTION_CONTINUATION_ARTIFACT_KINDS = new Set([
   "page_observation",
   "web_search",
   "http_response",
-  "screenshot"
+  "screenshot",
+  "numbered_overlay"
 ]);
 
 const MAX_READ_ONLY_CONTINUATIONS = 4;
@@ -7081,7 +7094,7 @@ function formatHttpBodyPreview(artifact) {
 }
 
 async function maybeSynthesizeResults(plan, results) {
-  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation"].includes(result.artifact?.kind));
+  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "numbered_overlay"].includes(result.artifact?.kind));
 
   if (!hasResearchArtifact || !isSelectedProviderConnected()) {
     addDebugLog("provider.synthesis.skipped", {
@@ -7499,6 +7512,17 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
     };
   }
 
+  if (artifact.kind === "numbered_overlay") {
+    return {
+      kind: "numbered_overlay",
+      screenshotAvailable: Boolean(artifact.dataUrl),
+      captureError: String(artifact.captureError || "").slice(0, mode === "compact" ? 300 : 600),
+      overlayMap: Array.isArray(artifact.overlayMap)
+        ? artifact.overlayMap.slice(0, mode === "compact" ? 10 : 18)
+        : []
+    };
+  }
+
   if (artifact.kind === "tab_opened") {
     return {
       kind: "tab_opened",
@@ -7554,6 +7578,19 @@ function stripLargeArtifactsForSynthesis(result) {
     };
   }
 
+  if (result.artifact?.kind === "numbered_overlay") {
+    return {
+      ...result,
+      artifact: {
+        kind: "numbered_overlay",
+        captureError: String(result.artifact.captureError || "").slice(0, 1000),
+        overlayMap: Array.isArray(result.artifact.overlayMap)
+          ? result.artifact.overlayMap.slice(0, 24)
+          : []
+      }
+    };
+  }
+
   return result;
 }
 
@@ -7583,6 +7620,10 @@ function getArtifactSummary(artifact) {
     return "Page observation captured";
   }
 
+  if (artifact.kind === "numbered_overlay") {
+    return "Numbered overlay captured";
+  }
+
   return "Tool artifact";
 }
 
@@ -7609,6 +7650,15 @@ function getArtifactDetails(artifact) {
     return [
       "Viewport screenshot captured.",
       artifact.ocrText ? `OCR text: ${artifact.ocrText.slice(0, 600)}` : "No OCR text was extracted from the viewport."
+    ];
+  }
+
+  if (artifact.kind === "numbered_overlay") {
+    return [
+      `${Array.isArray(artifact.overlayMap) ? artifact.overlayMap.length : 0} visible controls were numbered.`,
+      artifact.captureError
+        ? `Screenshot unavailable: ${String(artifact.captureError).slice(0, 600)}`
+        : "Overlay screenshot captured successfully."
     ];
   }
 

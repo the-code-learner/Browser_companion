@@ -6,10 +6,11 @@
   window.__browserCompanionActions = {
     execute,
     showNumberedOverlay,
-    getOverlayMap
+    getOverlayMap,
+    clearNumberedOverlay
   };
 
-  function execute(action) {
+  async function execute(action) {
     try {
       if (!action?.type) {
         throw new Error("Action type is missing.");
@@ -75,7 +76,7 @@
       }
 
       if (action.type === "select_option") {
-        return selectOption(action, element);
+        return await selectOption(action, element);
       }
 
       if (action.type === "toggle_checkbox") {
@@ -120,7 +121,7 @@
 
   function showNumberedOverlay() {
     clearNumberedOverlay();
-    overlayMap = Array.from(document.querySelectorAll("a[href],button,input,select,textarea,[role='button'],[role='link'],[contenteditable='true']"))
+    overlayMap = Array.from(document.querySelectorAll("a[href],button,input,select,textarea,[role='button'],[role='link'],[role='combobox'],[role='searchbox'],[contenteditable='true'],[aria-haspopup='listbox']"))
       .filter(isVisible)
       .slice(0, 60)
       .map((element, index) => {
@@ -166,19 +167,43 @@
     };
   }
 
-  function selectOption(action, element) {
+  async function selectOption(action, element) {
     const before = getValue(element);
-    const wanted = String(action.value ?? "");
-    const option = Array.from(element.options || []).find((item) => item.value === wanted || item.text.trim() === wanted);
+    const wanted = String(action.value ?? "").trim();
 
+    if (!wanted) {
+      throw new Error(`Option value is missing for ${getName(element)}.`);
+    }
+
+    if (element.matches("select")) {
+      const option = Array.from(element.options || []).find((item) => item.value === wanted || item.text.trim() === wanted);
+
+      if (!option) {
+        throw new Error(`Option was not found for ${getName(element)}.`);
+      }
+
+      element.value = option.value;
+      dispatchInputEvents(element);
+      return {
+        ...success(action, false, `Selected ${option.text.trim()} for ${getName(element)}.`),
+        before: { value: before },
+        after: { value: getValue(element) },
+        validation_messages: getValidationMessages(element)
+      };
+    }
+
+    const option = await findCustomOptionForControl(element, wanted);
     if (!option) {
       throw new Error(`Option was not found for ${getName(element)}.`);
     }
 
-    element.value = option.value;
-    dispatchInputEvents(element);
+    option.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    option.click?.();
+    await waitForUiUpdate();
+
+    const selectedLabel = getName(option) || wanted;
     return {
-      ...success(action, false, `Selected ${option.text.trim()} for ${getName(element)}.`),
+      ...success(action, false, `Selected ${selectedLabel} for ${getName(element)}.`),
       before: { value: before },
       after: { value: getValue(element) },
       validation_messages: getValidationMessages(element)
@@ -236,7 +261,7 @@
 
     const candidates = [
       ...selectorMatches,
-      ...document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[role='link'],[contenteditable='true']"),
+      ...document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[role='link'],[role='combobox'],[role='searchbox'],[contenteditable='true'],[aria-haspopup='listbox']"),
       ...findElementsByVisibleText(target.name)
     ];
     const wantedRole = String(target.role || "").toLowerCase();
@@ -312,7 +337,7 @@
   }
 
   function closestClickable(element) {
-    return element?.closest?.("a[href],button,[role='button'],[role='link'],[contenteditable='true']");
+    return element?.closest?.("a[href],button,[role='button'],[role='link'],[role='combobox'],[contenteditable='true']");
   }
 
   function verifyElement(element, target = {}) {
@@ -360,6 +385,10 @@
   function getValue(element) {
     if (element.matches("[contenteditable='true']")) {
       return element.innerText || "";
+    }
+
+    if (looksLikeCustomCombobox(element)) {
+      return compactText(element.innerText || element.textContent || element.getAttribute("value") || "");
     }
 
     if (element.type === "checkbox" || element.type === "radio") {
@@ -503,11 +532,149 @@
   function inferRole(element) {
     if (element.getAttribute("role")) return element.getAttribute("role").toLowerCase();
     if (element.matches("select")) return "combobox";
+    if (looksLikeCustomCombobox(element)) return "combobox";
     if (element.matches("textarea,[contenteditable='true']")) return "textbox";
     if (element.matches("button,a[href]")) return element.matches("a[href]") ? "link" : "button";
     if (element.type === "checkbox") return "checkbox";
     if (element.type === "radio") return "radio";
     return "textbox";
+  }
+
+  async function findCustomOptionForControl(control, wantedLabel) {
+    control.scrollIntoView?.({ block: "center", inline: "nearest" });
+    if (document.activeElement !== control) {
+      control.focus?.();
+    }
+
+    if (control.getAttribute("aria-expanded") !== "true") {
+      control.click?.();
+      await waitForUiUpdate();
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const option = queryMatchingCustomOption(control, wantedLabel);
+      if (option) {
+        return option;
+      }
+      await waitForUiUpdate();
+    }
+
+    return null;
+  }
+
+  function queryMatchingCustomOption(control, wantedLabel) {
+    const wanted = normalize(wantedLabel);
+    const candidates = [];
+    const seen = new Set();
+    const optionSelector = [
+      "[role='option']",
+      "[role='menuitem']",
+      "[role='menuitemcheckbox']",
+      "[role='menuitemradio']",
+      "[aria-selected]",
+      "[data-value]",
+      "option",
+      "li",
+      "button",
+      "a[href]"
+    ].join(",");
+
+    for (const root of getCustomOptionSearchRoots(control)) {
+      for (const node of Array.from(root.querySelectorAll(optionSelector))) {
+        if (!(node instanceof Element) || !isVisible(node)) {
+          continue;
+        }
+        if (seen.has(node)) {
+          continue;
+        }
+        seen.add(node);
+        candidates.push(node);
+      }
+    }
+
+    let best = null;
+    let bestScore = -1;
+
+    for (const candidate of candidates) {
+      const label = normalize(getName(candidate) || candidate.textContent || "");
+      if (!label) {
+        continue;
+      }
+
+      let score = 0;
+      if (label === wanted) {
+        score = 100;
+      } else if (label.includes(wanted)) {
+        score = 80;
+      } else if (wanted.includes(label) && label.length > 2) {
+        score = 60;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+
+    return bestScore > 0 ? best : null;
+  }
+
+  function getCustomOptionSearchRoots(control) {
+    const roots = [];
+    const seen = new Set();
+    const controlledIds = `${control.getAttribute("aria-controls") || ""} ${control.getAttribute("aria-owns") || ""}`
+      .split(/\s+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    for (const id of controlledIds) {
+      const node = document.getElementById(id);
+      if (node && !seen.has(node)) {
+        seen.add(node);
+        roots.push(node);
+      }
+    }
+
+    const popupAncestors = Array.from(document.querySelectorAll("[role='listbox'],[role='menu'],[role='dialog']"))
+      .filter((node) => isVisible(node));
+    for (const node of popupAncestors) {
+      if (!seen.has(node)) {
+        seen.add(node);
+        roots.push(node);
+      }
+    }
+
+    if (!roots.length) {
+      roots.push(document);
+    }
+
+    return roots;
+  }
+
+  function looksLikeCustomCombobox(element) {
+    if (!element?.matches) {
+      return false;
+    }
+
+    const role = String(element.getAttribute("role") || "").toLowerCase();
+    const popup = String(element.getAttribute("aria-haspopup") || "").toLowerCase();
+
+    if (role === "combobox") {
+      return true;
+    }
+
+    if (!element.matches("button,[role='button'],div,input")) {
+      return false;
+    }
+
+    return popup === "listbox"
+      || popup === "menu"
+      || element.hasAttribute("aria-controls")
+      || element.hasAttribute("aria-expanded");
+  }
+
+  async function waitForUiUpdate() {
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
   }
 
   function normalize(value) {
