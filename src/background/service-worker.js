@@ -518,7 +518,7 @@ async function executeActionPlan(plan) {
     }
 
     if (needsTabScript(action)) {
-      const permission = await ensureTabOriginPermission(targetTab);
+      const permission = await ensureTabOriginPermission(targetTab, { request: false });
       if (!permission.ok) {
         return {
           ok: false,
@@ -622,7 +622,7 @@ function actionMayChangePage(action) {
   ].includes(action?.type);
 }
 
-async function ensureTabOriginPermission(tab) {
+async function ensureTabOriginPermission(tab, options = {}) {
   const originPattern = getTabOriginPattern(tab);
   if (!tab?.url || !originPattern) {
     return {
@@ -639,9 +639,25 @@ async function ensureTabOriginPermission(tab) {
     return { ok: true };
   }
 
-  const granted = await chrome.permissions.request({
-    origins: [originPattern]
-  });
+  if (options.request === false) {
+    return {
+      ok: false,
+      error: `Site access is not granted for ${originPattern}. Grant access from the side panel and then continue the pending action.`
+    };
+  }
+
+  let granted = false;
+
+  try {
+    granted = await chrome.permissions.request({
+      origins: [originPattern]
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Chrome can only request site access during a direct user gesture. Use a side-panel button or Observe to trigger the prompt for ${originPattern}.`
+    };
+  }
 
   return granted
     ? { ok: true }
@@ -700,7 +716,7 @@ async function executeBrowserLevelAction(tab, action, options = {}) {
     try {
       const targetTab = await chrome.tabs.get(tabId);
       assertSupportedTab(targetTab);
-      const permission = await ensureTabOriginPermission(targetTab);
+      const permission = await ensureTabOriginPermission(targetTab, { request: false });
       if (!permission.ok) {
         return {
           type: "execution_result",

@@ -77,6 +77,7 @@ const state = {
   pendingPlan: null,
   pendingPlanContext: null,
   pendingPolicy: null,
+  pendingPermissionRequest: null,
   confirmationText: "",
   sessionApprovals: [],
   privacy: {
@@ -228,6 +229,7 @@ function render(options = {}) {
     </details>
 
     ${state.pendingPlan ? renderActionPreview() : ""}
+    ${state.pendingPermissionRequest ? renderPermissionRequestPreview() : ""}
 
     <section id="chat-log" class="chat-log" aria-label="Chat messages">
       ${renderChatTimeline()}
@@ -379,6 +381,11 @@ function render(options = {}) {
         updateConfirmButtonState();
       });
     }
+  }
+
+  if (state.pendingPermissionRequest) {
+    document.getElementById("grant-permission-request").addEventListener("click", grantPendingPermissionRequest);
+    document.getElementById("cancel-permission-request").addEventListener("click", cancelPendingPermissionRequest);
   }
 
   restoreTransientInputState(transientInputState);
@@ -1288,6 +1295,32 @@ function renderPolicyDetails(policy) {
 function renderAction(action) {
   const target = action.target?.name ? ` on ${action.target.name}` : "";
   return `<li><strong>${escapeHtml(action.type)}${escapeHtml(target)}</strong><span>${escapeHtml(action.reason || "")}</span></li>`;
+}
+
+function renderPermissionRequestPreview() {
+  const request = state.pendingPermissionRequest;
+  const details = (request.details || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+
+  return `
+    <section class="action-preview" aria-label="Permission request">
+      <div class="section-title">
+        <div>
+          <h2>Site Access Needed</h2>
+          <p>${escapeHtml(request.message || "Browser Companion needs site access before continuing this action.")}</p>
+        </div>
+        <span class="risk medium">permission</span>
+      </div>
+      ${request.summary ? `<p>${escapeHtml(request.summary)}</p>` : ""}
+      <ul class="compact-list">
+        ${(request.origins || []).map((origin) => `<li><strong>${escapeHtml(origin)}</strong><span>Required to continue the pending browser action.</span></li>`).join("")}
+      </ul>
+      ${details ? `<ul class="policy-list">${details}</ul>` : ""}
+      <div class="preview-actions">
+        <button id="cancel-permission-request" type="button">Cancel</button>
+        <button id="grant-permission-request" type="button">Grant Access and Continue</button>
+      </div>
+    </section>
+  `;
 }
 
 function renderAttachment(file) {
@@ -4143,6 +4176,7 @@ async function handleAgentResult(result, options = {}) {
       error: policyResponse.error || ""
     }, policyResponse.ok ? "Policy validated" : policyResponse.error);
     state.confirmationText = "";
+    state.pendingPermissionRequest = null;
     state.messages.push({
       role: "assistant",
       text: result.summary_for_user,
@@ -4551,9 +4585,25 @@ async function executeActionPlan(plan, options = {}) {
     return;
   }
 
-  const permission = await ensurePermissionForActionPlan(actions);
+  const permission = await ensurePermissionForActionPlan(actions, { planContext: options.planContext });
 
   if (!permission.ok) {
+    if (permission.permissionRequest) {
+      state.pendingPermissionRequest = {
+        ...permission.permissionRequest,
+        plan: normalizedPlan,
+        planContext: options.planContext || null
+      };
+      state.messages.push({
+        role: "assistant",
+        text: permission.error,
+        createdAt: Date.now()
+      });
+      state.activity.unshift("Waiting for site access before continuing the action plan.");
+      render();
+      return;
+    }
+
     state.messages.push({
       role: "assistant",
       text: permission.error,
@@ -4565,6 +4615,7 @@ async function executeActionPlan(plan, options = {}) {
     return;
   }
 
+  state.pendingPermissionRequest = null;
   state.activity.unshift("Executing browser action plan...");
   addActionNote("Executing browser actions", actions.map(formatActionDetail));
   addDebugLog("action.execute.start", { plan: normalizedPlan }, `${actions.length} action(s).`);
@@ -5286,24 +5337,171 @@ function isPageBoundAction(action) {
   ].includes(action?.type);
 }
 
-async function ensurePermissionForActionPlan(actions) {
-  if (!actions.some((action) => needsActiveTabReadPermission(action) && !getActionTargetTabId(action))) {
-    return { ok: true };
-  }
-
-  const observed = await observePage({
-    reason: "read the current page for this browser action",
-    skipWaitingMessage: false
-  });
-
-  if (observed) {
+async function ensurePermissionForActionPlan(actions, options = {}) {
+  const permissionRequest = await buildPermissionRequestForActionPlan(actions, options);
+  if (!permissionRequest) {
     return { ok: true };
   }
 
   return {
     ok: false,
-    error: "I need site access permission before I can read or act on this page. Click Observe or retry the request; if Chrome shows the prompt, approve site access."
+    error: permissionRequest.message,
+    permissionRequest
   };
+}
+
+async function buildPermissionRequestForActionPlan(actions, options = {}) {
+  const missingOrigins = new Map();
+  const currentPageOriginPattern = await getActionPlanCurrentOriginPattern(actions, options.planContext);
+  const requiresCurrentPageAccess = actions.some((action) => needsActiveTabReadPermission(action) && !getActionTargetTabId(action));
+
+  if (requiresCurrentPageAccess) {
+    if (!currentPageOriginPattern) {
+      return {
+        origins: [],
+        message: "I need site access before I can continue, but I could not determine the current page origin. Open the target page and click Observe, then retry.",
+        summary: "The pending action plan needs access to the current page.",
+        details: ["The current page is not a normal http or https tab, or it is no longer available."]
+      };
+    }
+
+    const hasCurrentPagePermission = await chrome.permissions.contains({
+      origins: [currentPageOriginPattern]
+    }).catch(() => false);
+
+    if (!hasCurrentPagePermission) {
+      missingOrigins.set(currentPageOriginPattern, `Grant access to ${currentPageOriginPattern} so Browser Companion can continue on the current page.`);
+    }
+  }
+
+  const knownTabReadActions = actions
+    .filter((action) => action?.type === "observe_known_tab" || (needsActiveTabReadPermission(action) && getActionTargetTabId(action)));
+
+  for (const action of knownTabReadActions) {
+    const tabId = getActionTargetTabId(action);
+    if (!Number.isInteger(tabId)) {
+      continue;
+    }
+
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const originPattern = getOriginPatternForTab(tab);
+
+    if (!originPattern) {
+      return {
+        origins: [],
+        message: "The target tab cannot be read by Browser Companion. Open a normal http or https page in that tab and retry.",
+        summary: "The pending action plan points to a tab that is not readable.",
+        details: [`Tab ${tabId} is missing or uses a restricted URL.`]
+      };
+    }
+
+    const hasPermission = await chrome.permissions.contains({
+      origins: [originPattern]
+    }).catch(() => false);
+
+    if (!hasPermission) {
+      const label = tab?.title || tab?.url || `tab ${tabId}`;
+      missingOrigins.set(originPattern, `Grant access to ${originPattern} so Browser Companion can inspect ${label}.`);
+    }
+  }
+
+  if (!missingOrigins.size) {
+    return null;
+  }
+
+  const origins = [...missingOrigins.keys()];
+  const message = origins.length === 1
+    ? `I need site access for ${origins[0]} before I can continue this action. Use the button below and Chrome will show the permission prompt if needed.`
+    : "I need site access for the listed sites before I can continue this action. Use the button below and Chrome will show the permission prompt if needed.";
+
+  return {
+    origins,
+    message,
+    summary: "The action plan is ready to continue as soon as the required host permissions are granted.",
+    details: [...missingOrigins.values()]
+  };
+}
+
+async function getActionPlanCurrentOriginPattern(actions, planContext) {
+  if (!actions.some((action) => needsActiveTabReadPermission(action) && !getActionTargetTabId(action))) {
+    return "";
+  }
+
+  const contextUrl = planContext?.url || state.page.observation?.tab?.url || state.page.url || "";
+  const contextOriginPattern = getOriginPatternForUrl(contextUrl);
+  if (contextOriginPattern) {
+    return contextOriginPattern;
+  }
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  return getOriginPatternForTab(tab);
+}
+
+function getOriginPatternForTab(tab) {
+  return getOriginPatternForUrl(tab?.url || "");
+}
+
+function getOriginPatternForUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl || "");
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return "";
+    }
+    return `${url.origin}/*`;
+  } catch {
+    return "";
+  }
+}
+
+async function grantPendingPermissionRequest() {
+  const pending = state.pendingPermissionRequest;
+  if (!pending?.origins?.length) {
+    return;
+  }
+
+  let granted = false;
+
+  try {
+    granted = await chrome.permissions.request({
+      origins: pending.origins
+    });
+  } catch (error) {
+    state.messages.push({
+      role: "assistant",
+      text: error.message || "Chrome could not show the site access prompt from this request.",
+      variant: "error",
+      createdAt: Date.now()
+    });
+    state.activity.unshift(`Permission request failed: ${error.message || "Unexpected error."}`);
+    render();
+    return;
+  }
+
+  if (!granted) {
+    state.messages.push({
+      role: "assistant",
+      text: "Site access was not granted, so I paused the pending browser action.",
+      createdAt: Date.now()
+    });
+    state.activity.unshift("Permission request was declined.");
+    render();
+    return;
+  }
+
+  const plan = normalizePlan(pending.plan);
+  const planContext = pending.planContext || null;
+  state.pendingPermissionRequest = null;
+  state.activity.unshift(`Granted site access for ${pending.origins.join(", ")}.`);
+  render();
+  await executeActionPlan(plan, { planContext });
+}
+
+function cancelPendingPermissionRequest() {
+  state.pendingPermissionRequest = null;
+  state.activity.unshift("Permission request canceled.");
+  addActionNote("Canceled permission request", ["The pending browser action will not continue until site access is granted."]);
+  persistSession();
+  render();
 }
 
 function needsActiveTabReadPermission(action) {
@@ -5371,7 +5569,9 @@ function normalizePlan(plan) {
 
 function cancelPendingPlan() {
   state.pendingPlan = null;
+  state.pendingPlanContext = null;
   state.pendingPolicy = null;
+  state.pendingPermissionRequest = null;
   state.confirmationText = "";
   state.activity.unshift("Action plan canceled.");
   addActionNote("Canceled action approval", ["The pending browser action plan was canceled."]);
@@ -7599,7 +7799,9 @@ function clearSession() {
     }
   ];
   state.pendingPlan = null;
+  state.pendingPlanContext = null;
   state.pendingPolicy = null;
+  state.pendingPermissionRequest = null;
   state.pendingMemoryProposal = null;
   state.pendingMemoryIntent = null;
   state.sessionApprovals = [];
