@@ -3353,6 +3353,7 @@ function normalizeGeminiNanoAgentPayload(result, payload = {}) {
 }
 
 async function getAgentResult(goal, options = {}) {
+  goal = expandAgentGoal(goal);
   const responseLanguage = detectUserLanguage(goal);
   const navigationPlan = buildNavigationPlan(goal, responseLanguage);
 
@@ -3719,6 +3720,7 @@ function compactObservationForProvider(observation, context = {}) {
     links: compactElementsForProvider(observation.links, elementLimit),
     buttons: compactElementsForProvider(observation.buttons, elementLimit),
     forms: compactFormsForProvider(observation.forms, formLimit),
+    interactive_elements: compactElementsForProvider(observation.interactive_elements, elementLimit),
     counts,
     page_outline: pageOutline,
     structured_items: structuredItems,
@@ -3845,10 +3847,13 @@ function buildFocusedContextForProvider(observation, context = {}, mode = "full"
     return [];
   }
 
-  const ranked = rankContentBlocks(blocks, context);
+  const ranked = rankContentBlocks(blocks, context).map((block, index) => ({
+    ...block,
+    __rank_index: index
+  }));
   const limit = mode === "compact" ? PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_LIMIT;
   const textBudget = mode === "compact" ? PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT;
-  const output = [];
+  const selected = [];
   let used = 0;
 
   for (const block of ranked) {
@@ -3856,12 +3861,12 @@ function buildFocusedContextForProvider(observation, context = {}, mode = "full"
     if (!text) {
       continue;
     }
-    if (used >= textBudget || output.length >= limit) {
+    if (used >= textBudget || selected.length >= limit) {
       break;
     }
 
     const slice = text.slice(0, Math.max(120, textBudget - used));
-    output.push({
+    selected.push({
       block_id: block.block_id || "",
       kind: block.kind || "section",
       section_id: block.section_id || "",
@@ -3869,18 +3874,53 @@ function buildFocusedContextForProvider(observation, context = {}, mode = "full"
       item_id: block.item_id || "",
       title: String(block.title || "").slice(0, 200),
       text: slice,
-      destination_url: block.destination_url || ""
+      destination_url: block.destination_url || "",
+      bbox: block.bbox || null,
+      __rank_index: block.__rank_index || 0
     });
     used += slice.length;
   }
 
-  return output;
+  return orderFocusedContextForPresentation(selected, context).map((block) => ({
+    block_id: block.block_id || "",
+    kind: block.kind || "section",
+    section_id: block.section_id || "",
+    section_title: block.section_title || "",
+    item_id: block.item_id || "",
+    title: String(block.title || "").slice(0, 200),
+    text: String(block.text || ""),
+    destination_url: block.destination_url || ""
+  }));
 }
 
 function buildRetrievalBlocks(observation) {
   const blocks = [];
   for (const block of Array.isArray(observation?.content_blocks) ? observation.content_blocks : []) {
     blocks.push(block);
+  }
+  for (const element of Array.isArray(observation?.interactive_elements) ? observation.interactive_elements : []) {
+    if (!element || !["button", "combobox", "searchbox", "textbox", "link"].includes(element.role)) {
+      continue;
+    }
+    blocks.push({
+      block_id: `interactive_block_${element.agent_id || blocks.length + 1}`,
+      kind: "interactive",
+      section_id: element.nearest_heading?.agent_id ? `section_${element.nearest_heading.agent_id}` : "section_root",
+      section_title: element.nearest_heading?.name || observation.tab?.title || "Current page",
+      item_id: element.agent_id || "",
+      title: element.name || element.text || element.agent_id || "",
+      text: [
+        element.name || "",
+        element.text || "",
+        element.popup_role ? `popup_role=${element.popup_role}` : "",
+        Array.isArray(element.controlled_region?.titles) ? element.controlled_region.titles.join(" | ") : "",
+        Array.isArray(element.link_candidates)
+          ? element.link_candidates.map((candidate) => candidate.text || candidate.aria_label || candidate.title || "").filter(Boolean).join(" | ")
+          : ""
+      ].filter(Boolean).join(" | "),
+      destination_url: element.destination_url || element.href || "",
+      bbox: element.bbox || null
+    });
   }
   for (const item of Array.isArray(observation?.structured_items) ? observation.structured_items : []) {
     blocks.push({
@@ -3891,7 +3931,8 @@ function buildRetrievalBlocks(observation) {
       item_id: item.item_id || "",
       title: item.title || item.label || "",
       text: [item.title, item.metadata, item.text_preview].filter(Boolean).join(" | "),
-      destination_url: item.destination_url || item.href || ""
+      destination_url: item.destination_url || item.href || "",
+      bbox: item.bbox || null
     });
   }
   if (!blocks.length && observation?.visible_text) {
@@ -3905,6 +3946,65 @@ function buildRetrievalBlocks(observation) {
     });
   }
   return blocks;
+}
+
+function orderFocusedContextForPresentation(blocks = [], context = {}) {
+  const items = [...(Array.isArray(blocks) ? blocks : [])];
+  if (!isFilterIntentContext(context)) {
+    return items;
+  }
+
+  return items.sort((a, b) => {
+    const aControl = isControlLikeBlock(a);
+    const bControl = isControlLikeBlock(b);
+    if (aControl !== bControl) {
+      return aControl ? -1 : 1;
+    }
+
+    if (aControl && bControl) {
+      const visual = compareBlocksByVisualOrder(a, b);
+      if (visual !== 0) {
+        return visual;
+      }
+    }
+
+    return (a.__rank_index || 0) - (b.__rank_index || 0);
+  });
+}
+
+function isFilterIntentContext(context = {}) {
+  const goal = String(context.goal || "").toLowerCase();
+  return /\b(filter|filters|search|form|dropdown|drop-down|menu|menus|location|remote|country|region|city|role type|skill set|other filters|areas)\b/i.test(goal);
+}
+
+function isControlLikeBlock(block = {}) {
+  return ["form", "field", "interactive"].includes(block.kind);
+}
+
+function compareBlocksByVisualOrder(a = {}, b = {}) {
+  const boxA = a.bbox || null;
+  const boxB = b.bbox || null;
+  if (!boxA && !boxB) {
+    return 0;
+  }
+  if (!boxA) {
+    return 1;
+  }
+  if (!boxB) {
+    return -1;
+  }
+
+  const yDiff = Number(boxA.y || 0) - Number(boxB.y || 0);
+  if (Math.abs(yDiff) > 24) {
+    return yDiff;
+  }
+
+  const xDiff = Number(boxA.x || 0) - Number(boxB.x || 0);
+  if (Math.abs(xDiff) > 12) {
+    return xDiff;
+  }
+
+  return (Number(boxA.h || 0) - Number(boxB.h || 0));
 }
 
 function rankStructuredItems(items = [], context = {}) {
@@ -3932,6 +4032,7 @@ function rankContentBlocks(blocks = [], context = {}) {
         block.section_title
       ].filter(Boolean).join(" "), context)
         + (block.kind === "item" ? 1 : 0)
+        + getListingPenalty(block, context)
         + getFilterIntentBlockBoost(block, context)
     }))
     .sort((a, b) => b.__score - a.__score || String(a.title || "").localeCompare(String(b.title || "")));
@@ -3944,14 +4045,27 @@ function getFilterIntentBlockBoost(block = {}, context = {}) {
   }
 
   if (block.kind === "form") {
-    return 10;
+    return 24;
   }
 
   if (block.kind === "field") {
-    return 8;
+    return 22;
+  }
+
+  if (block.kind === "interactive") {
+    return 18;
   }
 
   return 0;
+}
+
+function getListingPenalty(block = {}, context = {}) {
+  const goal = String(context.goal || "").toLowerCase();
+  if (!/\b(filter|filters|dropdown|drop-down|menu|menus|location|remote|country|region|role type)\b/i.test(goal)) {
+    return 0;
+  }
+
+  return block.kind === "item" ? -6 : 0;
 }
 
 function scoreContextText(text, context = {}) {
@@ -4198,7 +4312,7 @@ async function handleAgentResult(result, options = {}) {
 
   if (result?.type === "agent_plan") {
     const hasPageBoundActions = (result.actions || []).some(isPageBoundAction);
-    const planContext = hasPageBoundActions ? (options.planContext || createPlanPageContext(result)) : null;
+    const planContext = hasPageBoundActions ? (createPlanPageContext(result) || options.planContext || null) : null;
     const policyResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.VALIDATE_ACTION_PLAN, { plan: result }));
     addDebugLog("policy.validation", {
       plan: result,
@@ -4208,14 +4322,17 @@ async function handleAgentResult(result, options = {}) {
     }, policyResponse.ok ? "Policy validated" : policyResponse.error);
     state.confirmationText = "";
     state.pendingPermissionRequest = null;
-    state.messages.push({
-      role: "assistant",
-      text: result.summary_for_user,
-      thinking: getAgentDisplayThinking(result),
-      createdAt: Date.now()
-    });
-
     const policy = policyResponse.envelope.payload;
+    const silentReadOnlyAutoPlan = policy.allowed && !policy.requiresConfirmation && isReadOnlyContextPlan(result);
+
+    if (!silentReadOnlyAutoPlan) {
+      state.messages.push({
+        role: "assistant",
+        text: result.summary_for_user,
+        thinking: getAgentDisplayThinking(result),
+        createdAt: Date.now()
+      });
+    }
 
     if (policy.allowed && !policy.requiresConfirmation) {
       state.activity.unshift("Executing low-risk action plan.");
@@ -4677,7 +4794,7 @@ async function executeActionPlan(plan, options = {}) {
       state.pendingPermissionRequest = {
         ...permission.permissionRequest,
         plan: normalizedPlan,
-        planContext: options.planContext || null
+        planContext: getLatestPlanContext(options.planContext)
       };
       state.messages.push({
         role: "assistant",
@@ -4758,17 +4875,17 @@ async function executeActionPlan(plan, options = {}) {
       results
     }, "Continuing after read-only context action.");
     render();
-    const followUpResult = await getAgentResult(goal, {
+      const followUpResult = await getAgentResult(goal, {
       continuationDepth,
       continuationReason: appendSteeredContinuationReason(
         "A read-only browser action was just executed to gather context. Use the updated page observation to answer the user's original request now if possible. Only request another read-only action if essential.",
         steeredQueueItem
       ),
-      planContext: options.planContext || getObservedPageContext()
+      planContext: getLatestPlanContext(options.planContext)
     });
     await handleAgentResult(followUpResult, {
       continuationDepth,
-      planContext: options.planContext || getObservedPageContext()
+      planContext: getLatestPlanContext(options.planContext)
     });
     return;
   }
@@ -4789,7 +4906,7 @@ async function executeActionPlan(plan, options = {}) {
   if (steeredQueueItem || shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized.text, options)) {
     const goal = buildSteeredContinuationGoal(normalizedPlan.goal || getLastUserMessageText() || "", steeredQueueItem);
     const continuationDepth = (options.continuationDepth || 0) + 1;
-    const planContext = options.planContext || getObservedPageContext();
+    const planContext = getLatestPlanContext(options.planContext);
     state.activity.unshift("Continuing with the latest action results.");
     addDebugLog("agent.auto_continue_after_actions", {
       goal,
@@ -4873,7 +4990,7 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
 
   const goal = buildSteeredContinuationGoal(plan.goal || getLastUserMessageText() || "", options.steeredQueueItem);
   const responseLanguage = detectUserLanguage(goal);
-  const planContext = options.planContext || getObservedPageContext();
+  const planContext = getLatestPlanContext(options.planContext);
   const completionResults = appendCurrentObservationArtifact(results);
 
   state.activity.unshift("Finishing the request with the gathered page context.");
@@ -5040,6 +5157,38 @@ function isActionOnlyCompletionText(text) {
 
 function getLastUserMessageText() {
   return [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
+}
+
+function getLatestPlanContext(fallbackContext = null) {
+  return getObservedPageContext() || fallbackContext || null;
+}
+
+function expandAgentGoal(goal) {
+  const rawGoal = compact(goal || "");
+  if (!isRetryLikeGoal(rawGoal)) {
+    return rawGoal;
+  }
+
+  const previousMeaningfulUserMessage = [...state.messages]
+    .reverse()
+    .filter((message) => message.role === "user")
+    .map((message) => compact(message.text || ""))
+    .find((text) => text && text !== rawGoal && !isRetryLikeGoal(text));
+
+  if (!previousMeaningfulUserMessage) {
+    return rawGoal;
+  }
+
+  return compact(`Retry the previous user request: ${previousMeaningfulUserMessage}`);
+}
+
+function isRetryLikeGoal(text) {
+  const value = compact(text || "").toLowerCase();
+  if (!value) {
+    return false;
+  }
+
+  return /^(retry|try again|riprova|again|again please|ripeti|ritenta)\b/.test(value);
 }
 
 async function getCurrentActiveTab() {

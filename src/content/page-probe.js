@@ -200,6 +200,7 @@
     return {
       agent_id: agentId,
       title: inferSectionTitle(container),
+      bbox: getBox(container),
       fields: fields.filter(isVisible).slice(0, MAX_FORM_FIELDS).map((field, index) => ({
         agent_id: ensureAgentId(field, `${agentId}_field`, index),
         tag: field.tagName.toLowerCase(),
@@ -437,7 +438,8 @@
         section_id: "section_filters",
         section_title: form.title || "Form",
         title: form.title || "Form",
-        text: `Fields: ${fieldNames.join(" | ")}`
+        text: `Fields: ${fieldNames.join(" | ")}`,
+        bbox: form.bbox || null
       });
 
       for (const field of (Array.isArray(form.fields) ? form.fields : []).slice(0, 16)) {
@@ -463,7 +465,8 @@
           section_title: form.title || "Form",
           item_id: field.agent_id || "",
           title: field.name || field.agent_id || "Field",
-          text: pieces.join(" | ")
+          text: pieces.join(" | "),
+          bbox: field.bbox || null
         });
       }
     }

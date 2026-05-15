@@ -499,17 +499,19 @@ async function executeActionPlan(plan) {
     throw new Error("No active tab is available.");
   }
 
+  let currentActiveTab = tab;
+
   const results = [];
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
   const requiresCurrentTabAccess = actions.some((action) => usesCurrentActiveTabContext(action));
   const openInNewTabCount = actions.filter((action) => action?.type === "open_url_new_tab").length;
 
   if (requiresCurrentTabAccess) {
-    assertSupportedTab(tab);
+    assertSupportedTab(currentActiveTab);
   }
 
   for (const action of actions) {
-    const targetTab = await resolveActionExecutionTab(tab, action);
+    const targetTab = await resolveActionExecutionTab(currentActiveTab, action);
     if (!targetTab?.id) {
       return {
         ok: false,
@@ -532,11 +534,14 @@ async function executeActionPlan(plan) {
       ? await chrome.tabs.get(targetTab.id).catch(() => null)
       : null;
     const browserLevelResult = await executeBrowserLevelAction(targetTab, action, {
-      currentActiveTab: tab,
+      currentActiveTab,
       openInNewTabCount
     });
     if (browserLevelResult) {
       results.push(browserLevelResult);
+      if (usesCurrentActiveTabContext(action)) {
+        currentActiveTab = await chrome.tabs.get(targetTab.id).catch(() => currentActiveTab);
+      }
       continue;
     }
 
@@ -551,6 +556,9 @@ async function executeActionPlan(plan) {
     }
 
     results.push(result);
+    if (usesCurrentActiveTabContext(action)) {
+      currentActiveTab = await chrome.tabs.get(targetTab.id).catch(() => currentActiveTab);
+    }
   }
 
   return {
@@ -600,7 +608,11 @@ async function resolveActionExecutionTab(currentActiveTab, action) {
     }
   }
 
-  return currentActiveTab;
+  if (!currentActiveTab?.id) {
+    return currentActiveTab || null;
+  }
+
+  return chrome.tabs.get(currentActiveTab.id).catch(() => currentActiveTab);
 }
 
 function needsTabScript(action) {
@@ -1029,6 +1041,7 @@ async function maybeWarmOpenedTab(tab, openInNewTabCount = 0) {
 
 async function tryObserveTabForAction(tab, action, options = {}) {
   try {
+    await waitForTabSettled(tab.id).catch(() => null);
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ["src/content/page-probe.js"]
