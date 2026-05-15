@@ -946,7 +946,8 @@ h2 {
 .action-preview {
   display: grid;
   gap: 10px;
-  max-height: min(42vh, 420px);
+  min-height: clamp(220px, 34vh, 320px);
+  max-height: min(62vh, 560px);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 12px;
