@@ -1345,7 +1345,7 @@ function formatActionValuePreview(value, maxLength = 140) {
   const text = typeof value === "string"
     ? value
     : (typeof value === "boolean" ? String(value) : JSON.stringify(value));
-  const compacted = compactText(String(text || ""));
+  const compacted = compact(String(text || ""));
 
   if (compacted.length <= maxLength) {
     return compacted;
