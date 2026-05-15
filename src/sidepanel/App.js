@@ -3930,9 +3930,28 @@ function rankContentBlocks(blocks = [], context = {}) {
         block.title,
         block.text,
         block.section_title
-      ].filter(Boolean).join(" "), context) + (block.kind === "item" ? 1 : 0)
+      ].filter(Boolean).join(" "), context)
+        + (block.kind === "item" ? 1 : 0)
+        + getFilterIntentBlockBoost(block, context)
     }))
     .sort((a, b) => b.__score - a.__score || String(a.title || "").localeCompare(String(b.title || "")));
+}
+
+function getFilterIntentBlockBoost(block = {}, context = {}) {
+  const goal = String(context.goal || "").toLowerCase();
+  if (!/\b(filter|filters|search|form|dropdown|drop-down|menu|menus|location|remote|country|region|city|role type|skill set|other filters|areas)\b/i.test(goal)) {
+    return 0;
+  }
+
+  if (block.kind === "form") {
+    return 10;
+  }
+
+  if (block.kind === "field") {
+    return 8;
+  }
+
+  return 0;
 }
 
 function scoreContextText(text, context = {}) {
@@ -4295,6 +4314,11 @@ async function handleAgentResult(result, options = {}) {
 }
 
 function normalizeAgentControlFlow(result) {
+  const embeddedStructured = extractStructuredPayloadFromAgentResult(result);
+  if (embeddedStructured) {
+    result = embeddedStructured;
+  }
+
   if (result?.type !== "agent_plan" || !Array.isArray(result.actions)) {
     return result;
   }
@@ -4344,6 +4368,55 @@ function normalizeAgentControlFlow(result) {
   return {
     type: "ask_user",
     question: text || "I need one more confirmation before continuing."
+  };
+}
+
+function extractStructuredPayloadFromAgentResult(result) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const nestedText = compact(
+    result?.text
+    || result?.answer
+    || result?.response
+    || result?.message
+    || result?.result
+    || result?.output
+    || ""
+  );
+  const structured = extractStructuredAgentPayloadFromText(nestedText);
+  if (!structured) {
+    return null;
+  }
+
+  addDebugLog("agent.embedded_payload_unwrapped", {
+    wrapper: result,
+    embedded: structured
+  }, "Unwrapped structured Browser Companion payload from provider text.");
+  return normalizeEmbeddedAgentPayload(structured, result);
+}
+
+function normalizeEmbeddedAgentPayload(structured, wrapper = {}) {
+  const type = ["natural_response", "ask_user", "stop_for_human", "memory_proposal", "agent_plan"].includes(structured?.type)
+    ? structured.type
+    : (Array.isArray(structured?.actions) && structured.actions.length ? "agent_plan" : "natural_response");
+
+  return {
+    type,
+    text: String(structured?.text || wrapper?.text || wrapper?.answer || wrapper?.response || ""),
+    question: String(structured?.question || wrapper?.question || ""),
+    reason: String(structured?.reason || wrapper?.reason || ""),
+    goal: String(structured?.goal || wrapper?.goal || ""),
+    risk_level: ["low", "medium", "high", "sensitive", "blocked"].includes(structured?.risk_level) ? structured.risk_level : "low",
+    summary_for_user: String(structured?.summary_for_user || structured?.summary || wrapper?.summary_for_user || structured?.text || ""),
+    needs_clarification: Boolean(structured?.needs_clarification),
+    requires_confirmation: Boolean(structured?.requires_confirmation),
+    will_submit: Boolean(structured?.will_submit),
+    actions: Array.isArray(structured?.actions) ? structured.actions : [],
+    uncertain_fields: Array.isArray(structured?.uncertain_fields) ? structured.uncertain_fields : [],
+    ...(structured?.memory_title ? { memory_title: String(structured.memory_title) } : {}),
+    ...(structured?.memory_content ? { memory_content: String(structured.memory_content) } : {})
   };
 }
 

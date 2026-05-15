@@ -55,7 +55,7 @@
   const visibleText = getVisibleText(rawVisibleText);
   const structuredItems = buildStructuredItems(linkEntries, buttonEntries, interactiveEntries, headingEntries);
   const pageOutline = buildPageOutline(visibleText, headingEntries, structuredItems, forms, linkEntries, buttonEntries);
-  const contentBlocks = buildContentBlocks(visibleText, pageOutline, structuredItems);
+  const contentBlocks = buildContentBlocks(visibleText, pageOutline, structuredItems, forms);
   const captureMeta = buildCaptureMeta({
     rawVisibleText,
     headingElements,
@@ -369,7 +369,7 @@
     return sections.filter((section) => section.title || section.preview);
   }
 
-  function buildContentBlocks(visibleText, pageOutline, structuredItems) {
+  function buildContentBlocks(visibleText, pageOutline, structuredItems, forms) {
     const blocks = [];
 
     for (const section of pageOutline.sections || []) {
@@ -395,6 +395,49 @@
         text: [item.title, item.metadata, item.text_preview].filter(Boolean).join(" | "),
         destination_url: item.destination_url || ""
       });
+    }
+
+    for (const form of forms || []) {
+      const fieldNames = (Array.isArray(form.fields) ? form.fields : [])
+        .map((field) => compactText(field.name || field.value || field.agent_id || ""))
+        .filter(Boolean)
+        .slice(0, 12);
+
+      blocks.push({
+        block_id: `block_${form.agent_id || `form_${blocks.length + 1}`}`,
+        kind: "form",
+        section_id: "section_filters",
+        section_title: form.title || "Form",
+        title: form.title || "Form",
+        text: `Fields: ${fieldNames.join(" | ")}`
+      });
+
+      for (const field of (Array.isArray(form.fields) ? form.fields : []).slice(0, 16)) {
+        const optionNames = Array.isArray(field.options)
+          ? field.options.map((option) => compactText(option.label || option.value || "")).filter(Boolean).slice(0, 8)
+          : [];
+        const regionTitles = Array.isArray(field.controlled_region?.titles)
+          ? field.controlled_region.titles.slice(0, 8)
+          : [];
+        const pieces = [
+          `${field.name || field.agent_id || "Field"}`,
+          field.role ? `role=${field.role}` : "",
+          field.value ? `value=${field.value}` : "",
+          optionNames.length ? `options=${optionNames.join(" | ")}` : "",
+          regionTitles.length ? `popup=${regionTitles.join(" | ")}` : "",
+          field.nearby_text || ""
+        ].filter(Boolean);
+
+        blocks.push({
+          block_id: `block_field_${field.agent_id || blocks.length + 1}`,
+          kind: "field",
+          section_id: "section_filters",
+          section_title: form.title || "Form",
+          item_id: field.agent_id || "",
+          title: field.name || field.agent_id || "Field",
+          text: pieces.join(" | ")
+        });
+      }
     }
 
     if (!blocks.length && visibleText) {
