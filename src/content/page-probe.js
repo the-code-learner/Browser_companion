@@ -5,6 +5,7 @@
     "input",
     "select",
     "textarea",
+    "[tabindex]:not([tabindex='-1'])",
     "[role='button']",
     "[role='link']",
     "[role='combobox']",
@@ -18,6 +19,7 @@
     "select",
     "textarea",
     "[contenteditable='true']",
+    "[tabindex]:not([tabindex='-1'])",
     "[role='textbox']",
     "[role='searchbox']",
     "[role='combobox']",
@@ -576,6 +578,10 @@
       return "link";
     }
 
+    if (element.matches("button,[role='button'],input[type='button'],input[type='submit']")) {
+      return "button";
+    }
+
     if (element.matches("select")) {
       return "combobox";
     }
@@ -942,7 +948,7 @@
       return true;
     }
 
-    return looksLikeCustomCombobox(element);
+    return looksLikeCustomCombobox(element) || looksLikeFieldButton(element);
   }
 
   function looksLikeCustomCombobox(element) {
@@ -964,6 +970,75 @@
       || popup === "menu"
       || element.hasAttribute("aria-controls")
       || element.hasAttribute("aria-expanded");
+  }
+
+  function looksLikeFieldButton(element) {
+    if (!element?.matches) {
+      return false;
+    }
+
+    if (!element.matches("button,[role='button'],div,span,[tabindex]")) {
+      return false;
+    }
+
+    if (element.matches("a[href],input,select,textarea,[contenteditable='true']")) {
+      return false;
+    }
+
+    const label = compactText(getAccessibleName(element) || getElementRawText(element) || "").slice(0, 120);
+    if (!label || label.length < 2 || label.length > 80) {
+      return false;
+    }
+
+    if (NAVIGATION_LABEL_RE.test(label)) {
+      return false;
+    }
+
+    const wordCount = label.split(/\s+/).filter(Boolean).length;
+    if (wordCount > 6) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 72 || rect.height < 28) {
+      return false;
+    }
+
+    const nearby = compactText(getNearbyText(element)).slice(0, 240);
+    const hasPopupHint = element.hasAttribute("aria-haspopup")
+      || element.hasAttribute("aria-controls")
+      || element.hasAttribute("aria-expanded");
+    const hasFieldWords = /\b(keyword|keywords|area|areas|country|region|city|organisation|organization|salary|experience|education|skill|skills|role type|other filters|filter|filters)\b/i.test(`${label} ${nearby}`);
+    const siblingCluster = countFieldLikeSiblings(element) >= 3;
+
+    return hasPopupHint || hasFieldWords || siblingCluster;
+  }
+
+  function countFieldLikeSiblings(element) {
+    const parent = element.parentElement;
+    if (!parent) {
+      return 0;
+    }
+
+    let count = 0;
+    for (const sibling of Array.from(parent.children)) {
+      if (!(sibling instanceof Element) || !isVisible(sibling)) {
+        continue;
+      }
+
+      const label = compactText(getAccessibleName(sibling) || getElementRawText(sibling) || "").slice(0, 120);
+      if (!label || NAVIGATION_LABEL_RE.test(label)) {
+        continue;
+      }
+
+      const rect = sibling.getBoundingClientRect();
+      const words = label.split(/\s+/).filter(Boolean).length;
+      if (rect.width >= 72 && rect.height >= 28 && words <= 6) {
+        count += 1;
+      }
+    }
+
+    return count;
   }
 
   function isVisible(element) {

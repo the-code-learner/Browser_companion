@@ -121,7 +121,7 @@
 
   function showNumberedOverlay() {
     clearNumberedOverlay();
-    overlayMap = Array.from(document.querySelectorAll("a[href],button,input,select,textarea,[role='button'],[role='link'],[role='combobox'],[role='searchbox'],[contenteditable='true'],[aria-haspopup='listbox']"))
+    overlayMap = Array.from(document.querySelectorAll("a[href],button,input,select,textarea,[tabindex]:not([tabindex='-1']),[role='button'],[role='link'],[role='combobox'],[role='searchbox'],[contenteditable='true'],[aria-haspopup='listbox']"))
       .filter(isVisible)
       .slice(0, 60)
       .map((element, index) => {
@@ -261,7 +261,7 @@
 
     const candidates = [
       ...selectorMatches,
-      ...document.querySelectorAll("input,select,textarea,button,a[href],[role='button'],[role='link'],[role='combobox'],[role='searchbox'],[contenteditable='true'],[aria-haspopup='listbox']"),
+      ...document.querySelectorAll("input,select,textarea,button,a[href],[tabindex]:not([tabindex='-1']),[role='button'],[role='link'],[role='combobox'],[role='searchbox'],[contenteditable='true'],[aria-haspopup='listbox']"),
       ...findElementsByVisibleText(target.name)
     ];
     const wantedRole = String(target.role || "").toLowerCase();
@@ -361,7 +361,7 @@
   }
 
   function closestClickable(element) {
-    return element?.closest?.("a[href],button,[role='button'],[role='link'],[role='combobox'],[contenteditable='true']");
+    return element?.closest?.("a[href],button,[tabindex]:not([tabindex='-1']),[role='button'],[role='link'],[role='combobox'],[contenteditable='true']");
   }
 
   function findNearbyInteractiveElements(element) {
@@ -372,7 +372,7 @@
       element?.parentElement,
       element?.closest?.("label,fieldset,[role='group'],[role='region'],li,section,article,form,div")
     ].filter(Boolean);
-    const selector = "input,select,textarea,button,[role='button'],[role='combobox'],[role='searchbox'],[aria-haspopup='listbox'],[contenteditable='true']";
+    const selector = "input,select,textarea,button,[tabindex]:not([tabindex='-1']),[role='button'],[role='combobox'],[role='searchbox'],[aria-haspopup='listbox'],[contenteditable='true']";
 
     for (const root of roots) {
       for (const candidate of Array.from(root.querySelectorAll(selector))) {
@@ -595,7 +595,7 @@
     if (element.matches("select")) return "combobox";
     if (looksLikeCustomCombobox(element)) return "combobox";
     if (element.matches("textarea,[contenteditable='true']")) return "textbox";
-    if (element.matches("button,a[href]")) return element.matches("a[href]") ? "link" : "button";
+    if (element.matches("button,a[href],[tabindex]:not([tabindex='-1'])")) return element.matches("a[href]") ? "link" : "button";
     if (element.type === "checkbox") return "checkbox";
     if (element.type === "radio") return "radio";
     return "textbox";

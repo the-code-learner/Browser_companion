@@ -3912,6 +3912,7 @@ function buildRetrievalBlocks(observation) {
       text: [
         element.name || "",
         element.text || "",
+        element.nearby_text || "",
         element.popup_role ? `popup_role=${element.popup_role}` : "",
         Array.isArray(element.controlled_region?.titles) ? element.controlled_region.titles.join(" | ") : "",
         Array.isArray(element.link_candidates)
@@ -4133,8 +4134,11 @@ function compactElementsForProvider(elements, limit) {
   return (Array.isArray(elements) ? elements : []).slice(0, limit).map((element) => ({
     agent_id: element.agent_id || "",
     role: element.role || "",
+    tag: element.tag || "",
+    type: element.type || "",
     name: element.name || element.text || "",
     text: element.text || "",
+    nearby_text: String(element.nearby_text || "").slice(0, 220),
     href: element.href || "",
     destination_url: element.destination_url || "",
     expandable: Boolean(element.expandable),
@@ -4168,6 +4172,7 @@ function compactElementsForProvider(elements, limit) {
           title: String(candidate.title || "").slice(0, 120)
         }))
       : [],
+    bbox: element.bbox || null,
     level: element.level || "",
     nearest_heading: element.nearest_heading || null,
     selector_candidates: compactSelectorsForProvider(element.selector_candidates)
@@ -4178,6 +4183,7 @@ function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT) {
   return (Array.isArray(forms) ? forms : []).slice(0, limit).map((form) => ({
     agent_id: form.agent_id || "",
     title: form.title || "",
+    bbox: form.bbox || null,
     fields: (Array.isArray(form.fields) ? form.fields : []).slice(0, PROVIDER_FIELD_LIMIT).map((field) => ({
       agent_id: field.agent_id || "",
       role: field.role || "",
@@ -4190,6 +4196,7 @@ function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT) {
       expanded: typeof field.expanded === "boolean" ? field.expanded : null,
       popup_role: field.popup_role || "",
       nearby_text: String(field.nearby_text || "").slice(0, 220),
+      bbox: field.bbox || null,
       selector_candidates: compactSelectorsForProvider(field.selector_candidates),
       options: Array.isArray(field.options) ? field.options.slice(0, 12) : [],
       controlled_region: field.controlled_region
