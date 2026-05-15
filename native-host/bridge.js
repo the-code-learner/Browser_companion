@@ -1614,30 +1614,112 @@ function runCliSynthesisRequest(provider, payload = {}) {
 
 async function testHttpProvider(provider = {}) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
-  const response = await fetch(`${baseUrl}/v1/models`, {
-    method: "GET",
-    headers: getHttpProviderHeaders(provider)
-  });
-  const text = await response.text();
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} while reading /v1/models: ${text.slice(0, 300)}`);
+  try {
+    const response = await fetch(`${baseUrl}/v1/models`, {
+      method: "GET",
+      headers: getHttpProviderHeaders(provider)
+    });
+    const text = await response.text();
+
+    if (!response.ok) {
+      return createHttpProviderTestError({
+        baseUrl,
+        statusCode: response.status,
+        body: text
+      });
+    }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return createHttpProviderTestError({
+        baseUrl,
+        kind: "invalid_json",
+        statusCode: response.status,
+        body: text
+      });
+    }
+
+    const models = Array.isArray(json.data)
+      ? json.data.map((item) => item.id).filter(Boolean)
+      : [];
+    const loadedModels = extractLoadedModels(json);
+
+    return {
+      type: "http_provider_test",
+      status: "ready",
+      models,
+      loadedModels,
+      message: models.length
+        ? `HTTP provider is reachable. Found ${models.length} model${models.length === 1 ? "" : "s"}.`
+        : "HTTP provider is reachable, but no models were returned."
+    };
+  } catch (error) {
+    return createHttpProviderTestError({
+      baseUrl,
+      kind: "offline",
+      error
+    });
+  }
+}
+
+function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body = "", error = null } = {}) {
+  const rawBody = String(body || "").trim();
+  const bodyPreview = rawBody.slice(0, 200);
+  const htmlLike = /^\s*<!doctype html>|^\s*<html\b/i.test(rawBody);
+  const normalizedKind = kind
+    || (statusCode && htmlLike ? "upstream_html" : "")
+    || "http_error";
+
+  if (normalizedKind === "offline") {
+    return {
+      type: "http_provider_test",
+      status: "error",
+      errorKind: "offline",
+      models: [],
+      loadedModels: [],
+      message: `HTTP provider is offline or unreachable at ${baseUrl}. Browser Companion could not read /v1/models.`,
+      detail: compact(error?.message || "")
+    };
   }
 
-  const json = JSON.parse(text);
-  const models = Array.isArray(json.data)
-    ? json.data.map((item) => item.id).filter(Boolean)
-    : [];
-  const loadedModels = extractLoadedModels(json);
+  if (normalizedKind === "invalid_json") {
+    return {
+      type: "http_provider_test",
+      status: "error",
+      errorKind: "invalid_json",
+      statusCode,
+      models: [],
+      loadedModels: [],
+      message: `HTTP provider responded at ${baseUrl}, but /v1/models did not return valid JSON.`,
+      detail: bodyPreview || "The endpoint answered, but not with an OpenAI-compatible JSON models payload."
+    };
+  }
+
+  if (normalizedKind === "upstream_html") {
+    return {
+      type: "http_provider_test",
+      status: "error",
+      errorKind: "upstream_html",
+      statusCode,
+      models: [],
+      loadedModels: [],
+      message: `HTTP provider returned an HTML error page${statusCode ? ` (${statusCode})` : ""} while reading /v1/models.`,
+      detail: "A reverse proxy or web server answered instead of the OpenAI-compatible API."
+    };
+  }
 
   return {
     type: "http_provider_test",
-    status: "ready",
-    models,
-    loadedModels,
-    message: models.length
-      ? `HTTP provider is reachable. Found ${models.length} model${models.length === 1 ? "" : "s"}.`
-      : "HTTP provider is reachable, but no models were returned."
+    status: "error",
+    errorKind: "http_error",
+    statusCode,
+    models: [],
+    loadedModels: [],
+    message: `HTTP provider returned HTTP ${statusCode || "error"} while reading /v1/models.`,
+    detail: bodyPreview || "The provider endpoint did not return a usable OpenAI-compatible models response."
   };
 }
 

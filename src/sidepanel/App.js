@@ -1348,11 +1348,12 @@ function renderProviderCards() {
     const canConnect = provider.installed && !provider.connected;
     const selected = provider.id === state.codex.provider ? " selected" : "";
     const isGeminiNano = provider.id === GEMINI_NANO_PROVIDER_ID;
+    const isHttpProvider = isHttpProviderStatus(provider);
     const canDownloadGeminiNano = isGeminiNano && ["downloadable", "downloading"].includes(provider.status);
-    const connectButton = isGeminiNano
+    const connectButton = isGeminiNano || isHttpProvider
       ? ""
       : (provider.installed ? `<button type="button" data-connect-provider="${escapeHtml(provider.id)}">${canConnect ? "Connect" : "Reconnect"}</button>` : "");
-    const logoutButton = !isGeminiNano && provider.installed
+    const logoutButton = !isGeminiNano && !isHttpProvider && provider.installed
       ? `<button type="button" data-logout-provider="${escapeHtml(provider.id)}">Logout</button>`
       : "";
     const installButtons = provider.installed || isGeminiNano
@@ -1516,19 +1517,49 @@ function getHttpProviderStatusSources() {
 
 function httpProviderToStatus(provider) {
   const label = provider.name || "HTTP Provider";
+  const status = provider.lastStatus || "unknown";
+  const offline = status === "error";
   return {
     id: `http:${provider.id}`,
     label: provider.temporary ? `${label} (unsaved)` : label,
-    status: provider.lastStatus || "ready",
-    statusLabel: provider.lastStatus === "error" ? "Error" : "Connected",
+    status,
+    statusLabel: getHttpProviderStatusLabel(provider),
     installed: true,
-    connected: provider.lastStatus !== "error",
+    connected: !offline && status === "ready",
     command: provider.baseUrl,
     installCommand: "",
     models: provider.models?.length ? provider.models : [provider.model || "default"],
     defaultModel: provider.model || provider.models?.[0] || "default",
-    message: provider.lastMessage || "OpenAI-compatible HTTP provider is configured."
+    message: formatHttpProviderStatusMessage(provider)
   };
+}
+
+function isHttpProviderStatus(provider) {
+  return String(provider?.id || "").startsWith("http:");
+}
+
+function getHttpProviderStatusLabel(provider) {
+  const status = String(provider?.lastStatus || provider?.status || "").toLowerCase();
+  const errorKind = String(provider?.errorKind || "").toLowerCase();
+
+  if (status === "ready") return "Reachable";
+  if (errorKind === "offline" || errorKind === "upstream_html") return "Offline";
+  if (status === "error") return "Error";
+  return "Unknown";
+}
+
+function formatHttpProviderStatusMessage(provider) {
+  const message = compact(provider?.lastMessage || "");
+  if (!message) {
+    return "OpenAI-compatible HTTP provider is configured.";
+  }
+
+  const detail = compact(provider?.lastDetail || "");
+  if (!detail) {
+    return message;
+  }
+
+  return `${message} Details: ${detail}`;
 }
 
 function getDefaultProviderStatuses() {
@@ -2095,10 +2126,14 @@ async function refreshSelectedHttpProviderHealth() {
       models: response.envelope?.payload?.models || item.models || [],
       loadedModels: response.envelope?.payload?.loadedModels || [],
       lastStatus: response.envelope?.payload?.status || "ready",
-      lastMessage: response.envelope?.payload?.message || "HTTP provider test completed."
+      lastMessage: response.envelope?.payload?.message || "HTTP provider test completed.",
+      errorKind: response.envelope?.payload?.errorKind || "",
+      lastDetail: response.envelope?.payload?.detail || ""
     } : {
       lastStatus: "error",
-      lastMessage: response.error || "HTTP provider test failed."
+      lastMessage: response.error || "HTTP provider test failed.",
+      errorKind: "offline",
+      lastDetail: ""
     })
   } : item);
 
@@ -2423,6 +2458,23 @@ async function testHttpProviderFromForm() {
   }
 
   const payload = response.envelope.payload;
+  if (payload.status === "error") {
+    state.httpProviderDraft = {
+      ...provider,
+      models: [],
+      loadedModels: [],
+      lastStatus: "error",
+      lastMessage: payload.message || "HTTP provider test failed.",
+      errorKind: payload.errorKind || "",
+      lastDetail: payload.detail || ""
+    };
+    state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+    state.connector.message = formatHttpProviderStatusMessage(state.httpProviderDraft);
+    state.activity.unshift(`HTTP provider ${provider.name || provider.baseUrl} is offline or returned an invalid response.`);
+    render();
+    return;
+  }
+
   const models = payload.models || [];
   const loadedModels = payload.loadedModels || [];
   const selectedModel = models.includes(provider.model) ? provider.model : (models[0] || provider.model || "");
@@ -2432,7 +2484,9 @@ async function testHttpProviderFromForm() {
     models,
     loadedModels,
     lastStatus: payload.status || "ready",
-    lastMessage: payload.message || "HTTP provider test completed."
+    lastMessage: payload.message || "HTTP provider test completed.",
+    errorKind: payload.errorKind || "",
+    lastDetail: payload.detail || ""
   };
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
   state.codex.provider = `http:${state.httpProviderDraft.id}`;
@@ -7573,13 +7627,28 @@ function getConnectorStatusLabel() {
   const selected = getSelectedConnectorState();
   const provider = getSelectedProviderStatus();
   const name = provider?.label || "Provider";
+  const isHttpProvider = isHttpProviderStatus(provider);
 
   if (selected.status === "connected") {
+    if (isHttpProvider) {
+      return "LLM ready";
+    }
     return `${name} connected`;
   }
 
   if (selected.status === "error") {
+    if (isHttpProvider) {
+      return "LLM offline";
+    }
     return `${name} offline`;
+  }
+
+  if (isHttpProvider && selected.status === "ready") {
+    return "LLM ready";
+  }
+
+  if (isHttpProvider && ["unknown", "missing"].includes(selected.status)) {
+    return "LLM unavailable";
   }
 
   return selected.status;
@@ -7587,6 +7656,7 @@ function getConnectorStatusLabel() {
 
 function getSelectedConnectorState() {
   const provider = getSelectedProviderStatus();
+  const isHttpProvider = isHttpProviderStatus(provider);
   if (provider?.connected) {
     return {
       status: "connected",
@@ -7597,7 +7667,9 @@ function getSelectedConnectorState() {
   if (provider?.status === "error") {
     return {
       status: "error",
-      message: provider.message || `${provider.label || "Provider"} is unavailable.`
+      message: provider.message || (isHttpProvider
+        ? "The selected LLM endpoint is offline or unreachable."
+        : `${provider.label || "Provider"} is unavailable.`)
     };
   }
 
