@@ -4522,6 +4522,7 @@ async function handleAgentResult(result, options = {}) {
     });
     state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
     if (isProviderQuotaExhaustedResult(result)) {
+      markSelectedProviderQuotaExhausted(result);
       queueConnectorRefresh();
     }
     render();
@@ -4675,7 +4676,41 @@ function isProviderQuotaExhaustedResult(result) {
     || /\bbilling hard limit\b/i.test(text)
     || /\bresource has been exhausted\b/i.test(text)
     || /\byou have exhausted your capacity on this model\b/i.test(text)
+    || /\bout of capacity\b/i.test(text)
+    || /\brate-limited\b/i.test(text)
+    || /\bquota reset\b/i.test(text)
     || /\bquota exceeded\b/i.test(text);
+}
+
+function markSelectedProviderQuotaExhausted(result) {
+  const providerId = state.codex.provider;
+  const nextProviders = state.connector.providers.map((provider) => {
+    if (provider.id !== providerId) {
+      return provider;
+    }
+
+    const label = provider.label || "Provider";
+    const quotaMessage = formatProviderQuotaExhaustedMessage(result, label);
+    return {
+      ...provider,
+      quotaState: "exhausted",
+      quotaMessage,
+      message: quotaMessage
+    };
+  });
+
+  state.connector.providers = nextProviders;
+  state.connector.status = "quota_exhausted";
+  state.connector.message = formatProviderQuotaExhaustedMessage(result, getSelectedProviderStatus()?.label || "Provider");
+}
+
+function formatProviderQuotaExhaustedMessage(result, label = "Provider") {
+  const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
+  if (/insufficient[_\s-]?quota|billing hard limit|out of credits?/i.test(text)) {
+    return `${label} has no remaining credits or has reached its billing limit.`;
+  }
+
+  return `${label} has reached its current usage limit. Wait for quota reset or switch provider.`;
 }
 
 function extractProviderErrorMeta(result) {
