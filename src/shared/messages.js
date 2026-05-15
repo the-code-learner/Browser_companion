@@ -4,6 +4,7 @@ export const MESSAGE_TYPES = Object.freeze({
   NATIVE_HEALTH: "native_health",
   NATIVE_STATUS: "native_status",
   CONNECT_CODEX: "connect_codex",
+  LOGOUT_PROVIDER: "logout_provider",
   INSTALL_PROVIDER: "install_provider",
   INSTALL_NODEJS: "install_nodejs",
   HTTP_PROVIDER_TEST: "http_provider_test",

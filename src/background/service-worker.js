@@ -46,6 +46,10 @@ async function handleMessage(message) {
     return connectCodex(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.LOGOUT_PROVIDER) {
+    return logoutProvider(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.INSTALL_PROVIDER) {
     return installProvider(message.payload);
   }
@@ -189,6 +193,24 @@ async function connectCodex(payload = {}) {
     return {
       ok: false,
       error: "Local connector is not installed or cannot start the selected provider login yet."
+    };
+  }
+}
+
+async function logoutProvider(payload = {}) {
+  try {
+    const response = await sendNativeMessage({
+      type: "provider_logout",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.NATIVE_STATUS, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Provider logout could not be completed."
     };
   }
 }

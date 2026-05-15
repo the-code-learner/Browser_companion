@@ -55,6 +55,11 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "provider_logout") {
+    writeResponse(requestId, logoutProvider(message.payload));
+    return;
+  }
+
   if (message?.type === "provider_install") {
     writeResponse(requestId, installProvider(message.payload));
     return;
@@ -711,22 +716,28 @@ function getProviderStatus(provider) {
     };
   }
 
+  if (provider.id === "anthropic-claude-code") {
+    return getClaudeProviderStatus(provider, version, modelInfo);
+  }
+
+  if (provider.id === "google-gemini-cli") {
+    return getGeminiProviderStatus(provider, version, modelInfo);
+  }
+
   if (provider.id !== "openai-codex") {
     return {
       id: provider.id,
       label: provider.label,
       installed: true,
-      connected: true,
-      status: "ready",
+      connected: false,
+      status: "auth_unknown",
       command: provider.command,
       version: compact(version.stdout || version.stderr),
       installCommand: provider.installCommand,
       models: modelInfo.models,
       defaultModel: modelInfo.defaultModel,
       modelDiscovery: modelInfo.discovery,
-      message: version.error || version.status !== 0
-        ? `${provider.label} CLI is installed. Browser Companion will use its cached login when selected; if auth is missing, the request will report it clearly.`
-        : `${provider.label} CLI is installed. Browser Companion will use its cached login when selected.`
+      message: `${provider.label} CLI is installed, but Browser Companion could not determine its authentication status.`
     };
   }
 
@@ -750,6 +761,92 @@ function getProviderStatus(provider) {
       ? "Codex CLI is installed and signed in."
       : "Codex CLI is installed, but sign-in is required."
   };
+}
+
+function getClaudeProviderStatus(provider, version, modelInfo) {
+  const authStatus = runCommand(provider.command, ["auth", "status", "--text"], { timeout: 10000 });
+  const authText = compact(`${authStatus.stdout || ""}\n${authStatus.stderr || ""}`);
+  const loggedIn = authStatus.status === 0;
+  const authKnown = authStatus.status === 0 || authStatus.status === 1;
+  const loginRequired = !loggedIn && /not logged in|logged out|sign in required|authentication required/i.test(authText);
+
+  return {
+    id: provider.id,
+    label: provider.label,
+    installed: true,
+    connected: loggedIn,
+    status: loggedIn ? "ready" : (authKnown || loginRequired ? "login_required" : "auth_unknown"),
+    command: provider.command,
+    version: compact(version.stdout || version.stderr),
+    installCommand: provider.installCommand,
+    models: modelInfo.models,
+    defaultModel: modelInfo.defaultModel,
+    modelDiscovery: modelInfo.discovery,
+    message: loggedIn
+      ? "Claude Code CLI is installed and signed in."
+      : (authKnown || loginRequired
+          ? "Claude Code CLI is installed, but sign-in is required."
+          : "Claude Code CLI is installed, but authentication status could not be determined.")
+  };
+}
+
+function getGeminiProviderStatus(provider, version, modelInfo) {
+  const authState = getGeminiAuthState();
+  const connected = authState.hasCachedAuth || authState.hasEnvironmentAuth;
+  const status = connected
+    ? "ready"
+    : (authState.checked ? "login_required" : "auth_unknown");
+
+  return {
+    id: provider.id,
+    label: provider.label,
+    installed: true,
+    connected,
+    status,
+    command: provider.command,
+    version: compact(version.stdout || version.stderr),
+    installCommand: provider.installCommand,
+    models: modelInfo.models,
+    defaultModel: modelInfo.defaultModel,
+    modelDiscovery: modelInfo.discovery,
+    message: authState.hasEnvironmentAuth
+      ? "Gemini CLI is installed and environment-based authentication was detected."
+      : (connected
+          ? "Gemini CLI is installed and cached authentication was found."
+          : (authState.checked
+              ? "Gemini CLI is installed, but cached authentication was not found."
+              : "Gemini CLI is installed, but authentication status could not be determined."))
+  };
+}
+
+function getGeminiAuthState() {
+  const homeDir = os.homedir();
+  const authFiles = [
+    path.join(homeDir, ".gemini", "oauth_creds.json"),
+    path.join(homeDir, ".gemini", "google_accounts.json")
+  ];
+  const hasCachedAuth = authFiles.some((filePath) => fileExistsWithContent(filePath));
+  const hasEnvironmentAuth = Boolean(
+    compact(process.env.GEMINI_API_KEY)
+    || compact(process.env.GOOGLE_API_KEY)
+    || compact(process.env.GOOGLE_APPLICATION_CREDENTIALS)
+    || compact(process.env.GOOGLE_GENAI_USE_VERTEXAI)
+  );
+
+  return {
+    checked: true,
+    hasCachedAuth,
+    hasEnvironmentAuth
+  };
+}
+
+function fileExistsWithContent(filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    return stats.isFile() && stats.size > 0;
+  } catch {
+    return false;
+  }
 }
 
 function getProviderModelInfo(provider, installed) {
@@ -927,6 +1024,98 @@ function connectProvider(payload = {}) {
   };
 }
 
+function logoutProvider(payload = {}) {
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  const status = getProviderStatus(provider);
+
+  if (!status.installed) {
+    return status;
+  }
+
+  if (provider.id === "openai-codex") {
+    const result = runCodex(["logout"], { timeout: 15000 });
+    if (result.error || result.status !== 0) {
+      return {
+        ...getHealth(),
+        status: "logout_failed",
+        message: summarizeLogoutFailure(provider.label, result)
+      };
+    }
+
+    return {
+      ...getHealth(),
+      status: "logged_out",
+      message: "Codex credentials were removed. Use Connect to sign in with another account."
+    };
+  }
+
+  if (provider.id === "anthropic-claude-code") {
+    const result = runCommand(provider.command, ["auth", "logout"], { timeout: 15000 });
+    if (result.error || result.status !== 0) {
+      return {
+        ...getHealth(),
+        status: "logout_failed",
+        message: summarizeLogoutFailure(provider.label, result)
+      };
+    }
+
+    return {
+      ...getHealth(),
+      status: "logged_out",
+      message: "Claude Code credentials were removed. Use Connect to sign in with another account."
+    };
+  }
+
+  if (provider.id === "google-gemini-cli") {
+    const authState = getGeminiAuthState();
+    const removed = clearGeminiCachedAuth();
+    return {
+      ...getHealth(),
+      status: authState.hasEnvironmentAuth ? "ready" : (removed.length ? "logged_out" : "login_required"),
+      message: authState.hasEnvironmentAuth
+        ? "Gemini CLI still has environment-based authentication available. Clear the relevant environment variables outside Browser Companion if you need a full account reset."
+        : (removed.length
+            ? "Gemini CLI cached authentication was cleared. Use Connect to choose or sign in with another account."
+            : "Gemini CLI did not have cached authentication files to remove. Use Connect to choose an account.")
+    };
+  }
+
+  return {
+    ...getHealth(),
+    status: "logout_unavailable",
+    message: `Logout is not configured for ${provider.label}.`
+  };
+}
+
+function summarizeLogoutFailure(providerLabel, result) {
+  const output = compact(`${result?.stdout || ""}\n${result?.stderr || ""}\n${result?.error?.message || ""}`);
+  return output
+    ? `${providerLabel} logout failed: ${output}`
+    : `${providerLabel} logout failed.`;
+}
+
+function clearGeminiCachedAuth() {
+  const files = [
+    path.join(os.homedir(), ".gemini", "oauth_creds.json"),
+    path.join(os.homedir(), ".gemini", "google_accounts.json"),
+    path.join(os.homedir(), ".gemini", "state.json")
+  ];
+  const removed = [];
+
+  for (const filePath of files) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        removed.push(filePath);
+      }
+    } catch {
+      // Best effort only; remaining auth state will be visible on the next health check.
+    }
+  }
+
+  return removed;
+}
+
 function installProvider(payload = {}) {
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
   const command = provider.installCommand;
@@ -1072,6 +1261,22 @@ function openExternalUrl(url) {
 }
 
 function spawnInteractiveProvider(provider) {
+  if (provider.id === "anthropic-claude-code") {
+    return spawnVisibleShell(`${quoteShellPath(provider.command)} auth login`);
+  }
+
+  if (provider.id === "google-gemini-cli") {
+    if (process.platform === "win32") {
+      return spawnVisibleShell([
+        `Write-Host ${toPowerShellString("Browser Companion will open Gemini CLI so you can sign in or switch account.")}`,
+        `Write-Host ${toPowerShellString("If Gemini opens without asking, run /auth inside Gemini to change authentication method or account.")}`,
+        `& ${toPowerShellString(provider.command)}`
+      ].join("\n"));
+    }
+
+    return spawnVisibleShell(`printf '%s\n%s\n\n' "Browser Companion will open Gemini CLI so you can sign in or switch account." "If Gemini opens without asking, run /auth inside Gemini to change authentication method or account."; ${quoteShellPath(provider.command)}`);
+  }
+
   return spawnVisibleShell(provider.command);
 }
 

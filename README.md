@@ -11,7 +11,7 @@ Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser ag
 - Attachment registration for local context
 - Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, TypeScript, PDF, DOCX, XLSX, and image OCR attachment extraction through the native connector
 - Local user memory stored in `USER_MEMORY.md`, with preview-before-save confirmation
-- Native host health, sign-in start, and local provider request protocol
+- Native host health, sign-in start, logout/account reset, and local provider request protocol
 - Safe action preview and confirmation for form filling and final submit or accept actions
 - Typed `SUBMIT` confirmation before high-risk submit, accept, send, publish, or finalize clicks
 - Constrained browser action executor for scroll, highlight, focus, fill, select, checkbox, radio, click, viewport screenshot, numbered overlay, wait, and back actions
@@ -77,9 +77,11 @@ Then use the Connector settings in the side panel. Browser Companion detects the
 - Claude Code: install command `npm install -g @anthropic-ai/claude-code`
 - Gemini CLI: install command `npm install -g @google/gemini-cli`
 
-Missing providers show an explicit Install button only. Browser Companion does not install Claude Code, Gemini CLI, or Codex just because they are missing. Install opens a visible terminal so the user can see and control the command. Connect is separate from Install and starts the selected provider's local sign-in flow.
+Missing providers show an explicit Install button only. Browser Companion does not install Claude Code, Gemini CLI, or Codex just because they are missing. Install opens a visible terminal so the user can see and control the command. Connect is separate from Install and starts the selected provider's local sign-in flow. Installed providers also expose Logout so users can clear local credentials before switching accounts.
 
 Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector. Opening the Connector settings section refreshes provider status and model metadata automatically; the Check button does the same on demand. The selected provider and model are saved as Connector settings and restored on the next side panel session. Gemini CLI is shown with the provider default model unless the CLI exposes reliable account-specific model discovery.
+
+Provider auth status is now tracked per provider instead of treating every installed CLI as already connected. Codex uses `codex login status`, Claude Code uses `claude auth status`, and Gemini CLI is treated as ready only when Browser Companion detects cached Gemini auth or supported auth environment variables. Gemini logout clears local cached auth files so the next Connect flow can choose a different account cleanly.
 
 Connector status in the side panel reflects the currently selected provider. For HTTP providers, Browser Companion refreshes live health when Connector opens, so an offline local server is shown as offline even if Codex or Gemini CLI are available on the same machine.
 

@@ -261,6 +261,9 @@ function render(options = {}) {
   document.querySelectorAll("[data-connect-provider]").forEach((button) => {
     button.addEventListener("click", () => connectProvider(button.dataset.connectProvider));
   });
+  document.querySelectorAll("[data-logout-provider]").forEach((button) => {
+    button.addEventListener("click", () => logoutProvider(button.dataset.logoutProvider));
+  });
   document.querySelectorAll("[data-install-provider]").forEach((button) => {
     button.addEventListener("click", () => installProvider(button.dataset.installProvider));
   });
@@ -1349,6 +1352,9 @@ function renderProviderCards() {
     const connectButton = isGeminiNano
       ? ""
       : (provider.installed ? `<button type="button" data-connect-provider="${escapeHtml(provider.id)}">${canConnect ? "Connect" : "Reconnect"}</button>` : "");
+    const logoutButton = !isGeminiNano && provider.installed
+      ? `<button type="button" data-logout-provider="${escapeHtml(provider.id)}">Logout</button>`
+      : "";
     const installButtons = provider.installed || isGeminiNano
       ? ""
       : `
@@ -1371,6 +1377,7 @@ function renderProviderCards() {
         </div>
         <div class="provider-actions">
           ${connectButton}
+          ${logoutButton}
           ${downloadButton}
           ${installButtons}
         </div>
@@ -1575,9 +1582,12 @@ function getProviderStatusLabel(provider) {
   }
   if (provider.connected) return "Connected";
   if (!provider.installed || provider.status === "missing") return "Missing";
+  if (provider.status === "auth_unknown") return "Auth unknown";
   if (provider.status === "login_required") return "Login required";
   if (provider.status === "install_started") return "Installing";
   if (provider.status === "login_started") return "Login started";
+  if (provider.status === "logged_out") return "Logged out";
+  if (provider.status === "logout_failed") return "Logout failed";
   return "Installed";
 }
 
@@ -2272,6 +2282,44 @@ async function connectProvider(providerId = state.codex.provider) {
   };
   ensureSelectedProviderAvailable();
   persistConnectorSelection();
+  render();
+}
+
+async function logoutProvider(providerId) {
+  const provider = state.connector.providers.find((item) => item.id === providerId) || getDefaultProviderStatus(providerId);
+  state.activity.unshift(`Requested logout for ${provider.label}.`);
+  state.connector = {
+    ...state.connector,
+    status: "disconnecting",
+    message: `Removing local authentication for ${provider.label}...`
+  };
+  render();
+
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.LOGOUT_PROVIDER, {
+    provider: provider.id
+  }));
+
+  if (!response.ok) {
+    state.connector = {
+      ...state.connector,
+      status: "error",
+      message: response.error
+    };
+    state.activity.unshift(`Logout request failed for ${provider.label}: ${response.error}`);
+    render();
+    return;
+  }
+
+  const payload = response.envelope.payload;
+  if (payload?.providers) {
+    state.connector.providers = normalizeProviderStatuses(payload.providers);
+    ensureSelectedProviderAvailable();
+  }
+  state.connector.status = payload?.status || getSelectedConnectorState().status;
+  state.connector.message = payload?.message || `Logout completed for ${provider.label}.`;
+  state.activity.unshift(state.connector.message);
+  persistConnectorSelection();
+  persistSession();
   render();
 }
 
