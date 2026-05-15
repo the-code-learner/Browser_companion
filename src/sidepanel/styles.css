@@ -239,7 +239,7 @@ h2 {
   flex: 1;
   flex-direction: column;
   gap: 10px;
-  min-height: 220px;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 2px;
 }
@@ -940,6 +940,11 @@ h2 {
 }
 
 .action-preview {
+  display: grid;
+  gap: 10px;
+  max-height: min(42vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 12px;
 }
 
@@ -970,9 +975,14 @@ h2 {
 
 .preview-actions {
   display: flex;
+  position: sticky;
+  bottom: 0;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 12px;
+  padding-top: 10px;
+  background: linear-gradient(to bottom, rgb(0 0 0 / 0%), var(--panel) 18px);
 }
 
 .approval-scope-note {
@@ -980,6 +990,13 @@ h2 {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.action-value-preview {
+  color: var(--ink);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .preview-actions button:last-child {

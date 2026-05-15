@@ -1294,7 +1294,64 @@ function renderPolicyDetails(policy) {
 
 function renderAction(action) {
   const target = action.target?.name ? ` on ${action.target.name}` : "";
-  return `<li><strong>${escapeHtml(action.type)}${escapeHtml(target)}</strong><span>${escapeHtml(action.reason || "")}</span></li>`;
+  const valuePreview = summarizeActionValueForPreview(action);
+  const reason = String(action.reason || "").trim();
+  return `
+    <li>
+      <strong>${escapeHtml(action.type)}${escapeHtml(target)}</strong>
+      ${valuePreview ? `<span class="action-value-preview">${escapeHtml(valuePreview)}</span>` : ""}
+      ${reason ? `<span>${escapeHtml(reason)}</span>` : ""}
+    </li>
+  `;
+}
+
+function summarizeActionValueForPreview(action) {
+  if (!action || typeof action !== "object") {
+    return "";
+  }
+
+  if (action.type === "fill_field") {
+    return `Value: ${formatActionValuePreview(action.value)}`;
+  }
+
+  if (action.type === "select_option") {
+    return `Select: ${formatActionValuePreview(action.value)}`;
+  }
+
+  if (action.type === "set_radio") {
+    return `Choose: ${formatActionValuePreview(action.value)}`;
+  }
+
+  if (action.type === "toggle_checkbox") {
+    return action.value ? "Set to: checked" : "Set to: unchecked";
+  }
+
+  if (action.type === "upload_file_to_field") {
+    return "Opens the file picker for manual upload.";
+  }
+
+  if (action.type === "open_url" || action.type === "open_url_new_tab") {
+    return action.value ? `URL: ${formatActionValuePreview(action.value, 180)}` : "";
+  }
+
+  return "";
+}
+
+function formatActionValuePreview(value, maxLength = 140) {
+  if (value == null) {
+    return "";
+  }
+
+  const text = typeof value === "string"
+    ? value
+    : (typeof value === "boolean" ? String(value) : JSON.stringify(value));
+  const compacted = compactText(String(text || ""));
+
+  if (compacted.length <= maxLength) {
+    return compacted;
+  }
+
+  return `${compacted.slice(0, Math.max(24, maxLength - 3))}...`;
 }
 
 function renderPermissionRequestPreview() {
