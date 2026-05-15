@@ -1242,11 +1242,15 @@ function renderActionPreview() {
   const policy = state.pendingPolicy;
   const blocked = policy && !policy.allowed;
   const highestRisk = getHighestRisk(policy);
+  const riskClass = getPreviewRiskClass(highestRisk, policy);
   const confirmation = getConfirmationLabel(highestRisk, policy);
   const needsTypedConfirmation = highestRisk === "sensitive";
   const canApproveSession = canOfferSessionApproval(state.pendingPlan, policy, state.pendingPlanContext);
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, state.pendingPlan);
   const confirmDisabled = blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
+  const approvalNote = getActionPreviewNote(highestRisk, policy, state.pendingPlan);
+  const disabledReason = getConfirmDisabledReason(highestRisk, policy, state.pendingPlan);
+  const confirmTitle = confirmDisabled && disabledReason ? ` title="${escapeHtml(disabledReason)}"` : "";
 
   return `
     <section class="action-preview" aria-label="Action preview">
@@ -1255,13 +1259,18 @@ function renderActionPreview() {
           <h2>Action Preview</h2>
           <p>${escapeHtml(confirmation)}</p>
         </div>
-        <span class="risk ${escapeHtml(state.pendingPlan.risk_level)}">${escapeHtml(state.pendingPlan.risk_level)}</span>
+        <span class="risk ${escapeHtml(riskClass)}">${escapeHtml(riskClass)}</span>
       </div>
       <p>${escapeHtml(state.pendingPlan.summary_for_user)}</p>
+      <div class="approval-callout ${escapeHtml(approvalNote.tone)}">
+        <strong>${escapeHtml(approvalNote.title)}</strong>
+        <span>${escapeHtml(approvalNote.body)}</span>
+      </div>
       <ul class="compact-list">
         ${state.pendingPlan.actions.map(renderAction).join("")}
       </ul>
       ${renderPolicyDetails(policy)}
+      ${disabledReason ? `<p class="confirm-disabled-note">${escapeHtml(disabledReason)}</p>` : ""}
       ${needsTypedConfirmation ? `
         <label class="confirmation-box">
           <span>Type ${escapeHtml(requiredPhrase)} to continue</span>
@@ -1273,8 +1282,8 @@ function renderActionPreview() {
       ` : ""}
       <div class="preview-actions">
         <button id="cancel-plan" type="button">Cancel</button>
-        ${canApproveSession ? `<button id="approve-plan-session" type="button" ${confirmDisabled ? "disabled" : ""}>Approve Similar for Session</button>` : ""}
-        <button id="confirm-plan" type="button" ${confirmDisabled ? "disabled" : ""}>${escapeHtml(getConfirmButtonText(highestRisk, state.pendingPlan))}</button>
+        ${canApproveSession ? `<button id="approve-plan-session" type="button" ${confirmDisabled ? "disabled" : ""}${confirmTitle}>Approve Similar for Session</button>` : ""}
+        <button id="confirm-plan" class="primary-action" type="button" ${confirmDisabled ? "disabled" : ""}${confirmTitle}>${escapeHtml(getConfirmButtonText(highestRisk, state.pendingPlan))}</button>
       </div>
     </section>
   `;
@@ -1285,9 +1294,25 @@ function renderPolicyDetails(policy) {
     return "";
   }
 
+  const grouped = new Map();
+  for (const result of policy.results) {
+    const risk = String(result?.risk || "low");
+    const reason = String(result?.reason || "").trim() || "No policy note provided.";
+    const key = `${risk}::${reason}`;
+    const current = grouped.get(key) || { risk, reason, count: 0 };
+    current.count += 1;
+    grouped.set(key, current);
+  }
+
   return `
     <ul class="policy-list">
-      ${policy.results.map((result) => `<li><strong>${escapeHtml(result.risk)}</strong><span>${escapeHtml(result.reason)}</span></li>`).join("")}
+      ${Array.from(grouped.values()).map((entry) => `
+        <li class="policy-${escapeHtml(entry.risk)}">
+          <strong>${escapeHtml(entry.risk)}</strong>
+          <span>${escapeHtml(entry.reason)}</span>
+          ${entry.count > 1 ? `<em>${escapeHtml(`${entry.count} actions`)}</em>` : ""}
+        </li>
+      `).join("")}
     </ul>
   `;
 }
@@ -8272,12 +8297,67 @@ function getHighestRisk(policy) {
   }, "low");
 }
 
+function getPreviewRiskClass(risk, policy) {
+  if (policy && !policy.allowed) {
+    return "blocked";
+  }
+
+  return risk || "low";
+}
+
 function getConfirmationLabel(risk, policy) {
   if (!policy?.requiresConfirmation) return "Ready";
   if (risk === "high") return "Explicit final-action confirmation required";
   if (risk === "sensitive") return "Sensitive data confirmation required";
   if (risk === "blocked") return "Blocked by policy";
   return "Confirmation required";
+}
+
+function getActionPreviewNote(risk, policy, plan) {
+  const actionCount = Array.isArray(plan?.actions) ? plan.actions.length : 0;
+  const actionLabel = actionCount === 1 ? "1 action" : `${actionCount} actions`;
+
+  if (policy && !policy.allowed) {
+    return {
+      tone: "blocked",
+      title: "Confirm is unavailable",
+      body: `At least one requested action is blocked by policy. Review the notes below or adjust the plan before continuing with ${actionLabel}.`
+    };
+  }
+
+  if (risk === "sensitive") {
+    return {
+      tone: "sensitive",
+      title: "Extra confirmation required",
+      body: `Type ${getRequiredConfirmationPhrase(risk, plan)} to continue with ${actionLabel}.`
+    };
+  }
+
+  if (plan?.will_submit || risk === "high") {
+    return {
+      tone: "high",
+      title: "Final acceptance step",
+      body: `Confirm will continue with ${actionLabel} and may accept or submit on the site. Review the target fields before proceeding.`
+    };
+  }
+
+  return {
+    tone: risk === "medium" ? "medium" : "low",
+    title: policy?.requiresConfirmation ? "Ready to proceed" : "Ready",
+    body: `Confirm will run ${actionLabel} on this page. It will not click the final submit button.`
+  };
+}
+
+function getConfirmDisabledReason(risk, policy, plan) {
+  if (policy && !policy.allowed) {
+    return "Confirm is disabled because one or more actions are currently blocked by policy.";
+  }
+
+  if (risk === "sensitive") {
+    return `Confirm unlocks after you type ${getRequiredConfirmationPhrase(risk, plan)} exactly.`;
+  }
+
+  return "";
 }
 
 function getRequiredConfirmationPhrase(risk, plan) {
