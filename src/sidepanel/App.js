@@ -4,6 +4,8 @@ const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
 const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
 const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
 const HTTP_PROVIDER_LEGACY_TIMEOUT_MS = 360000;
+const HTTP_PROVIDER_KIND_OPENAI = "openai-compatible";
+const HTTP_PROVIDER_KIND_CLOUDFLARE = "cloudflare-workers-ai";
 const GEMINI_NANO_PROVIDER_ID = "chrome-gemini-nano";
 const GEMINI_NANO_MODEL_ID = "gemini-nano";
 
@@ -93,7 +95,11 @@ const state = {
   httpProviderDraft: {
     id: "",
     name: "",
+    providerKind: HTTP_PROVIDER_KIND_OPENAI,
     baseUrl: "",
+    accountId: "",
+    token: "",
+    authType: "none",
     username: "",
     password: "",
     model: "",
@@ -285,6 +291,12 @@ function render(options = {}) {
   if (testHttpProviderButton) testHttpProviderButton.addEventListener("click", testHttpProviderFromForm);
   const cancelHttpProviderEditButton = document.getElementById("cancel-http-provider-edit");
   if (cancelHttpProviderEditButton) cancelHttpProviderEditButton.addEventListener("click", cancelHttpProviderEdit);
+  const httpProviderKind = document.getElementById("http-provider-kind");
+  if (httpProviderKind) httpProviderKind.addEventListener("change", handleHttpProviderKindChange);
+  const httpProviderAuthType = document.getElementById("http-provider-auth-type");
+  if (httpProviderAuthType) httpProviderAuthType.addEventListener("change", handleHttpProviderAuthTypeChange);
+  const cloudflareAccountId = document.getElementById("http-provider-account-id");
+  if (cloudflareAccountId) cloudflareAccountId.addEventListener("change", handleCloudflareAccountIdChange);
   document.querySelectorAll("[data-http-provider-edit]").forEach((button) => {
     button.addEventListener("click", () => editHttpProvider(button.dataset.httpProviderEdit));
   });
@@ -639,15 +651,55 @@ function renderConnectorSettings() {
 }
 
 function renderHttpProviderSettings() {
+  const isCloudflare = isCloudflareHttpProviderDraft(state.httpProviderDraft);
+  const computedBaseUrl = isCloudflare
+    ? computeCloudflareWorkersAiBaseUrl(state.httpProviderDraft.accountId || "")
+    : "";
   return `
     <div class="connector-help">
       <strong>OpenAI-compatible HTTP provider</strong>
-      <p>Use this for a local or private server such as llama.cpp, LocalAI, LiteLLM, vLLM, or a custom OpenAI-compatible proxy. Observed page content can be sent to this URL when selected.</p>
+      <p>Use this for a local or private server such as llama.cpp, LocalAI, LiteLLM, vLLM, a custom OpenAI-compatible proxy, or Cloudflare Workers AI. Observed page content can be sent to this URL when selected.</p>
       <form id="http-provider-form" class="memory-form">
-        <input id="http-provider-name" type="text" placeholder="Name" value="${escapeHtml(state.httpProviderDraft.name)}">
-        <input id="http-provider-base-url" type="url" placeholder="Base URL, e.g. http://192.168.0.10:8080" value="${escapeHtml(state.httpProviderDraft.baseUrl)}">
-        <input id="http-provider-username" type="text" placeholder="Basic auth username" value="${escapeHtml(state.httpProviderDraft.username)}">
-        <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password)}">
+        <div class="button-row">
+          <label class="field-stack compact-field">
+            <span>Provider type</span>
+            <select id="http-provider-kind">
+              <option value="${HTTP_PROVIDER_KIND_OPENAI}" ${state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_OPENAI ? "selected" : ""}>Generic OpenAI-compatible</option>
+              <option value="${HTTP_PROVIDER_KIND_CLOUDFLARE}" ${isCloudflare ? "selected" : ""}>Cloudflare Workers AI</option>
+            </select>
+          </label>
+          <label class="field-stack compact-field">
+            <span>Name</span>
+            <input id="http-provider-name" type="text" placeholder="${isCloudflare ? "Cloudflare Workers AI" : "Name"}" value="${escapeHtml(state.httpProviderDraft.name)}">
+          </label>
+        </div>
+        ${isCloudflare ? `
+          <div class="button-row">
+            <label class="field-stack compact-field">
+              <span>Cloudflare Account ID</span>
+              <input id="http-provider-account-id" type="text" placeholder="Account ID" value="${escapeHtml(state.httpProviderDraft.accountId || "")}">
+            </label>
+            <label class="field-stack compact-field">
+              <span>API token</span>
+              <input id="http-provider-api-token" type="password" placeholder="Workers AI API token" value="${escapeHtml(state.httpProviderDraft.token || "")}">
+            </label>
+          </div>
+          <label class="field-stack compact-field">
+            <span>Base URL</span>
+            <input id="http-provider-base-url" type="url" readonly value="${escapeHtml(computedBaseUrl)}" placeholder="Generated from your Cloudflare Account ID">
+          </label>
+        ` : `
+          <input id="http-provider-base-url" type="url" placeholder="Base URL, e.g. http://192.168.0.10:8080" value="${escapeHtml(state.httpProviderDraft.baseUrl)}">
+          <label class="field-stack compact-field">
+            <span>Authentication</span>
+            <select id="http-provider-auth-type">
+              <option value="none" ${state.httpProviderDraft.authType === "none" ? "selected" : ""}>None</option>
+              <option value="basic" ${state.httpProviderDraft.authType === "basic" ? "selected" : ""}>Basic auth</option>
+              <option value="bearer" ${state.httpProviderDraft.authType === "bearer" ? "selected" : ""}>Bearer token</option>
+            </select>
+          </label>
+          ${renderHttpProviderAuthFields()}
+        `}
         ${renderHttpProviderModelControl()}
         <div class="button-row">
           <label class="field-stack compact-field">
@@ -680,6 +732,23 @@ function renderHttpProviderSettings() {
   `;
 }
 
+function renderHttpProviderAuthFields() {
+  if (state.httpProviderDraft.authType === "basic") {
+    return `
+      <div class="button-row">
+        <input id="http-provider-username" type="text" placeholder="Basic auth username" value="${escapeHtml(state.httpProviderDraft.username || "")}">
+        <input id="http-provider-password" type="password" placeholder="Basic auth password" value="${escapeHtml(state.httpProviderDraft.password || "")}">
+      </div>
+    `;
+  }
+
+  if (state.httpProviderDraft.authType === "bearer") {
+    return `<input id="http-provider-token" type="password" placeholder="Bearer token" value="${escapeHtml(state.httpProviderDraft.token || "")}">`;
+  }
+
+  return "";
+}
+
 function renderHttpProviderModelControl() {
   const models = state.httpProviderDraft.models || [];
   if (!models.length) {
@@ -701,6 +770,7 @@ function renderHttpProviderModelControl() {
 
 function renderHttpProviderItem(provider) {
   const extras = [
+    provider.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : "OpenAI-compatible",
     provider.useStreaming ? "streaming on" : "",
     provider.maxTokens ? `max ${provider.maxTokens}` : "",
     provider.retryMaxTokens ? `retry ${provider.retryMaxTokens}` : "",
@@ -723,7 +793,11 @@ function makeDefaultHttpProviderDraft() {
   return {
     id: "",
     name: "",
+    providerKind: HTTP_PROVIDER_KIND_OPENAI,
     baseUrl: "",
+    accountId: "",
+    token: "",
+    authType: "none",
     username: "",
     password: "",
     model: "",
@@ -752,6 +826,32 @@ function sanitizeTimeoutMs(value, fallback, defaultValue = HTTP_PROVIDER_DEFAULT
     return defaultValue;
   }
   return parsed;
+}
+
+function normalizeHttpProviderKind(value) {
+  return value === HTTP_PROVIDER_KIND_CLOUDFLARE ? HTTP_PROVIDER_KIND_CLOUDFLARE : HTTP_PROVIDER_KIND_OPENAI;
+}
+
+function normalizeHttpProviderAuthType(value) {
+  return ["none", "basic", "bearer"].includes(value) ? value : "none";
+}
+
+function isCloudflareHttpProviderDraft(provider = {}) {
+  return normalizeHttpProviderKind(provider.providerKind) === HTTP_PROVIDER_KIND_CLOUDFLARE;
+}
+
+function computeCloudflareWorkersAiBaseUrl(accountId) {
+  const normalized = String(accountId || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  return `https://api.cloudflare.com/client/v4/accounts/${normalized}/ai/v1`;
+}
+
+function extractCloudflareAccountIdFromBaseUrl(baseUrl) {
+  const value = String(baseUrl || "").trim();
+  const match = value.match(/\/accounts\/([^/]+)\/ai\/v1\/?$/i);
+  return match?.[1] || "";
 }
 
 function normalizeStoredTimeoutMs(provider = {}) {
@@ -1685,7 +1785,9 @@ function getHttpProviderStatusLabel(provider) {
 function formatHttpProviderStatusMessage(provider) {
   const message = compact(provider?.lastMessage || "");
   if (!message) {
-    return "OpenAI-compatible HTTP provider is configured.";
+    return provider?.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+      ? "Cloudflare Workers AI is configured."
+      : "OpenAI-compatible HTTP provider is configured.";
   }
 
   const detail = compact(provider?.lastDetail || "");
@@ -2576,8 +2678,9 @@ async function installNodejs() {
 
 async function testHttpProviderFromForm() {
   const provider = readHttpProviderDraft();
-  if (!provider.baseUrl) {
-    state.connector.message = "HTTP provider Base URL is required.";
+  const validationError = validateHttpProviderDraft(provider);
+  if (validationError) {
+    state.connector.message = validationError;
     render();
     return;
   }
@@ -2636,8 +2739,9 @@ async function testHttpProviderFromForm() {
 async function saveHttpProviderFromForm(event) {
   event.preventDefault();
   const provider = readHttpProviderDraft();
-  if (!provider.baseUrl) {
-    state.connector.message = "HTTP provider Base URL is required.";
+  const validationError = validateHttpProviderDraft(provider);
+  if (validationError) {
+    state.connector.message = validationError;
     render();
     return;
   }
@@ -2665,10 +2769,32 @@ async function saveHttpProviderFromForm(event) {
 
 function readHttpProviderDraft() {
   const existingId = state.httpProviderDraft.id || "";
-  const name = document.getElementById("http-provider-name")?.value.trim() || "Local LLM";
-  const baseUrl = document.getElementById("http-provider-base-url")?.value.trim().replace(/\/+$/, "") || "";
-  const username = document.getElementById("http-provider-username")?.value.trim() || "";
-  const password = document.getElementById("http-provider-password")?.value || "";
+  const providerKind = normalizeHttpProviderKind(
+    document.getElementById("http-provider-kind")?.value || state.httpProviderDraft.providerKind || HTTP_PROVIDER_KIND_OPENAI
+  );
+  const defaultName = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : "Local LLM";
+  const name = document.getElementById("http-provider-name")?.value.trim() || defaultName;
+  const accountId = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+    ? (document.getElementById("http-provider-account-id")?.value.trim() || state.httpProviderDraft.accountId || "")
+    : (state.httpProviderDraft.accountId || "");
+  const baseUrl = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+    ? computeCloudflareWorkersAiBaseUrl(accountId)
+    : (document.getElementById("http-provider-base-url")?.value.trim().replace(/\/+$/, "") || "");
+  const requestedAuthType = document.getElementById("http-provider-auth-type")?.value || state.httpProviderDraft.authType || "none";
+  const authType = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "bearer" : normalizeHttpProviderAuthType(requestedAuthType);
+  const username = authType === "basic"
+    ? (document.getElementById("http-provider-username")?.value.trim() || "")
+    : (state.httpProviderDraft.username || "");
+  const password = authType === "basic"
+    ? (document.getElementById("http-provider-password")?.value || "")
+    : (state.httpProviderDraft.password || "");
+  const token = authType === "bearer"
+    ? (
+      providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+        ? (document.getElementById("http-provider-api-token")?.value || state.httpProviderDraft.token || "")
+        : (document.getElementById("http-provider-token")?.value || state.httpProviderDraft.token || "")
+    )
+    : (state.httpProviderDraft.token || "");
   const model = document.getElementById("http-provider-model")?.value.trim() || state.httpProviderDraft.model || "";
   const useStreaming = Boolean(document.getElementById("http-provider-use-streaming")?.checked);
   const maxTokens = sanitizePositiveInteger(
@@ -2690,10 +2816,13 @@ function readHttpProviderDraft() {
     ...state.httpProviderDraft,
     id: existingId || crypto.randomUUID(),
     name,
+    providerKind,
     baseUrl,
+    accountId,
+    token,
+    authType,
     username,
     password,
-    authType: username || password ? "basic" : "none",
     model,
     useStreaming,
     maxTokens,
@@ -2705,8 +2834,49 @@ function readHttpProviderDraft() {
       : (model ? [model] : []),
     loadedModels: state.httpProviderDraft.loadedModels || [],
     lastStatus: state.httpProviderDraft.lastStatus || "ready",
-    lastMessage: state.httpProviderDraft.lastMessage || "OpenAI-compatible HTTP provider is configured."
+    lastMessage: state.httpProviderDraft.lastMessage || (providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+      ? "Cloudflare Workers AI is configured."
+      : "OpenAI-compatible HTTP provider is configured.")
   };
+}
+
+function validateHttpProviderDraft(provider) {
+  if (provider.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE) {
+    if (!provider.accountId) {
+      return "Cloudflare Account ID is required.";
+    }
+    if (!provider.token) {
+      return "Cloudflare API token is required.";
+    }
+  }
+
+  if (!provider.baseUrl) {
+    return "HTTP provider Base URL is required.";
+  }
+
+  if (provider.authType === "bearer" && !provider.token) {
+    return "Bearer token is required.";
+  }
+
+  return "";
+}
+
+function handleHttpProviderKindChange() {
+  state.httpProviderDraft = readHttpProviderDraft();
+  if (state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE) {
+    state.httpProviderDraft.authType = "bearer";
+  }
+  render();
+}
+
+function handleHttpProviderAuthTypeChange() {
+  state.httpProviderDraft = readHttpProviderDraft();
+  render();
+}
+
+function handleCloudflareAccountIdChange() {
+  state.httpProviderDraft = readHttpProviderDraft();
+  render();
 }
 
 function editHttpProvider(id) {
@@ -8190,14 +8360,29 @@ async function restoreProviderSettings() {
   const stored = await chrome.storage.local.get(["browserCompanionProviderSettings"]);
   const settings = stored.browserCompanionProviderSettings || {};
   state.httpProviders = Array.isArray(settings.httpProviders)
-    ? settings.httpProviders.map((provider) => ({
-      ...provider,
-      useStreaming: Boolean(provider.useStreaming),
-      maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
-      retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
-      timeoutMs: normalizeStoredTimeoutMs(provider),
-      timeoutConfigured: normalizeStoredTimeoutMs(provider) > 0
-    }))
+    ? settings.httpProviders.map((provider) => {
+      const providerKind = normalizeHttpProviderKind(provider.providerKind);
+      const accountId = String(provider.accountId || extractCloudflareAccountIdFromBaseUrl(provider.baseUrl) || "").trim();
+      return {
+        ...provider,
+        providerKind,
+        accountId,
+        token: provider.token || "",
+        authType: normalizeHttpProviderAuthType(
+          providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+            ? "bearer"
+            : (provider.authType || ((provider.username || provider.password) ? "basic" : (provider.token ? "bearer" : "none")))
+        ),
+        useStreaming: Boolean(provider.useStreaming),
+        maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
+        retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
+        timeoutMs: normalizeStoredTimeoutMs(provider),
+        timeoutConfigured: normalizeStoredTimeoutMs(provider) > 0,
+        baseUrl: providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+          ? computeCloudflareWorkersAiBaseUrl(accountId)
+          : provider.baseUrl
+      };
+    })
     : [];
   state.codex = {
     ...state.codex,

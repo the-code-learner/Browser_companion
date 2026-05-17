@@ -1695,6 +1695,10 @@ function runCliSynthesisRequest(provider, payload = {}) {
 }
 
 async function testHttpProvider(provider = {}) {
+  if (isCloudflareWorkersAiProvider(provider)) {
+    return testCloudflareWorkersAiProvider(provider);
+  }
+
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
 
   try {
@@ -1747,7 +1751,71 @@ async function testHttpProvider(provider = {}) {
   }
 }
 
-function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body = "", error = null } = {}) {
+async function testCloudflareWorkersAiProvider(provider = {}) {
+  const accountId = String(provider.accountId || extractCloudflareAccountIdFromBaseUrl(provider.baseUrl) || "").trim();
+  if (!accountId) {
+    throw new Error("Cloudflare Account ID is required.");
+  }
+
+  const modelsUrl = new URL(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search`);
+  modelsUrl.searchParams.set("per_page", "1000");
+  modelsUrl.searchParams.set("hide_experimental", "true");
+  modelsUrl.searchParams.set("format", "openrouter");
+
+  try {
+    const response = await fetch(modelsUrl, {
+      method: "GET",
+      headers: getHttpProviderHeaders({
+        ...provider,
+        authType: "bearer"
+      })
+    });
+    const text = await response.text();
+
+    if (!response.ok) {
+      return createHttpProviderTestError({
+        baseUrl: modelsUrl.origin,
+        statusCode: response.status,
+        body: text,
+        resourceLabel: "Cloudflare model search"
+      });
+    }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return createHttpProviderTestError({
+        baseUrl: modelsUrl.origin,
+        kind: "invalid_json",
+        statusCode: response.status,
+        body: text,
+        resourceLabel: "Cloudflare model search"
+      });
+    }
+
+    const models = extractCloudflareModelIds(json);
+
+    return {
+      type: "http_provider_test",
+      status: "ready",
+      models,
+      loadedModels: [],
+      message: models.length
+        ? `Cloudflare Workers AI is reachable. Found ${models.length} model${models.length === 1 ? "" : "s"}.`
+        : "Cloudflare Workers AI is reachable, but no models were returned."
+    };
+  } catch (error) {
+    return createHttpProviderTestError({
+      baseUrl: modelsUrl.origin,
+      kind: "offline",
+      error,
+      resourceLabel: "Cloudflare model search"
+    });
+  }
+}
+
+function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body = "", error = null, resourceLabel = "/v1/models" } = {}) {
   const rawBody = String(body || "").trim();
   const bodyPreview = rawBody.slice(0, 200);
   const htmlLike = /^\s*<!doctype html>|^\s*<html\b/i.test(rawBody);
@@ -1762,7 +1830,7 @@ function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body 
       errorKind: "offline",
       models: [],
       loadedModels: [],
-      message: `HTTP provider is offline or unreachable at ${baseUrl}. Browser Companion could not read /v1/models.`,
+      message: `HTTP provider is offline or unreachable at ${baseUrl}. Browser Companion could not read ${resourceLabel}.`,
       detail: compact(error?.message || "")
     };
   }
@@ -1775,7 +1843,7 @@ function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body 
       statusCode,
       models: [],
       loadedModels: [],
-      message: `HTTP provider responded at ${baseUrl}, but /v1/models did not return valid JSON.`,
+      message: `HTTP provider responded at ${baseUrl}, but ${resourceLabel} did not return valid JSON.`,
       detail: bodyPreview || "The endpoint answered, but not with an OpenAI-compatible JSON models payload."
     };
   }
@@ -1788,7 +1856,7 @@ function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body 
       statusCode,
       models: [],
       loadedModels: [],
-      message: `HTTP provider returned an HTML error page${statusCode ? ` (${statusCode})` : ""} while reading /v1/models.`,
+      message: `HTTP provider returned an HTML error page${statusCode ? ` (${statusCode})` : ""} while reading ${resourceLabel}.`,
       detail: "A reverse proxy or web server answered instead of the OpenAI-compatible API."
     };
   }
@@ -1800,7 +1868,7 @@ function createHttpProviderTestError({ baseUrl, kind = "", statusCode = 0, body 
     statusCode,
     models: [],
     loadedModels: [],
-    message: `HTTP provider returned HTTP ${statusCode || "error"} while reading /v1/models.`,
+    message: `HTTP provider returned HTTP ${statusCode || "error"} while reading ${resourceLabel}.`,
     detail: bodyPreview || "The provider endpoint did not return a usable OpenAI-compatible models response."
   };
 }
@@ -2464,10 +2532,37 @@ function normalizeHttpProviderBaseUrl(baseUrl) {
   return value;
 }
 
+function isCloudflareWorkersAiProvider(provider = {}) {
+  return String(provider.providerKind || "").trim().toLowerCase() === "cloudflare-workers-ai";
+}
+
+function extractCloudflareAccountIdFromBaseUrl(baseUrl) {
+  const value = String(baseUrl || "").trim();
+  const match = value.match(/\/accounts\/([^/]+)\/ai\/v1\/?$/i);
+  return match?.[1] || "";
+}
+
+function extractCloudflareModelIds(json) {
+  if (Array.isArray(json?.data)) {
+    return json.data.map((item) => item?.id).filter(Boolean);
+  }
+
+  if (!Array.isArray(json?.result)) {
+    return [];
+  }
+
+  return json.result
+    .map((item) => item?.id || item?.name || item?.slug || item?.model)
+    .filter(Boolean);
+}
+
 function getHttpProviderHeaders(provider = {}) {
   const headers = {};
   if (provider.authType === "basic" && (provider.username || provider.password)) {
     headers.authorization = `Basic ${Buffer.from(`${provider.username || ""}:${provider.password || ""}`).toString("base64")}`;
+  }
+  if (provider.authType === "bearer" && provider.token) {
+    headers.authorization = `Bearer ${provider.token}`;
   }
   return headers;
 }
