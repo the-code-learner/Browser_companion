@@ -169,8 +169,10 @@ initialize();
 async function initialize() {
   await restoreProviderSettings();
   await restoreSession();
+  await refreshAccessibleTabsState();
   applyTheme();
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+  chrome.tabs.onRemoved.addListener(handleTabRemoved);
   render();
   checkConnector();
   loadUserMemory();
@@ -3940,6 +3942,7 @@ function getRecentActionsForProvider() {
 }
 
 async function getAccessibleTabsForProvider() {
+  await refreshAccessibleTabsState();
   const currentTab = await getCurrentActiveTab().catch(() => null);
   if (currentTab) {
     rememberActiveTab(currentTab);
@@ -3976,14 +3979,84 @@ function getObservationForContext(context) {
   return sameTab || sameUrl ? observation : null;
 }
 
+async function refreshAccessibleTabsState() {
+  const entries = Object.entries(state.accessibleTabs || {});
+  if (!entries.length) {
+    return;
+  }
+
+  const refreshedEntries = await Promise.all(
+    entries.map(async ([key, tab]) => {
+      const tabId = Number.isInteger(tab?.tabId)
+        ? tab.tabId
+        : Number.parseInt(String(tab?.tabId || ""), 10);
+
+      if (!Number.isInteger(tabId)) {
+        return [key, tab];
+      }
+
+      const liveTab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!liveTab?.id) {
+        return null;
+      }
+
+      return [key, {
+        ...tab,
+        tabId: liveTab.id,
+        url: liveTab.url || tab.url || "",
+        title: liveTab.title || tab.title || ""
+      }];
+    })
+  );
+
+  state.accessibleTabs = Object.fromEntries(refreshedEntries.filter(Boolean));
+  pruneAccessibleTabs();
+}
+
+function handleTabRemoved(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  const entries = Object.entries(state.accessibleTabs || {});
+  let removed = false;
+  const nextEntries = entries.filter(([, tab]) => {
+    const matches = tab?.tabId === tabId;
+    if (matches) {
+      removed = true;
+    }
+    return !matches;
+  });
+
+  if (!removed) {
+    return;
+  }
+
+  state.accessibleTabs = Object.fromEntries(nextEntries);
+  persistSession();
+  render();
+}
+
 function getActionTargetTabId(action) {
-  const direct = action?.tab?.tabId;
-  if (Number.isInteger(direct)) {
-    return direct;
+  const directCandidates = [
+    action?.tab?.tabId,
+    action?.tab?.id,
+    action?.tabId
+  ];
+
+  for (const candidate of directCandidates) {
+    if (Number.isInteger(candidate)) {
+      return candidate;
+    }
+
+    const parsed = Number.parseInt(String(candidate || ""), 10);
+    if (Number.isInteger(parsed)) {
+      return parsed;
+    }
   }
 
   if (action?.type === "observe_known_tab") {
-    const legacy = Number.parseInt(String(action.value || action.tabId || action.target?.agent_id || ""), 10);
+    const legacy = Number.parseInt(String(action.value || action.target?.agent_id || ""), 10);
     return Number.isInteger(legacy) ? legacy : null;
   }
 

@@ -582,7 +582,7 @@ async function ensureActionScripts(tabId) {
 }
 
 function usesCurrentActiveTabContext(action) {
-  if (Number.isInteger(action?.tab?.tabId)) {
+  if (Number.isInteger(getActionTargetTabId(action))) {
     return false;
   }
 
@@ -595,17 +595,38 @@ function usesCurrentActiveTabContext(action) {
   ].includes(action?.type);
 }
 
-async function resolveActionExecutionTab(currentActiveTab, action) {
-  const targetTabId = action?.tab?.tabId;
-  if (Number.isInteger(targetTabId)) {
-    return chrome.tabs.get(targetTabId).catch(() => null);
+function getActionTargetTabId(action) {
+  const directCandidates = [
+    action?.tab?.tabId,
+    action?.tab?.id,
+    action?.tabId
+  ];
+
+  for (const candidate of directCandidates) {
+    if (Number.isInteger(candidate)) {
+      return candidate;
+    }
+
+    const parsed = Number.parseInt(String(candidate || ""), 10);
+    if (Number.isInteger(parsed)) {
+      return parsed;
+    }
   }
 
   if (action?.type === "observe_known_tab") {
-    const legacyTabId = Number.parseInt(String(action.value || action.tabId || action.target?.agent_id || ""), 10);
+    const legacyTabId = Number.parseInt(String(action.value || action.target?.agent_id || ""), 10);
     if (Number.isInteger(legacyTabId)) {
-      return chrome.tabs.get(legacyTabId).catch(() => null);
+      return legacyTabId;
     }
+  }
+
+  return null;
+}
+
+async function resolveActionExecutionTab(currentActiveTab, action) {
+  const targetTabId = getActionTargetTabId(action);
+  if (Number.isInteger(targetTabId)) {
+    return chrome.tabs.get(targetTabId).catch(() => null);
   }
 
   if (!currentActiveTab?.id) {
@@ -712,7 +733,7 @@ async function executeBrowserLevelAction(tab, action, options = {}) {
   }
 
   if (action?.type === "observe_known_tab") {
-    const tabId = Number.parseInt(String(action.value || action.tabId || action.target?.agent_id || ""), 10);
+    const tabId = getActionTargetTabId(action);
     if (!Number.isInteger(tabId)) {
       return {
         type: "execution_result",
