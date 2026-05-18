@@ -2280,6 +2280,32 @@ function getChromeLanguageModelApi() {
   return globalThis.LanguageModel || globalThis.ai?.languageModel || null;
 }
 
+function normalizePromptApiLanguageCode(language) {
+  const value = String(language || "").trim().toLowerCase();
+  if (value === "es") return "es";
+  if (value === "ja") return "ja";
+  return "en";
+}
+
+function buildPromptApiCreateOptions(options = {}) {
+  const outputLanguage = normalizePromptApiLanguageCode(options.outputLanguage || options.responseLanguage);
+  const createOptions = {
+    expectedOutputs: [
+      { type: "text", languages: [outputLanguage] }
+    ]
+  };
+
+  if (options.system) {
+    createOptions.initialPrompts = [{ role: "system", content: options.system }];
+  }
+
+  if (typeof options.monitor === "function") {
+    createOptions.monitor = options.monitor;
+  }
+
+  return createOptions;
+}
+
 async function downloadGeminiNano() {
   const languageModel = getChromeLanguageModelApi();
 
@@ -2308,7 +2334,8 @@ async function downloadGeminiNano() {
 
   let session = null;
   try {
-    session = await languageModel.create({
+    session = await languageModel.create(buildPromptApiCreateOptions({
+      outputLanguage: "en",
       monitor(monitor) {
         monitor.addEventListener("downloadprogress", (event) => {
           const loaded = Number(event.loaded);
@@ -2322,7 +2349,7 @@ async function downloadGeminiNano() {
           render({ preserveComposer: true });
         });
       }
-    });
+    }));
     session?.destroy?.();
     state.geminiNano = {
       ...state.geminiNano,
@@ -3489,7 +3516,8 @@ async function runGeminiNanoAgentRequest(payload = {}) {
   }
 
   const raw = await promptGeminiNano(buildGeminiNanoAgentPrompt(payload), {
-    system: "You are Browser Companion's experimental on-device provider. Return only a single JSON object that follows the requested shape."
+    system: "You are Browser Companion's experimental on-device provider. Return only a single JSON object that follows the requested shape.",
+    responseLanguage: detectUserLanguage(payload.goal || "")
   });
   const structured = extractStructuredAgentPayloadFromText(raw);
 
@@ -3524,7 +3552,8 @@ async function runGeminiNanoSynthesisRequest(payload = {}) {
   }
 
   const raw = await promptGeminiNano(buildGeminiNanoSynthesisPrompt(payload), {
-    system: "You are Browser Companion's experimental on-device synthesis provider. Return concise user-facing prose, not JSON, unless JSON is explicitly requested."
+    system: "You are Browser Companion's experimental on-device synthesis provider. Return concise user-facing prose, not JSON, unless JSON is explicitly requested.",
+    responseLanguage: detectUserLanguage(payload.goal || payload.text || "")
   });
   return {
     type: "natural_response",
@@ -3555,13 +3584,11 @@ async function promptGeminiNano(prompt, options = {}) {
   let session = null;
   try {
     try {
-      session = await languageModel.create({
-        initialPrompts: options.system
-          ? [{ role: "system", content: options.system }]
-          : undefined
-      });
+      session = await languageModel.create(buildPromptApiCreateOptions(options));
     } catch {
-      session = await languageModel.create();
+      session = await languageModel.create(buildPromptApiCreateOptions({
+        responseLanguage: options.responseLanguage
+      }));
     }
 
     if (typeof session?.prompt !== "function") {
