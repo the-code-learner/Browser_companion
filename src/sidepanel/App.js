@@ -840,6 +840,19 @@ function isCloudflareHttpProviderDraft(provider = {}) {
   return normalizeHttpProviderKind(provider.providerKind) === HTTP_PROVIDER_KIND_CLOUDFLARE;
 }
 
+function supportsHttpProviderUnload(provider = {}) {
+  if (!provider?.baseUrl) {
+    return false;
+  }
+
+  if (isCloudflareHttpProviderDraft(provider)) {
+    return false;
+  }
+
+  const loadedModels = Array.isArray(provider.loadedModels) ? provider.loadedModels : [];
+  return loadedModels.length > 0;
+}
+
 function computeCloudflareWorkersAiBaseUrl(accountId) {
   const normalized = String(accountId || "").trim();
   if (!normalized) {
@@ -2930,12 +2943,12 @@ async function maybeOfferHttpModelUnload(previousModel, nextModel, providerOverr
   }
 
   const provider = providerOverride || getSelectedHttpProvider();
-  if (!provider?.baseUrl) {
+  if (!supportsHttpProviderUnload(provider)) {
     return;
   }
 
   const loadedModels = provider.loadedModels || [];
-  if (loadedModels.length && !loadedModels.includes(previousModel)) {
+  if (!loadedModels.includes(previousModel)) {
     return;
   }
 
