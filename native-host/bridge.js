@@ -1702,7 +1702,7 @@ async function testHttpProvider(provider = {}) {
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
 
   try {
-    const response = await fetch(`${baseUrl}/v1/models`, {
+    const response = await fetch(buildHttpProviderApiUrl(baseUrl, "/v1/models"), {
       method: "GET",
       headers: getHttpProviderHeaders(provider)
     });
@@ -1881,7 +1881,7 @@ async function unloadHttpProviderModel(payload = {}) {
   }
 
   const baseUrl = normalizeHttpProviderBaseUrl(provider.baseUrl);
-  const response = await fetch(`${baseUrl}/models/unload`, {
+  const response = await fetch(buildHttpProviderApiUrl(baseUrl, "/models/unload"), {
     method: "POST",
     headers: {
       ...getHttpProviderHeaders(provider),
@@ -2051,9 +2051,10 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
   const timeoutMs = getHttpProviderTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS);
   const activityTimeout = createActivityTimeoutController(timeoutMs, options.abortSignal);
   activityTimeout.onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const completionsUrl = buildHttpProviderApiUrl(baseUrl, "/v1/chat/completions");
 
   try {
-    let response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    let response = await fetch(completionsUrl, {
       method: "POST",
       headers: {
         ...getHttpProviderHeaders(provider),
@@ -2068,7 +2069,7 @@ async function postHttpProviderCompletion(baseUrl, provider, requestBody, canRet
 
     if (!response.ok && canRetryWithoutResponseFormat && /response_format|json_object|unsupported/i.test(text)) {
       delete requestBody.response_format;
-      response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      response = await fetch(completionsUrl, {
         method: "POST",
         headers: {
           ...getHttpProviderHeaders(provider),
@@ -2530,6 +2531,17 @@ function normalizeHttpProviderBaseUrl(baseUrl) {
     throw new Error("HTTP provider Base URL must start with http:// or https://.");
   }
   return value;
+}
+
+function buildHttpProviderApiUrl(baseUrl, routePath) {
+  const normalizedBaseUrl = normalizeHttpProviderBaseUrl(baseUrl);
+  const normalizedRoutePath = `/${String(routePath || "").trim().replace(/^\/+/, "")}`;
+
+  if (/\/v1$/i.test(normalizedBaseUrl) && /^\/v1(\/|$)/i.test(normalizedRoutePath)) {
+    return `${normalizedBaseUrl}${normalizedRoutePath.replace(/^\/v1/i, "") || ""}`;
+  }
+
+  return `${normalizedBaseUrl}${normalizedRoutePath}`;
 }
 
 function isCloudflareWorkersAiProvider(provider = {}) {
