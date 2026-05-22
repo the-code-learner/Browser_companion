@@ -5232,6 +5232,11 @@ async function executeActionPlan(plan, options = {}) {
   const pageMatch = await verifyActionPlanPageContext(actions, options.planContext);
 
   if (!pageMatch.ok) {
+    const recovered = await recoverAndRetryStaleActionPlan(normalizedPlan, pageMatch, options);
+    if (recovered) {
+      return;
+    }
+
     state.messages.push({
       role: "assistant",
       text: pageMatch.error,
@@ -5659,6 +5664,71 @@ async function getCurrentActiveTab() {
   } catch {
     return null;
   }
+}
+
+async function recoverAndRetryStaleActionPlan(plan, pageMatch, options = {}) {
+  if (options.stalePageRecoveryAttempted) {
+    return false;
+  }
+
+  const goal = buildSteeredContinuationGoal(plan.goal || getLastUserMessageText() || "", options.steeredQueueItem);
+  if (!goal) {
+    return false;
+  }
+
+  state.activity.unshift("Page changed; re-observing the current tab and retrying the request.");
+  addDebugLog("action.stale_page_recovery.start", {
+    goal,
+    expected: options.planContext || null,
+    current: pageMatch?.current || null,
+    plan
+  }, "Action plan page context became stale; attempting automatic recovery.");
+  render();
+
+  const recoveredObservation = await observePage({
+    reason: "refresh the current page before retrying the request",
+    silent: true,
+    skipWaitingMessage: true
+  });
+  const recoveredContext = getLatestPlanContext(tabToPageContext(await getCurrentActiveTab()));
+
+  if (!recoveredObservation || !recoveredContext) {
+    addDebugLog("action.stale_page_recovery.failed", {
+      goal,
+      expected: options.planContext || null,
+      current: pageMatch?.current || null,
+      recoveredObservation: recoveredObservation ? summarizeObservationForLog(recoveredObservation) : null
+    }, "Automatic recovery after stale page context failed.");
+    return false;
+  }
+
+  addDebugLog("action.stale_page_recovery.observed", {
+    goal,
+    recoveredContext,
+    observation: summarizeObservationForLog(recoveredObservation)
+  }, "Recovered the current page observation; requesting a fresh plan.");
+
+  const followUpResult = await getAgentResult(goal, {
+    continuationDepth: options.continuationDepth || 0,
+    continuationReason: appendSteeredContinuationReason(
+      "The previous browser action plan became stale because the page or tab context changed before execution. The current active page has now been re-observed. Re-evaluate the user's request against the latest observed page and continue from there. Do not reuse the stale tab or page assumptions from the previous plan.",
+      options.steeredQueueItem
+    ),
+    planContext: recoveredContext
+  });
+
+  addDebugLog("action.stale_page_recovery.end", {
+    goal,
+    recoveredContext,
+    result: followUpResult
+  }, "Retried the request after re-observing the page.");
+
+  await handleAgentResult(followUpResult, {
+    ...options,
+    planContext: recoveredContext,
+    stalePageRecoveryAttempted: true
+  });
+  return true;
 }
 
 function createPlanPageContext(plan) {
