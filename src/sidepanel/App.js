@@ -4950,13 +4950,13 @@ function normalizeEmbeddedAgentPayload(structured, wrapper = {}) {
 
 function isProviderTimeoutResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""}`;
-  return result?.type === "agent_error" && (/\b(?:408|524)\b/.test(text) || /request timeout|timeout occurred|timed out|aborted due to timeout/i.test(text));
+  return result?.type === "agent_error" && (/\b(?:408|524)\b/.test(text) || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text));
 }
 
 function isProviderErrorLikeResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
   return /\b(?:408|524)\b/.test(text)
-    || /request timeout|timeout occurred|timed out|aborted due to timeout/i.test(text)
+    || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text)
     || /stream stalled|terminated/i.test(text)
     || /HTTP provider returned \d+/i.test(text)
     || /<!doctype html>|<html\b|cloudflare/i.test(text);
@@ -5013,7 +5013,7 @@ function extractProviderErrorMeta(result) {
   const statusCode = statusMatch ? Number.parseInt(statusMatch[1], 10) : null;
   let kind = "provider_error";
 
-  if (/\b(?:408|524)\b/.test(text) || /request timeout|timeout occurred|timed out|aborted due to timeout/i.test(text)) {
+  if (/\b(?:408|524)\b/.test(text) || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text)) {
     kind = "timeout";
   } else if (/stream stalled|terminated/i.test(text)) {
     kind = "stalled";
@@ -5066,6 +5066,10 @@ function isUserStoppedResult(result) {
 
 function formatProviderAgentErrorMessage(result) {
   const raw = String(result?.message || result?.text || "").trim();
+
+  if (/etimedout|inactivity timeout|stopped producing output/i.test(raw)) {
+    return "The local CLI provider stopped producing output before it completed the response and hit the inactivity timeout. Try again, reduce the request context, or switch provider.";
+  }
 
   if (/\b(?:408|524)\b/.test(raw) || /request timeout|timeout occurred|timed out|aborted due to timeout/i.test(raw)) {
     return "The HTTP provider timed out before the model completed its response. If this happens often, the model is too slow for this page or the local bridge timeout needs to be increased.";

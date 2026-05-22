@@ -22,6 +22,9 @@ const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-r
 const httpProviderDebugErrorPath = path.join(projectRoot, "tmp-http-provider-error.json");
 const activeRequestControllers = new Map();
 const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
+const CLI_PROVIDER_INACTIVITY_TIMEOUT_MS = 300000;
+const COMMAND_MAX_BUFFER_BYTES = 1024 * 1024 * 12;
+const COMMAND_FORCE_KILL_GRACE_MS = 2000;
 
 process.stdin.on("data", (chunk) => {
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
@@ -1505,7 +1508,7 @@ function runAgentRequest(payload = {}, options = {}) {
 
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
   if (provider.id !== "openai-codex") {
-    return runCliAgentRequest(provider, payload);
+    return runCliAgentRequest(provider, payload, options);
   }
 
   const health = getHealth();
@@ -1571,7 +1574,7 @@ function runSynthesisRequest(payload = {}, options = {}) {
 
   const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
   if (provider.id !== "openai-codex") {
-    return runCliSynthesisRequest(provider, payload);
+    return runCliSynthesisRequest(provider, payload, options);
   }
 
   const health = getHealth();
@@ -1622,7 +1625,7 @@ function runSynthesisRequest(payload = {}, options = {}) {
   }
 }
 
-function runCliAgentRequest(provider, payload = {}) {
+async function runCliAgentRequest(provider, payload = {}, options = {}) {
   const status = getProviderStatus(provider);
   if (!status.installed) {
     return {
@@ -1632,7 +1635,7 @@ function runCliAgentRequest(provider, payload = {}) {
   }
 
   const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
-  const result = runProviderPromptWithModelFallback(provider, prompt, payload.model, true);
+  const result = await runProviderPromptWithModelFallback(provider, prompt, payload.model, true, options);
   if (result.error || result.status !== 0) {
     noteProviderFailure(provider, result);
     return {
@@ -1646,13 +1649,13 @@ function runCliAgentRequest(provider, payload = {}) {
   return parseAgentJsonOrNaturalResponse(output);
 }
 
-function runProviderPromptWithModelFallback(provider, prompt, model, needsJson) {
-  const result = runProviderPrompt(provider, prompt, model, needsJson);
+async function runProviderPromptWithModelFallback(provider, prompt, model, needsJson, options = {}) {
+  const result = await runProviderPrompt(provider, prompt, model, needsJson, options);
   if (!shouldRetryWithDefaultModel(provider, model, result)) {
     return result;
   }
 
-  const retry = runProviderPrompt(provider, prompt, provider.defaultModel, needsJson);
+  const retry = await runProviderPrompt(provider, prompt, provider.defaultModel, needsJson, options);
   if (!retry.error && retry.status === 0) {
     retry.stderr = compact(`${retry.stderr || ""}\nRetried with ${provider.label} default model after the selected model was unavailable.`);
   }
@@ -1668,7 +1671,7 @@ function shouldRetryWithDefaultModel(provider, model, result) {
   return /Requested entity was not found|code:\s*404|"\s*code\s*"\s*:\s*404|model.*not found|not found.*model/i.test(combined);
 }
 
-function runCliSynthesisRequest(provider, payload = {}) {
+async function runCliSynthesisRequest(provider, payload = {}, options = {}) {
   const status = getProviderStatus(provider);
   if (!status.installed) {
     return {
@@ -1678,7 +1681,7 @@ function runCliSynthesisRequest(provider, payload = {}) {
   }
 
   const prompt = buildSynthesisPrompt(payload);
-  const result = runProviderPromptWithModelFallback(provider, prompt, payload.model, false);
+  const result = await runProviderPromptWithModelFallback(provider, prompt, payload.model, false, options);
   if (result.error || result.status !== 0) {
     noteProviderFailure(provider, result);
     return {
@@ -2579,14 +2582,15 @@ function getHttpProviderHeaders(provider = {}) {
   return headers;
 }
 
-function runProviderPrompt(provider, prompt, model, needsJson) {
+function runProviderPrompt(provider, prompt, model, needsJson, options = {}) {
   if (provider.id === "anthropic-claude-code") {
     const args = ["-p", "-"];
     const normalized = normalizeProviderModel(provider, model);
     if (normalized !== "default") args.unshift("--model", normalized);
-    return runCommand(provider.command, args, {
+    return runCommandWithActivityTimeout(provider.command, args, {
       input: prompt,
-      timeout: 120000
+      idleTimeout: CLI_PROVIDER_INACTIVITY_TIMEOUT_MS,
+      abortSignal: options.abortSignal
     });
   }
 
@@ -2595,13 +2599,14 @@ function runProviderPrompt(provider, prompt, model, needsJson) {
     const normalized = normalizeProviderModel(provider, model);
     if (normalized !== "default") args.push("-m", normalized);
     if (needsJson) args.push("--output-format", "json");
-    return runCommand(provider.command, args, {
+    return runCommandWithActivityTimeout(provider.command, args, {
       input: prompt,
-      timeout: 120000
+      idleTimeout: CLI_PROVIDER_INACTIVITY_TIMEOUT_MS,
+      abortSignal: options.abortSignal
     });
   }
 
-  return runCodex(["exec", "--model", normalizeModel(model), "-"], { input: prompt, timeout: 120000 });
+  return Promise.resolve(runCodex(["exec", "--model", normalizeModel(model), "-"], { input: prompt, timeout: 120000 }));
 }
 
 function normalizeProviderModel(provider, model) {
@@ -2640,7 +2645,10 @@ function isProviderNoiseLine(line) {
     /You have exhausted your capacity on this model/i,
     /^Error executing tool /i,
     /^austed your capacity on this model/i,
-    /^\(node:\d+\)/
+    /^\(node:\d+\)/,
+    /^Warning:\s+Windows 10 detected/i,
+    /^Warning:\s+256-color support not detected/i,
+    /^Ripgrep is not available\.\s+Falling back to GrepTool\./i
   ].some((pattern) => pattern.test(String(line || "")));
 }
 
@@ -2787,6 +2795,12 @@ function summarizeProviderFailure(provider, result) {
 
   if (/auth|login|sign in|unauthorized|permission/i.test(combined)) {
     return `${provider.label} appears to need sign-in. Open Connector and click Connect for this provider.`;
+  }
+  if (result?.error?.code === "ABORT_ERR" || /stopped by the user/i.test(message)) {
+    return "The provider request was stopped by the user.";
+  }
+  if (result?.error?.code === "ETIMEDOUT" || /inactivity timeout|stopped producing output|etimedout/i.test(raw)) {
+    return `${provider.label} stopped producing output before it completed the response and hit the inactivity timeout. Try again, reduce the request context, or switch provider.`;
   }
   if (isUsageLimitReachedText(raw)) {
     return buildUsageLimitMessage(provider, raw);
@@ -3114,6 +3128,198 @@ function runCommand(command, args, options = {}) {
   return result;
 }
 
+function runCommandWithActivityTimeout(command, args, options = {}) {
+  const {
+    input = "",
+    idleTimeout = 0,
+    abortSignal = null,
+    maxBuffer = COMMAND_MAX_BUFFER_BYTES,
+    env = {}
+  } = options;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let exitCode = null;
+    let exitSignal = null;
+    let timeoutHandle = null;
+    let forceKillHandle = null;
+    let terminationReason = "";
+    let spawned = false;
+    let spawnError = null;
+    let timeoutError = null;
+    let abortedError = null;
+    let bufferError = null;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+
+    const child = spawnCommand(command, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: false,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        ...env
+      }
+    });
+
+    const clearTimers = () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      if (forceKillHandle) {
+        clearTimeout(forceKillHandle);
+        forceKillHandle = null;
+      }
+    };
+
+    const killChild = () => {
+      if (child.exitCode !== null || child.signalCode) {
+        return;
+      }
+
+      try {
+        child.kill();
+      } catch {
+        // Ignore kill errors while shutting down the child.
+      }
+
+      forceKillHandle = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode) {
+          return;
+        }
+
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Ignore SIGKILL fallback failures.
+        }
+      }, COMMAND_FORCE_KILL_GRACE_MS);
+    };
+
+    const resetTimeout = () => {
+      if (idleTimeout <= 0 || terminationReason) {
+        return;
+      }
+
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+
+      timeoutHandle = setTimeout(() => {
+        terminationReason = "timeout";
+        timeoutError = Object.assign(
+          new Error(`The provider process hit the inactivity timeout after ${idleTimeout}ms without stdout or stderr activity.`),
+          { code: "ETIMEDOUT" }
+        );
+        killChild();
+      }, idleTimeout);
+    };
+
+    const pushChunk = (targetChunks, text, kind) => {
+      const buffer = Buffer.from(text, "utf8");
+      if (kind === "stdout") {
+        stdoutBytes += buffer.length;
+      } else {
+        stderrBytes += buffer.length;
+      }
+
+      if (stdoutBytes + stderrBytes > maxBuffer) {
+        terminationReason = terminationReason || "maxBuffer";
+        bufferError = Object.assign(
+          new Error(`The provider process exceeded the output buffer limit of ${maxBuffer} bytes.`),
+          { code: "ENOBUFS" }
+        );
+        killChild();
+        return;
+      }
+
+      targetChunks.push(text);
+      resetTimeout();
+    };
+
+    const finalize = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimers();
+
+      if (abortSignal) {
+        abortSignal.removeEventListener("abort", onAbort);
+      }
+
+      const stdout = stdoutChunks.join("");
+      const stderr = stderrChunks.join("");
+      const error = bufferError || abortedError || timeoutError || spawnError;
+
+      resolve({
+        stdout,
+        stderr,
+        status: typeof exitCode === "number" ? exitCode : (error ? 1 : 0),
+        signal: exitSignal || null,
+        error
+      });
+    };
+
+    const onAbort = () => {
+      if (terminationReason) {
+        return;
+      }
+
+      terminationReason = "aborted";
+      abortedError = Object.assign(
+        new Error("The provider request was stopped by the user."),
+        { code: "ABORT_ERR" }
+      );
+      killChild();
+    };
+
+    child.once("spawn", () => {
+      spawned = true;
+      resetTimeout();
+    });
+
+    child.once("error", (error) => {
+      spawnError = error;
+      finalize();
+    });
+
+    child.stdout?.on("data", (chunk) => {
+      pushChunk(stdoutChunks, chunk.toString("utf8"), "stdout");
+    });
+
+    child.stderr?.on("data", (chunk) => {
+      pushChunk(stderrChunks, chunk.toString("utf8"), "stderr");
+    });
+
+    child.once("close", (code, signal) => {
+      exitCode = typeof code === "number" ? code : null;
+      exitSignal = signal || null;
+      finalize();
+    });
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        onAbort();
+      } else {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    if (!spawned) {
+      resetTimeout();
+    }
+
+    if (input) {
+      child.stdin?.write(input, "utf8");
+    }
+    child.stdin?.end();
+  });
+}
+
 function runWindowsCommandFile(command, args, options = {}) {
   const line = ["call", quoteCmdArg(command), ...args.map((arg) => quoteCmdArg(arg))].join(" ");
   return spawnSync("cmd.exe", ["/d", "/c", line], {
@@ -3122,6 +3328,15 @@ function runWindowsCommandFile(command, args, options = {}) {
     maxBuffer: 1024 * 1024 * 12,
     ...options
   });
+}
+
+function spawnCommand(command, args, options = {}) {
+  if (process.platform === "win32" && /\.cmd$/i.test(command) && fs.existsSync(command)) {
+    const line = ["call", quoteCmdArg(command), ...args.map((arg) => quoteCmdArg(arg))].join(" ");
+    return spawn("cmd.exe", ["/d", "/c", line], options);
+  }
+
+  return spawn(command, args, options);
 }
 
 function quoteShellArg(value) {
