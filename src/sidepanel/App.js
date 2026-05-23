@@ -9,6 +9,20 @@ const HTTP_PROVIDER_KIND_CLOUDFLARE = "cloudflare-workers-ai";
 const GEMINI_NANO_PROVIDER_ID = "chrome-gemini-nano";
 const GEMINI_NANO_MODEL_ID = "gemini-nano";
 
+function createEmptyTaskMemory() {
+  return {
+    rootGoal: "",
+    currentGoal: "",
+    goals: [],
+    constraints: [],
+    explored: [],
+    findings: [],
+    deadEnds: [],
+    nextSteps: [],
+    updatedAt: ""
+  };
+}
+
 const state = {
   view: "chat",
   settingsSection: "memory",
@@ -76,6 +90,7 @@ const state = {
   actionNotes: [],
   recentActions: [],
   accessibleTabs: {},
+  taskMemory: createEmptyTaskMemory(),
   pendingPlan: null,
   pendingPlanContext: null,
   pendingPolicy: null,
@@ -163,6 +178,14 @@ const PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT = 5;
 const PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT = 2600;
 const PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT = 1200;
 const PROVIDER_RECENT_REFERENCE_LIMIT = 8;
+const TASK_MEMORY_GOAL_LIMIT = 8;
+const TASK_MEMORY_CONSTRAINT_LIMIT = 10;
+const TASK_MEMORY_EXPLORED_LIMIT = 18;
+const TASK_MEMORY_FINDING_LIMIT = 8;
+const TASK_MEMORY_DEAD_END_LIMIT = 8;
+const TASK_MEMORY_NEXT_STEP_LIMIT = 8;
+const TASK_MEMORY_TEXT_LIMIT = 360;
+const TASK_MEMORY_BRIEF_SECTION_LIMIT = 4;
 
 initialize();
 
@@ -3231,6 +3254,7 @@ async function processQueuedMessage(item) {
     return;
   }
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
+  rememberTaskMemoryGoal(text, { source: "user_message" });
 
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
   state.liveThinking = null;
@@ -3702,6 +3726,7 @@ async function getAgentResult(goal, options = {}) {
     const conversationContext = getRecentConversationForProvider(goal);
     const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
     const recentActions = getRecentActionsForProvider();
+    const taskMemory = getTaskMemoryForProvider(goal);
     const observationForRequest = compactObservationForProvider(rawObservation, {
       goal,
       conversationContext,
@@ -3719,6 +3744,7 @@ async function getAgentResult(goal, options = {}) {
       recentReferences,
       accessibleTabs,
       recentActions,
+      taskMemory,
       observation: observationForRequest,
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
@@ -3939,6 +3965,384 @@ function getRecentActionsForProvider() {
       createdAt: entry.createdAt || "",
       artifact: entry.artifact || null
     }));
+}
+
+function normalizeTaskMemory(memory) {
+  const safe = memory && typeof memory === "object" ? memory : {};
+  return {
+    rootGoal: compact(safe.rootGoal || ""),
+    currentGoal: compact(safe.currentGoal || ""),
+    goals: Array.isArray(safe.goals) ? safe.goals.slice(0, TASK_MEMORY_GOAL_LIMIT).map(normalizeTaskMemoryGoalEntry).filter(Boolean) : [],
+    constraints: Array.isArray(safe.constraints) ? safe.constraints.slice(0, TASK_MEMORY_CONSTRAINT_LIMIT).map(normalizeTaskMemoryText).filter(Boolean) : [],
+    explored: Array.isArray(safe.explored) ? safe.explored.slice(0, TASK_MEMORY_EXPLORED_LIMIT).map(normalizeTaskMemoryEntry).filter(Boolean) : [],
+    findings: Array.isArray(safe.findings) ? safe.findings.slice(0, TASK_MEMORY_FINDING_LIMIT).map(normalizeTaskMemoryEntry).filter(Boolean) : [],
+    deadEnds: Array.isArray(safe.deadEnds) ? safe.deadEnds.slice(0, TASK_MEMORY_DEAD_END_LIMIT).map(normalizeTaskMemoryEntry).filter(Boolean) : [],
+    nextSteps: Array.isArray(safe.nextSteps) ? safe.nextSteps.slice(0, TASK_MEMORY_NEXT_STEP_LIMIT).map(normalizeTaskMemoryEntry).filter(Boolean) : [],
+    updatedAt: String(safe.updatedAt || "")
+  };
+}
+
+function normalizeTaskMemoryText(value) {
+  return compact(String(value || "")).slice(0, TASK_MEMORY_TEXT_LIMIT);
+}
+
+function normalizeTaskMemoryGoalEntry(entry) {
+  const safe = entry && typeof entry === "object" ? entry : {};
+  const text = normalizeTaskMemoryText(safe.text || "");
+  if (!text) {
+    return null;
+  }
+
+  return {
+    text,
+    source: normalizeTaskMemoryText(safe.source || "user"),
+    at: String(safe.at || "")
+  };
+}
+
+function normalizeTaskMemoryEntry(entry) {
+  const safe = entry && typeof entry === "object" ? entry : {};
+  const kind = normalizeTaskMemoryText(safe.kind || "");
+  const label = normalizeTaskMemoryText(safe.label || safe.query || safe.url || safe.reason || "");
+  if (!kind && !label) {
+    return null;
+  }
+
+  return {
+    kind: kind || "note",
+    label,
+    query: normalizeTaskMemoryText(safe.query || ""),
+    url: String(safe.url || "").slice(0, 500),
+    title: normalizeTaskMemoryText(safe.title || ""),
+    status: normalizeTaskMemoryText(safe.status || ""),
+    reason: normalizeTaskMemoryText(safe.reason || ""),
+    source: normalizeTaskMemoryText(safe.source || ""),
+    at: String(safe.at || "")
+  };
+}
+
+function mergeTaskMemoryEntries(existing, incoming, limit, buildKey) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const entry of [...incoming, ...existing]) {
+    if (!entry) {
+      continue;
+    }
+
+    const key = buildKey(entry);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    merged.push(entry);
+    if (merged.length >= limit) {
+      break;
+    }
+  }
+
+  return merged;
+}
+
+function touchTaskMemory() {
+  state.taskMemory.updatedAt = new Date().toISOString();
+}
+
+function rememberTaskMemoryGoal(goal, options = {}) {
+  const text = normalizeTaskMemoryText(goal);
+  if (!text) {
+    return;
+  }
+
+  state.taskMemory = normalizeTaskMemory(state.taskMemory);
+  if (!state.taskMemory.rootGoal) {
+    state.taskMemory.rootGoal = text;
+  }
+  state.taskMemory.currentGoal = text;
+  state.taskMemory.goals = mergeTaskMemoryEntries(
+    state.taskMemory.goals,
+    [{
+      text,
+      source: options.source || "user",
+      at: new Date().toISOString()
+    }],
+    TASK_MEMORY_GOAL_LIMIT,
+    (entry) => `${entry.source}|${entry.text}`
+  );
+
+  const constraints = extractTaskMemoryConstraints(text);
+  state.taskMemory.constraints = mergeTaskMemoryEntries(
+    state.taskMemory.constraints.map((value) => ({ label: value })),
+    constraints.map((value) => ({ label: value })),
+    TASK_MEMORY_CONSTRAINT_LIMIT,
+    (entry) => entry.label.toLowerCase()
+  ).map((entry) => entry.label);
+
+  touchTaskMemory();
+}
+
+function extractTaskMemoryConstraints(text) {
+  const raw = String(text || "");
+  const clauses = raw
+    .split(/[\n.;]+/)
+    .map((part) => normalizeTaskMemoryText(part))
+    .filter(Boolean);
+
+  const matches = clauses.filter((clause) => (
+    /\b(no|not|without|exclude|excluding|only|must|avoid|remote|europe|european|non[-\s])/i.test(clause)
+    || /\b(no|non|senza|esclud|solo|deve|evita|remoto|europeo|europa)\b/i.test(clause)
+  ));
+
+  return [...new Set(matches)].slice(0, TASK_MEMORY_CONSTRAINT_LIMIT);
+}
+
+function rememberTaskMemoryObservation(observation, source = "observation") {
+  const tab = observation?.tab || {};
+  const url = String(tab.url || "").slice(0, 500);
+  const title = normalizeTaskMemoryText(tab.title || "");
+  if (!url && !title) {
+    return;
+  }
+
+  state.taskMemory = normalizeTaskMemory(state.taskMemory);
+  state.taskMemory.explored = mergeTaskMemoryEntries(
+    state.taskMemory.explored,
+    [{
+      kind: "page_observation",
+      label: title || url,
+      url,
+      title,
+      status: "observed",
+      source,
+      at: observation?.capturedAt || new Date().toISOString()
+    }],
+    TASK_MEMORY_EXPLORED_LIMIT,
+    (entry) => `${entry.kind}|${normalizeUrlForContext(entry.url || entry.label || "")}`
+  );
+  touchTaskMemory();
+}
+
+function rememberTaskMemoryPlannedActions(plan) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  if (!actions.length) {
+    return;
+  }
+
+  state.taskMemory = normalizeTaskMemory(state.taskMemory);
+  state.taskMemory.nextSteps = mergeTaskMemoryEntries(
+    [],
+    actions.map((action) => ({
+      kind: action?.type || "action",
+      label: formatTaskMemoryActionLabel(action),
+      url: String(action?.tab?.url || action?.value || "").slice(0, 500),
+      source: "agent_plan",
+      at: new Date().toISOString()
+    })),
+    TASK_MEMORY_NEXT_STEP_LIMIT,
+    (entry) => `${entry.kind}|${entry.label}|${entry.url}`
+  );
+  touchTaskMemory();
+}
+
+function formatTaskMemoryActionLabel(action) {
+  const parts = [action?.type || "action"];
+  const targetName = normalizeTaskMemoryText(action?.target?.name || "");
+  const queryLikeValue = normalizeTaskMemoryText(action?.value || "");
+  const tabTitle = normalizeTaskMemoryText(action?.tab?.title || "");
+
+  if (targetName) parts.push(targetName);
+  else if (tabTitle) parts.push(tabTitle);
+  else if (queryLikeValue) parts.push(queryLikeValue);
+
+  return parts.join(": ").slice(0, TASK_MEMORY_TEXT_LIMIT);
+}
+
+function rememberTaskMemoryActionResults(plan, results) {
+  const actionsById = new Map(
+    (Array.isArray(plan?.actions) ? plan.actions : [])
+      .filter((action) => action?.id)
+      .map((action) => [action.id, action])
+  );
+  const explored = [];
+  const deadEnds = [];
+
+  for (const result of Array.isArray(results) ? results : []) {
+    const action = actionsById.get(result?.action_id) || null;
+    const artifact = result?.artifact || null;
+    const logMessage = normalizeTaskMemoryText(result?.log_message || "");
+
+    if (artifact?.kind === "web_search") {
+      const resultCount = Array.isArray(artifact.results) ? artifact.results.length : (artifact.resultCount || 0);
+      explored.push({
+        kind: "web_search",
+        label: normalizeTaskMemoryText(artifact.query || action?.value || ""),
+        query: normalizeTaskMemoryText(artifact.query || action?.value || ""),
+        status: `${resultCount} results`,
+        source: action?.id || result?.action_id || "",
+        at: result?.createdAt || new Date().toISOString()
+      });
+      if (resultCount === 0) {
+        deadEnds.push({
+          kind: "web_search",
+          label: normalizeTaskMemoryText(artifact.query || action?.value || ""),
+          reason: "No public results found.",
+          source: action?.id || result?.action_id || "",
+          at: result?.createdAt || new Date().toISOString()
+        });
+      }
+      continue;
+    }
+
+    if (artifact?.kind === "http_response") {
+      explored.push({
+        kind: "http_request",
+        label: normalizeTaskMemoryText(artifact.finalUrl || artifact.url || action?.value || ""),
+        url: String(artifact.finalUrl || artifact.url || "").slice(0, 500),
+        status: normalizeTaskMemoryText(String(artifact.statusCode || "")),
+        source: action?.id || result?.action_id || "",
+        at: result?.createdAt || new Date().toISOString()
+      });
+      continue;
+    }
+
+    if (artifact?.kind === "tab_opened") {
+      explored.push({
+        kind: "tab_opened",
+        label: normalizeTaskMemoryText(artifact.title || artifact.url || action?.value || ""),
+        url: String(artifact.url || "").slice(0, 500),
+        title: normalizeTaskMemoryText(artifact.title || ""),
+        status: "opened",
+        source: action?.id || result?.action_id || "",
+        at: result?.createdAt || new Date().toISOString()
+      });
+      continue;
+    }
+
+    if (artifact?.kind === "page_observation") {
+      explored.push({
+        kind: "page_observation",
+        label: normalizeTaskMemoryText(artifact.title || artifact.url || action?.tab?.title || ""),
+        url: String(artifact.url || "").slice(0, 500),
+        title: normalizeTaskMemoryText(artifact.title || ""),
+        status: "observed",
+        source: action?.id || result?.action_id || "",
+        at: result?.createdAt || new Date().toISOString()
+      });
+      continue;
+    }
+
+    if (result?.status !== "success") {
+      deadEnds.push({
+        kind: action?.type || "action",
+        label: formatTaskMemoryActionLabel(action || { type: result?.action_id || "action" }),
+        reason: logMessage || normalizeTaskMemoryText(result?.status || "Action failed."),
+        source: action?.id || result?.action_id || "",
+        at: result?.createdAt || new Date().toISOString()
+      });
+    } else if (action) {
+      explored.push({
+        kind: action.type || "action",
+        label: formatTaskMemoryActionLabel(action),
+        status: logMessage || "success",
+        source: action.id || result?.action_id || "",
+        at: result?.createdAt || new Date().toISOString()
+      });
+    }
+  }
+
+  state.taskMemory = normalizeTaskMemory(state.taskMemory);
+  state.taskMemory.explored = mergeTaskMemoryEntries(
+    state.taskMemory.explored,
+    explored.map(normalizeTaskMemoryEntry).filter(Boolean),
+    TASK_MEMORY_EXPLORED_LIMIT,
+    (entry) => `${entry.kind}|${entry.query || normalizeUrlForContext(entry.url || "") || entry.label}|${entry.status}`
+  );
+  state.taskMemory.deadEnds = mergeTaskMemoryEntries(
+    state.taskMemory.deadEnds,
+    deadEnds.map(normalizeTaskMemoryEntry).filter(Boolean),
+    TASK_MEMORY_DEAD_END_LIMIT,
+    (entry) => `${entry.kind}|${entry.label}|${entry.reason}`
+  );
+  state.taskMemory.nextSteps = [];
+  touchTaskMemory();
+}
+
+function rememberTaskMemoryFinding(text, source = "assistant") {
+  const normalized = normalizeTaskMemoryText(text);
+  if (!normalized || isActionOnlyCompletionText(normalized)) {
+    return;
+  }
+
+  state.taskMemory = normalizeTaskMemory(state.taskMemory);
+  state.taskMemory.findings = mergeTaskMemoryEntries(
+    state.taskMemory.findings,
+    [{
+      kind: "finding",
+      label: normalized,
+      source,
+      at: new Date().toISOString()
+    }],
+    TASK_MEMORY_FINDING_LIMIT,
+    (entry) => `${entry.source}|${entry.label}`
+  );
+  state.taskMemory.nextSteps = [];
+  touchTaskMemory();
+}
+
+function getTaskMemoryForProvider(currentGoal) {
+  const memory = normalizeTaskMemory(state.taskMemory);
+  if (!memory.rootGoal && !memory.currentGoal && !memory.goals.length && !memory.explored.length && !memory.findings.length && !memory.deadEnds.length) {
+    return null;
+  }
+
+  return {
+    rootGoal: memory.rootGoal || normalizeTaskMemoryText(currentGoal || ""),
+    currentGoal: normalizeTaskMemoryText(currentGoal || memory.currentGoal || ""),
+    brief: buildTaskMemoryBrief(memory),
+    constraints: memory.constraints.slice(0, TASK_MEMORY_CONSTRAINT_LIMIT),
+    goals: memory.goals.slice(0, TASK_MEMORY_GOAL_LIMIT),
+    explored: memory.explored.slice(0, TASK_MEMORY_EXPLORED_LIMIT),
+    findings: memory.findings.slice(0, TASK_MEMORY_FINDING_LIMIT),
+    deadEnds: memory.deadEnds.slice(0, TASK_MEMORY_DEAD_END_LIMIT),
+    nextSteps: memory.nextSteps.slice(0, TASK_MEMORY_NEXT_STEP_LIMIT),
+    updatedAt: memory.updatedAt || ""
+  };
+}
+
+function buildTaskMemoryBrief(memory) {
+  const lines = [];
+  if (memory.rootGoal) {
+    lines.push(`Root goal: ${memory.rootGoal}`);
+  }
+  if (memory.currentGoal && memory.currentGoal !== memory.rootGoal) {
+    lines.push(`Current goal: ${memory.currentGoal}`);
+  }
+  if (memory.constraints.length) {
+    lines.push(`Constraints: ${memory.constraints.slice(0, TASK_MEMORY_BRIEF_SECTION_LIMIT).join(" | ")}`);
+  }
+  if (memory.explored.length) {
+    lines.push(`Explored: ${memory.explored.slice(0, TASK_MEMORY_BRIEF_SECTION_LIMIT).map(formatTaskMemoryBriefEntry).join(" | ")}`);
+  }
+  if (memory.deadEnds.length) {
+    lines.push(`Dead ends: ${memory.deadEnds.slice(0, TASK_MEMORY_BRIEF_SECTION_LIMIT).map(formatTaskMemoryBriefEntry).join(" | ")}`);
+  }
+  if (memory.findings.length) {
+    lines.push(`Findings: ${memory.findings.slice(0, TASK_MEMORY_BRIEF_SECTION_LIMIT).map((entry) => entry.label).join(" | ")}`);
+  }
+  if (memory.nextSteps.length) {
+    lines.push(`Pending leads: ${memory.nextSteps.slice(0, TASK_MEMORY_BRIEF_SECTION_LIMIT).map((entry) => entry.label).join(" | ")}`);
+  }
+  return lines.join("\n").slice(0, 2000);
+}
+
+function formatTaskMemoryBriefEntry(entry) {
+  const parts = [];
+  if (entry.kind) parts.push(entry.kind);
+  if (entry.label) parts.push(entry.label);
+  if (entry.status) parts.push(entry.status);
+  if (entry.reason) parts.push(entry.reason);
+  return parts.join(": ").slice(0, TASK_MEMORY_TEXT_LIMIT);
 }
 
 async function getAccessibleTabsForProvider() {
@@ -4714,6 +5118,7 @@ async function handleAgentResult(result, options = {}) {
   addDebugLog("agent.result", { result }, result?.type || "unknown result");
 
   if (result?.type === "agent_plan") {
+    rememberTaskMemoryPlannedActions(result);
     const hasPageBoundActions = (result.actions || []).some(isPageBoundAction);
     const planContext = hasPageBoundActions ? (createPlanPageContext(result) || options.planContext || null) : null;
     const policyResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.VALIDATE_ACTION_PLAN, { plan: result }));
@@ -4772,12 +5177,14 @@ async function handleAgentResult(result, options = {}) {
   }
 
   if (result?.type === "ask_user") {
+    rememberTaskMemoryFinding(result.question, "ask_user");
     state.messages.push({ role: "assistant", text: result.question, thinking: getAgentDisplayThinking(result), createdAt: Date.now() });
     render();
     return;
   }
 
   if (result?.type === "stop_for_human") {
+    rememberTaskMemoryFinding(result.reason, "stop_for_human");
     state.messages.push({ role: "assistant", text: result.reason, thinking: getAgentDisplayThinking(result), createdAt: Date.now() });
     state.activity.unshift("Automation stopped for human action.");
     render();
@@ -4825,6 +5232,7 @@ async function handleAgentResult(result, options = {}) {
 
   const responseText = getAgentDisplayText(result) || "I could not produce a safe browser action from that request yet.";
   const memoryProposal = await maybeSaveDeferredMemory(responseText);
+  rememberTaskMemoryFinding(responseText, "assistant_response");
   state.messages.push({
     role: "assistant",
     text: memoryProposal ? appendMemorySavedNote(responseText) : responseText,
@@ -5397,6 +5805,7 @@ async function executeActionPlan(plan, options = {}) {
     return;
   }
   const answerText = synthesized.text || getExecutionSummary(completionResults);
+  rememberTaskMemoryFinding(answerText, "post_action_answer");
   const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, answerText);
   state.messages.push({
     role: "assistant",
@@ -5474,6 +5883,7 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
     return true;
   }
   if (synthesized.text && !isActionOnlyCompletionText(synthesized.text)) {
+    rememberTaskMemoryFinding(synthesized.text, "post_action_synthesis");
     const memoryProposal = await maybeSaveResearchMemory(plan, completionResults, synthesized.text);
     state.messages.push({
       role: "assistant",
@@ -5880,6 +6290,7 @@ function rememberObservedTab(observation, source = "observation") {
     buttons: Array.isArray(observation.buttons) ? observation.buttons.length : 0,
     lastActionLog: previous.lastActionLog || ""
   };
+  rememberTaskMemoryObservation(observation, source);
   pruneAccessibleTabs();
 }
 
@@ -5962,6 +6373,7 @@ function rememberRecentActionResults(plan, results) {
     return;
   }
 
+  rememberTaskMemoryActionResults(plan, results);
   state.recentActions = dedupeRecentActions([
     ...summarized,
     ...(Array.isArray(state.recentActions) ? state.recentActions : [])
@@ -7904,6 +8316,7 @@ async function maybeSynthesizeResults(plan, results) {
   }
   const conversationContext = getRecentConversationForProvider(lastUserMessage);
   const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
+  const taskMemory = getTaskMemoryForProvider(lastUserMessage);
   const accessibleTabs = getRecentAccessibleTabs(null)
     .slice(0, PROVIDER_RECENT_TAB_LIMIT)
     .map((tab) => ({
@@ -7931,6 +8344,7 @@ async function maybeSynthesizeResults(plan, results) {
     recentReferences,
     accessibleTabs,
     recentActions,
+    taskMemory,
     observation: compactObservationForSynthesis(latestObservation, mode, {
       goal: lastUserMessage,
       conversationContext,
@@ -8548,6 +8962,7 @@ async function restoreSession() {
   state.actionNotes = session.actionNotes || [];
   state.recentActions = Array.isArray(session.recentActions) ? session.recentActions : [];
   state.accessibleTabs = session.accessibleTabs || {};
+  state.taskMemory = normalizeTaskMemory(session.taskMemory);
   state.sessionApprovals = Array.isArray(session.sessionApprovals) ? session.sessionApprovals : [];
   state.activity = session.activity || [];
   state.debugLogs = session.debugLogs || [];
@@ -8622,6 +9037,7 @@ function persistSession() {
       actionNotes: state.actionNotes.slice(-80),
       recentActions: state.recentActions.slice(0, 24),
       accessibleTabs: Object.fromEntries(Object.entries(state.accessibleTabs || {}).slice(0, 12)),
+      taskMemory: normalizeTaskMemory(state.taskMemory),
       sessionApprovals: state.sessionApprovals.slice(-60),
       activity: state.activity.slice(0, 80),
       debugLogs: state.debugLogs.slice(0, 200),
@@ -8664,6 +9080,7 @@ function clearSession() {
   state.confirmationText = "";
   state.actionNotes = [];
   state.recentActions = [];
+  state.taskMemory = createEmptyTaskMemory();
   state.debugLogs = [];
   state.activity = ["Local session cleared."];
   chrome.storage.local.remove("browserCompanionSession");
