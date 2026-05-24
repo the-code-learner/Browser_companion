@@ -98,9 +98,10 @@
       if (action.type === "upload_file_to_field") {
         element.scrollIntoView({ block: "center", inline: "nearest" });
         element.focus();
-        element.click();
+        clearHighlights();
+        element.classList.add("browser-companion-highlight");
         return {
-          ...success(action, false, `Opened the file picker for ${getName(element)}. Complete the upload manually.`),
+          ...success(action, false, `Browser requires a direct user click to open the file picker for ${getName(element)}. Click the highlighted field to choose the file manually.`),
           status: "needs_user"
         };
       }
