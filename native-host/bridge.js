@@ -18,11 +18,17 @@ const npmCliPath = resolveNpmCliPath();
 const providerInstallLogPath = path.join(projectRoot, "native-host", "provider-install.log");
 const providerModelCache = new Map();
 const providerRuntimeAlerts = new Map();
+const geminiQuotaCache = {
+  checkedAt: 0,
+  value: null,
+  pending: null
+};
 const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
 const httpProviderDebugErrorPath = path.join(projectRoot, "tmp-http-provider-error.json");
 const activeRequestControllers = new Map();
 const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
 const CLI_PROVIDER_INACTIVITY_TIMEOUT_MS = 300000;
+const GEMINI_QUOTA_CACHE_TTL_MS = 30000;
 const COMMAND_MAX_BUFFER_BYTES = 1024 * 1024 * 12;
 const COMMAND_FORCE_KILL_GRACE_MS = 2000;
 
@@ -50,7 +56,9 @@ function handleMessage(message) {
   const requestId = message?.requestId || "";
 
   if (message?.type === "health") {
-    writeResponse(requestId, getHealth());
+    getHealthDetailed()
+      .then((response) => writeResponse(requestId, response))
+      .catch(() => writeResponse(requestId, getHealth()));
     return;
   }
 
@@ -678,7 +686,14 @@ function isTextLike(fileName, mimeType) {
 }
 
 function getHealth() {
-  const providers = getProviderStatuses();
+  return buildHealthPayload(getProviderStatuses());
+}
+
+async function getHealthDetailed() {
+  return buildHealthPayload(await getProviderStatusesDetailed());
+}
+
+function buildHealthPayload(providers) {
   const codex = providers.find((provider) => provider.id === "openai-codex");
   const connectedProviders = providers.filter((provider) => provider.connected);
   const primary = codex?.connected ? codex : connectedProviders[0] || codex;
@@ -697,6 +712,28 @@ function getHealth() {
 
 function getProviderStatuses() {
   return Object.values(providerDefinitions).map((provider) => applyProviderRuntimeState(getProviderStatus(provider)));
+}
+
+async function getProviderStatusesDetailed() {
+  const providers = await Promise.all(Object.values(providerDefinitions).map((provider) => getProviderStatusDetailed(provider)));
+  return providers.map((provider) => applyProviderRuntimeState(provider));
+}
+
+async function getProviderStatusDetailed(provider) {
+  const status = getProviderStatus(provider);
+  if (provider.id !== "google-gemini-cli" || !status.connected) {
+    return status;
+  }
+
+  const quota = await getGeminiQuotaSnapshot();
+  if (!quota) {
+    return status;
+  }
+
+  return {
+    ...status,
+    quota
+  };
 }
 
 function getProviderStatus(provider) {
@@ -842,6 +879,139 @@ function getGeminiAuthState() {
     hasCachedAuth,
     hasEnvironmentAuth
   };
+}
+
+function getGeminiSelectedAuthType() {
+  try {
+    const settingsPath = path.join(os.homedir(), ".gemini", "settings.json");
+    const raw = fs.readFileSync(settingsPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return compact(parsed?.security?.auth?.selectedType || "");
+  } catch {
+    return "";
+  }
+}
+
+async function getGeminiQuotaSnapshot() {
+  const now = Date.now();
+  if (geminiQuotaCache.value && now - geminiQuotaCache.checkedAt < GEMINI_QUOTA_CACHE_TTL_MS) {
+    return geminiQuotaCache.value;
+  }
+
+  if (geminiQuotaCache.pending) {
+    return geminiQuotaCache.pending;
+  }
+
+  const authType = getGeminiSelectedAuthType();
+  if (!authType || authType !== "oauth-personal") {
+    return geminiQuotaCache.value;
+  }
+
+  geminiQuotaCache.pending = probeGeminiQuotaSnapshot(authType)
+    .then((quota) => {
+      geminiQuotaCache.checkedAt = Date.now();
+      if (quota) {
+        geminiQuotaCache.value = quota;
+      }
+      return geminiQuotaCache.value;
+    })
+    .catch(() => {
+      geminiQuotaCache.checkedAt = Date.now();
+      return geminiQuotaCache.value;
+    })
+    .finally(() => {
+      geminiQuotaCache.pending = null;
+    });
+
+  return geminiQuotaCache.pending;
+}
+
+async function probeGeminiQuotaSnapshot(authType) {
+  const result = await runCommandWithActivityTimeout(process.execPath, ["-e", buildGeminiQuotaProbeScript(authType)], {
+    idleTimeout: 15000,
+    maxBuffer: 1024 * 256
+  });
+
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+
+  const parsed = tryParseJson(compact(result.stdout || ""));
+  if (!parsed || parsed.error) {
+    return null;
+  }
+
+  const remaining = Number(parsed.remaining);
+  const limit = Number(parsed.limit);
+  if (!Number.isFinite(remaining) || !Number.isFinite(limit) || limit <= 0) {
+    return null;
+  }
+
+  const usedPercent = Math.max(0, Math.min(100, Math.round((1 - remaining / limit) * 100)));
+  return {
+    source: "gemini-cli",
+    authType: compact(parsed.authType || authType),
+    modelSetting: compact(parsed.modelSetting || ""),
+    activeModel: compact(parsed.activeModel || ""),
+    remaining,
+    limit,
+    usedPercent,
+    remainingPercent: Math.max(0, 100 - usedPercent),
+    resetTime: compact(parsed.resetTime || ""),
+    tierName: compact(parsed.tierName || ""),
+    checkedAt: new Date().toISOString()
+  };
+}
+
+function buildGeminiQuotaProbeScript(authType) {
+  const targetDir = JSON.stringify(projectRoot);
+  const authTypeLiteral = JSON.stringify(authType);
+  return [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const { pathToFileURL } = require('node:url');",
+    `const targetDir = ${targetDir};`,
+    `const authType = ${authTypeLiteral};`,
+    "const originalStdoutWrite = process.stdout.write.bind(process.stdout);",
+    "const originalStderrWrite = process.stderr.write.bind(process.stderr);",
+    "process.stdout.write = () => true;",
+    "process.stderr.write = () => true;",
+    "const finish = (payload, exitCode = 0) => {",
+    "  process.stdout.write = originalStdoutWrite;",
+    "  process.stderr.write = originalStderrWrite;",
+    "  originalStdoutWrite(JSON.stringify(payload));",
+    "  process.exitCode = exitCode;",
+    "};",
+    "(async () => {",
+    "  const bundleDir = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@google', 'gemini-cli', 'bundle');",
+    "  const coreEntry = fs.readdirSync(bundleDir).find((name) => /^core-.*\\.js$/i.test(name));",
+    "  if (!coreEntry) throw new Error('Gemini core bundle was not found.');",
+    "  const mod = await import(pathToFileURL(path.join(bundleDir, coreEntry)).href);",
+    "  const modelSetting = mod.PREVIEW_GEMINI_MODEL_AUTO || mod.DEFAULT_GEMINI_MODEL_AUTO;",
+    "  const config = new mod.Config({",
+    "    sessionId: 'browser-companion-quota-health',",
+    "    targetDir,",
+    "    cwd: targetDir,",
+    "    model: modelSetting,",
+    "    usageStatisticsEnabled: true,",
+    "    debugMode: false",
+    "  });",
+    "  await config.initialize();",
+    "  await config.refreshAuth(authType);",
+    "  await config.refreshUserQuota();",
+    "  finish({",
+    "    authType,",
+    "    modelSetting,",
+    "    activeModel: typeof config.getActiveModel === 'function' ? config.getActiveModel() : '',",
+    "    remaining: typeof config.getQuotaRemaining === 'function' ? config.getQuotaRemaining() : null,",
+    "    limit: typeof config.getQuotaLimit === 'function' ? config.getQuotaLimit() : null,",
+    "    resetTime: typeof config.getQuotaResetTime === 'function' ? config.getQuotaResetTime() : '',",
+    "    tierName: typeof config.getUserTierName === 'function' ? config.getUserTierName() : ''",
+    "  });",
+    "})().catch((error) => {",
+    "  finish({ error: String(error?.message || error || 'Gemini quota probe failed.') }, 1);",
+    "});"
+  ].join("\n");
 }
 
 function fileExistsWithContent(filePath) {
@@ -3584,6 +3754,19 @@ function writeResponse(requestId, message) {
 
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function tryParseJson(text) {
+  const source = String(text || "").trim();
+  if (!source) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(source);
+  } catch {
+    return null;
+  }
 }
 
 function summarizeCodexFailure(result) {

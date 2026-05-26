@@ -6,6 +6,7 @@ const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
 const HTTP_PROVIDER_LEGACY_TIMEOUT_MS = 360000;
 const HTTP_PROVIDER_KIND_OPENAI = "openai-compatible";
 const HTTP_PROVIDER_KIND_CLOUDFLARE = "cloudflare-workers-ai";
+const GEMINI_CLI_PROVIDER_ID = "google-gemini-cli";
 const GEMINI_NANO_PROVIDER_ID = "chrome-gemini-nano";
 const GEMINI_NANO_MODEL_ID = "gemini-nano";
 
@@ -224,7 +225,10 @@ function render(options = {}) {
       </div>
       <div class="top-actions">
         <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-        <span class="status ${getConnectorClass()}">${escapeHtml(getConnectorStatusLabel())}</span>
+        <div class="top-status-stack">
+          <span class="status ${getConnectorClass()}">${escapeHtml(getConnectorStatusLabel())}</span>
+          ${renderSelectedProviderQuotaBar()}
+        </div>
       </div>
     </section>
 
@@ -1659,6 +1663,39 @@ function renderProviderCards() {
   }).join("");
 }
 
+function renderSelectedProviderQuotaBar() {
+  const provider = getSelectedProviderStatus();
+  const quota = provider?.quota;
+  if (provider?.id !== GEMINI_CLI_PROVIDER_ID || !quota) {
+    return "";
+  }
+
+  const limit = Number(quota.limit);
+  const remaining = Number(quota.remaining);
+  const usedPercent = clampPercentage(quota.usedPercent);
+  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(remaining)) {
+    return "";
+  }
+
+  const remainingPercent = clampPercentage(quota.remainingPercent ?? (100 - usedPercent));
+  const resetLabel = formatProviderQuotaResetTime(quota.resetTime);
+  const detailParts = [`${usedPercent}% used`, `${remaining}/${limit} remaining`];
+  if (resetLabel) {
+    detailParts.push(`resets ${resetLabel}`);
+  }
+  const title = `${provider.label}: ${detailParts.join(" · ")}`;
+
+  return `
+    <div class="connector-quota" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+      <div class="connector-quota-bar" aria-hidden="true">
+        <span class="connector-quota-segment connector-quota-used" style="width:${usedPercent}%"></span>
+        <span class="connector-quota-segment connector-quota-remaining" style="width:${remainingPercent}%"></span>
+      </div>
+      <span class="connector-quota-text">${escapeHtml(detailParts.join(" · "))}</span>
+    </div>
+  `;
+}
+
 function renderProviderPrerequisites() {
   const missingProviders = state.connector.providers.filter((provider) => !provider.installed && provider.installCommand);
   if (!missingProviders.length) {
@@ -1701,6 +1738,38 @@ function normalizeProviderStatuses(providers = []) {
     getGeminiNanoProviderStatus(),
     ...getHttpProviderStatusSources().map(httpProviderToStatus)
   ];
+}
+
+function clampPercentage(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function formatProviderQuotaResetTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const now = new Date();
+  const sameDay = now.getFullYear() === date.getFullYear()
+    && now.getMonth() === date.getMonth()
+    && now.getDate() === date.getDate();
+  const formatter = new Intl.DateTimeFormat("en", sameDay
+    ? { hour: "2-digit", minute: "2-digit", hour12: false }
+    : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+
+  return sameDay
+    ? `today ${formatter.format(date)}`
+    : formatter.format(date);
 }
 
 function getGeminiNanoProviderStatus() {
