@@ -155,6 +155,8 @@ const state = {
 
 const app = document.getElementById("app");
 let connectorCheckInFlight = false;
+let connectorRefreshTimer = null;
+let connectorAutoRefreshTimer = null;
 let devWatchPollTimer = null;
 let devWatchPollInFlight = false;
 let devWatchFingerprint = "";
@@ -200,7 +202,11 @@ async function initialize() {
   render();
   checkConnector();
   loadUserMemory();
+  startConnectorAutoRefreshPolling();
   startDevAutoReloadPolling();
+  window.addEventListener("visibilitychange", handleDocumentVisibilityChange);
+  window.addEventListener("focus", handleWindowFocus);
+  window.addEventListener("beforeunload", stopConnectorAutoRefreshPolling, { once: true });
   window.addEventListener("beforeunload", stopDevAutoReloadPolling, { once: true });
 }
 
@@ -525,13 +531,63 @@ function openSettingsSection(section) {
 }
 
 function queueConnectorRefresh() {
-  if (connectorCheckInFlight) {
+  if (connectorRefreshTimer) {
+    clearTimeout(connectorRefreshTimer);
+  }
+
+  connectorRefreshTimer = window.setTimeout(() => {
+    connectorRefreshTimer = null;
+    if (connectorCheckInFlight) {
+      queueConnectorRefresh();
+      return;
+    }
+    void checkConnector();
+  }, 0);
+}
+
+function startConnectorAutoRefreshPolling() {
+  if (connectorAutoRefreshTimer) {
     return;
   }
 
-  setTimeout(() => {
-    checkConnector();
-  }, 0);
+  connectorAutoRefreshTimer = window.setInterval(() => {
+    if (shouldAutoRefreshConnectorStatus()) {
+      queueConnectorRefresh();
+    }
+  }, 45000);
+}
+
+function stopConnectorAutoRefreshPolling() {
+  if (!connectorAutoRefreshTimer) {
+    return;
+  }
+  clearInterval(connectorAutoRefreshTimer);
+  connectorAutoRefreshTimer = null;
+}
+
+function handleDocumentVisibilityChange() {
+  if (!document.hidden && shouldAutoRefreshConnectorStatus()) {
+    queueConnectorRefresh();
+  }
+}
+
+function handleWindowFocus() {
+  if (shouldAutoRefreshConnectorStatus()) {
+    queueConnectorRefresh();
+  }
+}
+
+function shouldAutoRefreshConnectorStatus() {
+  const provider = getSelectedProviderStatus();
+  return !document.hidden
+    && provider?.id === GEMINI_CLI_PROVIDER_ID
+    && Boolean(provider?.connected);
+}
+
+function queueSelectedProviderUsageRefresh() {
+  if (shouldAutoRefreshConnectorStatus()) {
+    queueConnectorRefresh();
+  }
 }
 
 function startDevAutoReloadPolling() {
@@ -1239,7 +1295,38 @@ function buildErrorNoteDetails(message) {
 }
 
 function renderMessageContent(message) {
+  if (message.role === "assistant" && message.plannerDraft) {
+    return renderPlannerDraftMessage(message);
+  }
   return `<div class="message-body">${renderRichText(message.text)}</div>`;
+}
+
+function renderPlannerDraftMessage(message) {
+  const draft = message.plannerDraft || {};
+  const actionCount = Number.isFinite(draft.actionCount) ? draft.actionCount : 0;
+  const actionLabel = actionCount === 1 ? "1 action" : `${actionCount} actions`;
+  const actionItems = Array.isArray(draft.actionSummaries)
+    ? draft.actionSummaries.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
+    : "";
+  const raw = String(draft.raw || "").trim();
+  const explanation = draft.summaryForUser
+    ? `<p>${escapeHtml(draft.summaryForUser)}</p>`
+    : `<p>The provider returned a planner draft as malformed JSON, so Browser Companion did not execute it automatically.</p>`;
+
+  return `
+    <div class="message-body">
+      <section class="planner-draft-card">
+        <div class="planner-draft-head">
+          <strong>${escapeHtml(draft.title || "Planner Draft")}</strong>
+          <span class="planner-draft-badge">Not executed</span>
+        </div>
+        ${explanation}
+        <p class="planner-draft-meta">${escapeHtml(`${actionLabel} detected${draft.detectedWrappedPlan ? " in wrapped payload" : ""}.`)}</p>
+        ${actionItems ? `<ul class="planner-draft-list">${actionItems}</ul>` : ""}
+        ${raw ? `<details class="planner-draft-raw"><summary>Raw planner payload</summary><pre><code>${escapeHtml(raw)}</code></pre></details>` : ""}
+      </section>
+    </div>
+  `;
 }
 
 function renderMessageThinking(message) {
@@ -5210,6 +5297,7 @@ async function handleAgentResult(result, options = {}) {
         createdAt: Date.now()
       });
     }
+    queueSelectedProviderUsageRefresh();
 
     if (policy.allowed && !policy.requiresConfirmation) {
       state.activity.unshift("Executing low-risk action plan.");
@@ -5248,6 +5336,7 @@ async function handleAgentResult(result, options = {}) {
   if (result?.type === "ask_user") {
     rememberTaskMemoryFinding(result.question, "ask_user");
     state.messages.push({ role: "assistant", text: result.question, thinking: getAgentDisplayThinking(result), createdAt: Date.now() });
+    queueSelectedProviderUsageRefresh();
     render();
     return;
   }
@@ -5256,11 +5345,13 @@ async function handleAgentResult(result, options = {}) {
     rememberTaskMemoryFinding(result.reason, "stop_for_human");
     state.messages.push({ role: "assistant", text: result.reason, thinking: getAgentDisplayThinking(result), createdAt: Date.now() });
     state.activity.unshift("Automation stopped for human action.");
+    queueSelectedProviderUsageRefresh();
     render();
     return;
   }
 
   if (result?.type === "memory_proposal") {
+    queueSelectedProviderUsageRefresh();
     proposeMemorySave({
       title: result.memory_title || result.title || result.heading || inferResearchMemoryTitle(result.goal || result.text || ""),
       content: result.memory_content || result.content || result.text || result.summary_for_user || ""
@@ -5294,24 +5385,32 @@ async function handleAgentResult(result, options = {}) {
     if (isProviderQuotaExhaustedResult(result)) {
       markSelectedProviderQuotaExhausted(result);
       queueConnectorRefresh();
+    } else {
+      queueSelectedProviderUsageRefresh();
     }
     render();
     return;
   }
 
   const responseText = getAgentDisplayText(result) || "I could not produce a safe browser action from that request yet.";
+  const plannerDraft = extractPlannerDraftFromText(responseText);
   const memoryProposal = await maybeSaveDeferredMemory(responseText);
-  rememberTaskMemoryFinding(responseText, "assistant_response");
+  rememberTaskMemoryFinding(plannerDraft?.summaryForUser || responseText, "assistant_response");
   state.messages.push({
     role: "assistant",
-    text: memoryProposal ? appendMemorySavedNote(responseText) : responseText,
+    text: plannerDraft
+      ? (plannerDraft.summaryForUser || "The provider returned a planner draft, but it was not valid enough to execute.")
+      : (memoryProposal ? appendMemorySavedNote(responseText) : responseText),
+    ...(plannerDraft ? { plannerDraft } : {}),
     thinking: getAgentDisplayThinking(result),
     createdAt: Date.now()
   });
   if (memoryProposal) {
+    queueSelectedProviderUsageRefresh();
     proposeMemorySave(memoryProposal.item, memoryProposal.responseLanguage, memoryProposal.goal);
     return;
   }
+  queueSelectedProviderUsageRefresh();
   if (getSelectedProviderStatus()?.quotaState === "exhausted") {
     queueConnectorRefresh();
   }
@@ -5400,6 +5499,63 @@ function extractStructuredPayloadFromAgentResult(result) {
     embedded: structured
   }, "Unwrapped structured Browser Companion payload from provider text.");
   return normalizeEmbeddedAgentPayload(structured, result);
+}
+
+function extractPlannerDraftFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw || !/"agent_plan"|"summary_for_user"|"actions"/.test(raw)) {
+    return null;
+  }
+
+  const summaryForUser = decodePlannerDraftString(extractPlannerDraftField(raw, "summary_for_user"));
+  const title = decodePlannerDraftString(extractPlannerDraftField(raw, "title"));
+  const actionMatches = [...raw.matchAll(/"id"\s*:\s*"([^"]+)"/g)];
+  const actionTypeMatches = [...raw.matchAll(/"type"\s*:\s*"([^"]+)"/g)];
+  if (!summaryForUser && !actionMatches.length && !actionTypeMatches.length) {
+    return null;
+  }
+
+  const actionCount = Math.max(actionMatches.length, actionTypeMatches.filter((match) => match[1] !== "agent_plan").length);
+  const actionSummaries = [];
+  for (let index = 0; index < Math.max(actionMatches.length, actionTypeMatches.length); index += 1) {
+    const id = actionMatches[index]?.[1] || "";
+    const type = actionTypeMatches[index]?.[1] || "";
+    const label = [id, type].filter(Boolean).join(" · ");
+    if (label) {
+      actionSummaries.push(label);
+    }
+  }
+
+  return {
+    title: title || "Planner Draft",
+    summaryForUser,
+    actionCount,
+    actionSummaries: actionSummaries.slice(0, 8),
+    detectedWrappedPlan: /"agent_plan"\s*:\s*\{/.test(raw),
+    raw
+  };
+}
+
+function extractPlannerDraftField(text, key) {
+  const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"])*)"`, "i");
+  const match = String(text || "").match(pattern);
+  return match?.[1] || "";
+}
+
+function decodePlannerDraftString(value) {
+  const raw = String(value || "");
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    return JSON.parse(`"${raw.replace(/"/g, '\\"')}"`);
+  } catch {
+    return raw
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
 }
 
 function normalizeEmbeddedAgentPayload(structured, wrapper = {}) {

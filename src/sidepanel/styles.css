@@ -403,6 +403,51 @@ h2 {
   color: var(--accent);
 }
 
+.planner-draft-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--ink) 8%);
+}
+
+.planner-draft-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.planner-draft-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.planner-draft-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.planner-draft-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.planner-draft-raw summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .mermaid-block {
   display: grid;
   gap: 4px;
