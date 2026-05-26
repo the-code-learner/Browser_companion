@@ -231,10 +231,7 @@ function render(options = {}) {
       </div>
       <div class="top-actions">
         <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-        <div class="top-status-stack">
-          <span class="status ${getConnectorClass()}">${escapeHtml(getConnectorStatusLabel())}</span>
-          ${renderSelectedProviderQuotaBar()}
-        </div>
+        ${renderSelectedProviderStatusBadge()}
       </div>
     </section>
 
@@ -1750,37 +1747,52 @@ function renderProviderCards() {
   }).join("");
 }
 
-function renderSelectedProviderQuotaBar() {
+function renderSelectedProviderStatusBadge() {
   const provider = getSelectedProviderStatus();
+  const statusLabel = getConnectorStatusLabel();
+  const tone = getConnectorClass();
+  const usage = getSelectedProviderUsageSnapshot(provider);
+  const usageTitle = usage
+    ? [usage.meta, usage.remainingDetail, usage.resetDetail].filter(Boolean).join(" · ")
+    : "";
+  const title = [statusLabel, usageTitle].filter(Boolean).join(" · ");
+
+  return `
+    <div class="status-badge ${escapeHtml(tone)}${usage ? " has-usage" : ""}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+      <span class="status-badge-label">${escapeHtml(statusLabel)}</span>
+      ${usage ? `<span class="status-badge-meta">${escapeHtml(usage.meta)}</span>` : ""}
+      ${usage ? `
+        <span class="status-badge-progress" aria-hidden="true">
+          <span class="status-badge-progress-used" style="width:${usage.usedPercent}%"></span>
+          <span class="status-badge-progress-remaining" style="width:${usage.remainingPercent}%"></span>
+        </span>
+      ` : ""}
+    </div>
+  `;
+}
+
+function getSelectedProviderUsageSnapshot(provider = getSelectedProviderStatus()) {
   const quota = provider?.quota;
-  if (provider?.id !== GEMINI_CLI_PROVIDER_ID || !quota) {
-    return "";
+  if (!quota) {
+    return null;
   }
 
   const limit = Number(quota.limit);
   const remaining = Number(quota.remaining);
-  const usedPercent = clampPercentage(quota.usedPercent);
   if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(remaining)) {
-    return "";
+    return null;
   }
 
+  const usedPercent = clampPercentage(quota.usedPercent);
   const remainingPercent = clampPercentage(quota.remainingPercent ?? (100 - usedPercent));
   const resetLabel = formatProviderQuotaResetTime(quota.resetTime);
-  const detailParts = [`${usedPercent}% used`, `${remaining}/${limit} remaining`];
-  if (resetLabel) {
-    detailParts.push(`resets ${resetLabel}`);
-  }
-  const title = `${provider.label}: ${detailParts.join(" · ")}`;
-
-  return `
-    <div class="connector-quota" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
-      <div class="connector-quota-bar" aria-hidden="true">
-        <span class="connector-quota-segment connector-quota-used" style="width:${usedPercent}%"></span>
-        <span class="connector-quota-segment connector-quota-remaining" style="width:${remainingPercent}%"></span>
-      </div>
-      <span class="connector-quota-text">${escapeHtml(detailParts.join(" · "))}</span>
-    </div>
-  `;
+  return {
+    usedPercent,
+    remainingPercent,
+    meta: remaining <= 0 ? "Limit reached" : `${usedPercent}% used`,
+    remainingDetail: `${remaining}/${limit} remaining`,
+    resetDetail: resetLabel ? `resets ${resetLabel}` : ""
+  };
 }
 
 function renderProviderPrerequisites() {

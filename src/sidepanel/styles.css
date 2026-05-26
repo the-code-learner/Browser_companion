@@ -132,14 +132,6 @@ button:hover {
   gap: 6px;
 }
 
-.top-status-stack {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-}
-
 .top-action {
   min-height: 24px;
   padding: 0 8px;
@@ -186,61 +178,83 @@ h2 {
   color: var(--muted);
 }
 
-.status {
-  flex: 0 0 auto;
-  border-radius: 999px;
-  padding: 3px 7px;
-  font-size: 11px;
-  text-transform: capitalize;
-}
-
-.connector-quota {
+.status-badge {
   display: grid;
-  width: min(160px, 36vw);
+  min-width: 0;
+  width: min(185px, 42vw);
   gap: 3px;
+  border-radius: 999px;
+  padding: 5px 10px 7px;
+  border: 1px solid transparent;
+  text-align: left;
 }
 
-.connector-quota-bar {
+.status-badge-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-badge-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.05;
+}
+
+.status-badge-progress {
   display: flex;
   height: 4px;
   overflow: hidden;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--line) 80%, transparent);
+  background: color-mix(in srgb, var(--line) 75%, transparent);
 }
 
-.connector-quota-segment {
+.status-badge-progress-used,
+.status-badge-progress-remaining {
   display: block;
   height: 100%;
 }
 
-.connector-quota-used {
+.status-badge-progress-used {
   background: #d05b5b;
 }
 
-.connector-quota-remaining {
+.status-badge-progress-remaining {
   background: #2fa66a;
 }
 
-.connector-quota-text {
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.1;
-  text-align: right;
-}
-
-.status.ok {
+.status-badge.ok {
   color: var(--ok);
   background: var(--ok-bg);
+  border-color: color-mix(in srgb, var(--ok) 20%, transparent);
 }
 
-.status.warn {
+.status-badge.ok .status-badge-meta {
+  color: color-mix(in srgb, var(--ok) 82%, var(--ink) 18%);
+}
+
+.status-badge.warn {
   color: var(--warn);
   background: var(--warn-bg);
+  border-color: color-mix(in srgb, var(--warn) 24%, transparent);
 }
 
-.status.neutral {
+.status-badge.warn .status-badge-meta {
+  color: color-mix(in srgb, var(--warn) 82%, var(--ink) 18%);
+}
+
+.status-badge.neutral {
   color: var(--muted);
   background: #eef1f6;
+  border-color: color-mix(in srgb, var(--line) 85%, transparent);
+}
+
+.status-badge.neutral .status-badge-meta {
+  color: var(--muted);
 }
 
 .page-strip {
