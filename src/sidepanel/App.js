@@ -1308,7 +1308,13 @@ function renderPlannerDraftMessage(message) {
   const raw = String(draft.raw || "").trim();
   const explanation = draft.summaryForUser
     ? `<p>${escapeHtml(draft.summaryForUser)}</p>`
-    : `<p>The provider returned a planner draft as malformed JSON, so Browser Companion did not execute it automatically.</p>`;
+    : `<p>The provider returned a planner draft outside the expected Browser Companion control-flow JSON, so Browser Companion did not execute it automatically.</p>`;
+  const question = draft.question
+    ? `<p class="planner-draft-question">${escapeHtml(draft.question)}</p>`
+    : "";
+  const draftSource = draft.draftKind === "conversational_plan"
+    ? "Detected from conversational plan text."
+    : (draft.detectedWrappedPlan ? "Detected in wrapped payload." : "Detected from malformed structured output.");
 
   return `
     <div class="message-body">
@@ -1318,7 +1324,8 @@ function renderPlannerDraftMessage(message) {
           <span class="planner-draft-badge">Not executed</span>
         </div>
         ${explanation}
-        <p class="planner-draft-meta">${escapeHtml(`${actionLabel} detected${draft.detectedWrappedPlan ? " in wrapped payload" : ""}.`)}</p>
+        ${question}
+        <p class="planner-draft-meta">${escapeHtml(`${actionLabel} detected. ${draftSource}`)}</p>
         ${actionItems ? `<ul class="planner-draft-list">${actionItems}</ul>` : ""}
         ${raw ? `<details class="planner-draft-raw"><summary>Raw planner payload</summary><pre><code>${escapeHtml(raw)}</code></pre></details>` : ""}
       </section>
@@ -5515,7 +5522,20 @@ function extractStructuredPayloadFromAgentResult(result) {
 
 function extractPlannerDraftFromText(text) {
   const raw = String(text || "").trim();
-  if (!raw || !/"agent_plan"|"summary_for_user"|"actions"/.test(raw)) {
+  if (!raw) {
+    return null;
+  }
+
+  const structuredDraft = extractStructuredPlannerDraftFromText(raw);
+  if (structuredDraft) {
+    return structuredDraft;
+  }
+
+  return extractConversationalPlannerDraftFromText(raw);
+}
+
+function extractStructuredPlannerDraftFromText(raw) {
+  if (!/"agent_plan"|"summary_for_user"|"actions"/.test(raw)) {
     return null;
   }
 
@@ -5544,6 +5564,44 @@ function extractPlannerDraftFromText(text) {
     actionCount,
     actionSummaries: actionSummaries.slice(0, 8),
     detectedWrappedPlan: /"agent_plan"\s*:\s*\{/.test(raw),
+    draftKind: "structured_json",
+    raw
+  };
+}
+
+function extractConversationalPlannerDraftFromText(raw) {
+  const hasPlanCue = /(?:^|\n)(?:#{1,6}\s*)?plan\b|proposed plan|strategy summary|implementation steps|phase 1|phase 2|phase 3|does this approach work\?|if so, i will proceed|if this approach works|se sei d'accordo|se questo approccio/i.test(raw);
+  const numberedSteps = [...raw.matchAll(/^\s*\d+\.\s+(.+)$/gm)].map((match) => compact(match[1]));
+  const bulletSteps = [...raw.matchAll(/^\s*[-*]\s+(.+)$/gm)].map((match) => compact(match[1]));
+
+  if (!hasPlanCue || (numberedSteps.length + bulletSteps.length) < 3) {
+    return null;
+  }
+
+  const splitMarker = raw.match(/(?:^|\n)(?:#{1,6}\s*)?(?:proposed plan|plan)\b[:\s-]*/i);
+  const summarySource = splitMarker && splitMarker.index > 0
+    ? raw.slice(0, splitMarker.index).trim()
+    : raw;
+  const summaryForUser = compact(
+    summarySource
+      .replace(/(?:does this approach work\?|if so, i will proceed\.?|if this approach works.*|se sei d'accordo.*|se questo approccio.*)$/i, "")
+      .replace(/^companion\s*/i, "")
+  );
+  const titleMatch = raw.match(/(?:^|\n)#{1,6}\s*plan\b[:\s-]*(.+)?$/im)
+    || raw.match(/(?:^|\n)(?:proposed plan|strategy summary)[:\s-]*(.+)?$/im);
+  const askMatch = raw.match(/(does this approach work\?|if this approach works.*|if so, i will proceed\.?|se sei d'accordo.*|ti va bene.*)$/i);
+  const stepLines = [...numberedSteps, ...bulletSteps]
+    .map((item) => item.replace(/\s{2,}/g, " ").trim())
+    .filter(Boolean);
+
+  return {
+    title: compact(titleMatch?.[1] || "") || "Planner Draft",
+    summaryForUser,
+    actionCount: stepLines.length,
+    actionSummaries: stepLines.slice(0, 8),
+    detectedWrappedPlan: false,
+    draftKind: "conversational_plan",
+    question: compact(askMatch?.[1] || ""),
     raw
   };
 }

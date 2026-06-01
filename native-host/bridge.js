@@ -3017,6 +3017,8 @@ function buildAgentPrompt(payload, options = {}) {
     includeSchema ? "" : "",
     includeSchema ? "Important for non-Codex providers: if any browser action is needed, return only one JSON object conforming to the schema above. Do not wrap it in Markdown. Do not explain outside JSON." : "",
     includeSchema ? "For memory saves, return a top-level memory_proposal JSON object with memory_title and memory_content, not an agent_plan action." : "",
+    includeSchema ? "Do not ask for approval or confirmation in prose such as 'Does this approach work?' or 'If so, I will proceed.' Browser Companion handles confirmation itself when required." : "",
+    includeSchema ? "Do not output narrative sections such as 'Strategy Summary', 'Proposed Plan', or fenced Markdown plans when browser actions are needed. If you have enough information to act, return an agent_plan JSON object immediately. Use ask_user only when a specific missing detail genuinely blocks the next safe step." : "",
     includeSchema ? "" : "",
     "User goal:",
     payload.goal || "",

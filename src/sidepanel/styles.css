@@ -449,6 +449,12 @@ h2 {
   font-size: 11px;
 }
 
+.planner-draft-question {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .planner-draft-list {
   display: grid;
   gap: 4px;
