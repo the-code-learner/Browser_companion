@@ -189,6 +189,9 @@ const TASK_MEMORY_DEAD_END_LIMIT = 8;
 const TASK_MEMORY_NEXT_STEP_LIMIT = 8;
 const TASK_MEMORY_TEXT_LIMIT = 360;
 const TASK_MEMORY_BRIEF_SECTION_LIMIT = 4;
+const systemThemeMediaQuery = typeof window?.matchMedia === "function"
+  ? window.matchMedia("(prefers-color-scheme: dark)")
+  : null;
 
 initialize();
 
@@ -206,6 +209,7 @@ async function initialize() {
   startDevAutoReloadPolling();
   window.addEventListener("visibilitychange", handleDocumentVisibilityChange);
   window.addEventListener("focus", handleWindowFocus);
+  systemThemeMediaQuery?.addEventListener?.("change", handleSystemThemeChange);
   window.addEventListener("beforeunload", stopConnectorAutoRefreshPolling, { once: true });
   window.addEventListener("beforeunload", stopDevAutoReloadPolling, { once: true });
 }
@@ -225,7 +229,7 @@ function render(options = {}) {
   app.innerHTML = `
     <section class="topbar">
       <div class="brand-lockup">
-        <img class="brand-mark" src="../../assets/icons/icon-32.png" alt="" aria-hidden="true">
+        <img class="brand-mark" src="${escapeHtml(getBrandMarkSrc())}" alt="" aria-hidden="true">
         <h1><span>Browser</span><span>Companion</span></h1>
         <span class="title-line" aria-hidden="true"></span>
       </div>
@@ -492,6 +496,15 @@ function applyTheme() {
   document.documentElement.dataset.theme = state.theme;
 }
 
+function handleSystemThemeChange() {
+  if (state.theme !== "system") {
+    return;
+  }
+
+  applyTheme();
+  render();
+}
+
 function getThemeIcon() {
   if (state.theme === "dark") return "☾";
   if (state.theme === "light") return "☀";
@@ -502,6 +515,24 @@ function getThemeTitle() {
   if (state.theme === "dark") return "Theme: dark";
   if (state.theme === "light") return "Theme: light";
   return "Theme: system";
+}
+
+function getResolvedTheme() {
+  if (state.theme === "dark" || state.theme === "light") {
+    return state.theme;
+  }
+
+  try {
+    return systemThemeMediaQuery?.matches ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+}
+
+function getBrandMarkSrc() {
+  return getResolvedTheme() === "dark"
+    ? "../../assets/icons/brand-dark.png"
+    : "../../assets/icons/brand-light.png";
 }
 
 function getSettingsSubtitle() {
