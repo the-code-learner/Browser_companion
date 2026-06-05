@@ -224,13 +224,14 @@ function render(options = {}) {
       };
   app.innerHTML = `
     <section class="topbar">
-      <button id="theme-toggle" class="theme-toggle" type="button" title="${escapeHtml(getThemeTitle())}">${escapeHtml(getThemeIcon())}</button>
-      <div>
-        <h1>Browser Companion</h1>
+      <div class="brand-lockup">
+        <img class="brand-mark" src="../../assets/icons/icon-32.png" alt="" aria-hidden="true">
+        <h1><span>Browser</span><span>Companion</span></h1>
         <span class="title-line" aria-hidden="true"></span>
       </div>
       <div class="top-actions">
         <button id="open-settings-view" class="top-action icon-action" type="button" title="Settings" aria-label="Settings">&#9881;</button>
+        <button id="theme-toggle" class="top-action icon-action theme-toggle" type="button" title="${escapeHtml(getThemeTitle())}" aria-label="${escapeHtml(getThemeTitle())}">${escapeHtml(getThemeIcon())}</button>
         ${renderSelectedProviderStatusBadge()}
       </div>
     </section>

@@ -112,17 +112,45 @@ button:hover {
 }
 
 .topbar {
-  position: relative;
   display: flex;
-  min-height: 36px;
+  min-height: 44px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 8px;
+  padding: 6px 8px;
 }
 
-.topbar > div:first-of-type {
-  padding-left: 28px;
+.brand-lockup {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  grid-template-columns: 30px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: center;
+}
+
+.brand-mark {
+  display: block;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.brand-lockup h1,
+.brand-lockup .title-line {
+  grid-column: 2;
+}
+
+.brand-lockup h1 {
+  display: grid;
+  gap: 1px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.brand-lockup h1 span {
+  display: block;
 }
 
 .top-actions {
@@ -141,9 +169,6 @@ button:hover {
 }
 
 .theme-toggle {
-  position: absolute;
-  top: 5px;
-  left: 8px;
   display: grid;
   width: 24px;
   min-height: 24px;
@@ -998,7 +1023,7 @@ h2 {
 
 .title-line {
   display: block;
-  width: 28px;
+  width: 34px;
   height: 1px;
   margin-top: 4px;
   background: var(--line);
