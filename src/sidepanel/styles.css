@@ -636,6 +636,37 @@ h2 {
   position: sticky;
   bottom: 0;
   z-index: 5;
+  display: grid;
+  gap: 6px;
+}
+
+.composer-mode-switch {
+  display: inline-grid;
+  width: fit-content;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  padding: 3px;
+  box-shadow: 0 -6px 16px rgb(23 32 51 / 6%);
+}
+
+.composer-mode {
+  min-height: 24px;
+  border-color: transparent;
+  border-radius: 999px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  background: transparent;
+}
+
+.composer-mode.active {
+  color: #ffffff;
+  border-color: var(--accent);
+  background: var(--accent);
 }
 
 .composer textarea {

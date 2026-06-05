@@ -98,6 +98,14 @@ async function handleMessage(message) {
     return requestSynthesis(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.DEEP_SEARCH_PLAN_REQUEST) {
+    return requestDeepSearchPlan(message.payload);
+  }
+
+  if (message?.type === MESSAGE_TYPES.DEEP_SEARCH_REPORT_REQUEST) {
+    return requestDeepSearchReport(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.STOP_ACTIVE_REQUEST) {
     return stopActiveProviderRequest();
   }
@@ -328,6 +336,42 @@ async function requestSynthesis(payload) {
     };
   } finally {
     activeNativeRequestId = null;
+  }
+}
+
+async function requestDeepSearchPlan(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "deep_search_plan_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_PLAN_RESULT, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Deep Search planning request failed."
+    };
+  }
+}
+
+async function requestDeepSearchReport(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "deep_search_report_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_REPORT_RESULT, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Deep Search report request failed."
+    };
   }
 }
 

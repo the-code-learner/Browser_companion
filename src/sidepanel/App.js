@@ -1,4 +1,10 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
+import {
+  DEEP_SEARCH_STORAGE_KEY,
+  createDeepSearchRun,
+  normalizeDeepSearchRun,
+  upsertDeepSearchRunList
+} from "../shared/deep-search.js";
 
 const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
 const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
@@ -143,6 +149,7 @@ const state = {
   },
   pendingMemoryIntent: null,
   pendingMemoryProposal: null,
+  composerMode: "chat",
   composerDraft: "",
   outboundQueue: [],
   isProcessingQueue: false,
@@ -414,6 +421,12 @@ function render(options = {}) {
   if (sendAttachmentsInput) sendAttachmentsInput.addEventListener("change", (event) => {
     state.privacy.sendAttachmentsToCodex = event.target.checked;
     persistSession();
+  });
+  document.querySelectorAll("[data-composer-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.composerMode = button.dataset.composerMode === "deep-search" ? "deep-search" : "chat";
+      render();
+    });
   });
   document.getElementById("attachment-input").addEventListener("change", handleAttachments);
   document.getElementById("chat-form").addEventListener("submit", handleChatSubmit);
@@ -1074,19 +1087,26 @@ function renderComposer() {
   const queueLabel = state.isProcessingQueue
     ? (state.outboundQueue.length ? `Working, ${state.outboundQueue.length} queued` : "Working")
     : (state.outboundQueue.length ? `${state.outboundQueue.length} queued` : "");
-  const submitLabel = state.isProcessingQueue ? "Queue" : "Send";
+  const deepSearchMode = state.composerMode === "deep-search";
+  const submitLabel = deepSearchMode
+    ? "Launch"
+    : (state.isProcessingQueue ? "Queue" : "Send");
   const stopButton = state.isProcessingQueue
     ? `<button id="stop-processing" type="button" class="composer-stop" title="${escapeHtml(state.stopRequestInFlight ? "Stopping" : "Stop")}" aria-label="${escapeHtml(state.stopRequestInFlight ? "Stopping" : "Stop")}" ${state.stopRequestInFlight ? "disabled" : ""}>${state.stopRequestInFlight ? "..." : "&#9632;"}</button>`
     : "";
 
   return `
     <div class="composer-wrap">
+      <div class="composer-mode-switch" role="tablist" aria-label="Composer mode">
+        <button type="button" class="composer-mode${deepSearchMode ? "" : " active"}" data-composer-mode="chat" aria-pressed="${deepSearchMode ? "false" : "true"}">Chat</button>
+        <button type="button" class="composer-mode${deepSearchMode ? " active" : ""}" data-composer-mode="deep-search" aria-pressed="${deepSearchMode ? "true" : "false"}">Deep Search</button>
+      </div>
       <form id="chat-form" class="composer">
         <label class="file-input file-input-icon" title="Attach file" aria-label="Attach file">
           <input id="attachment-input" type="file" multiple>
           <span aria-hidden="true">+</span>
         </label>
-        <textarea id="chat-input" rows="3" placeholder="Describe your goal on this page">${escapeHtml(state.composerDraft)}</textarea>
+        <textarea id="chat-input" rows="3" placeholder="${escapeHtml(deepSearchMode ? "Describe the research goal for a report tab" : "Describe your goal on this page")}">${escapeHtml(state.composerDraft)}</textarea>
         <div class="composer-actions">
           ${stopButton}
           <button type="submit" class="composer-submit">${escapeHtml(submitLabel)}</button>
@@ -2114,6 +2134,28 @@ function getSelectedProviderStatus() {
     || (state.codex.provider === GEMINI_NANO_PROVIDER_ID ? getGeminiNanoProviderStatus() : null)
     || getDefaultProviderStatus(state.codex.provider)
     || getDefaultProviderStatus("openai-codex");
+}
+
+function getSelectedDeepSearchProviderSnapshot() {
+  const provider = getSelectedProviderStatus();
+  const snapshot = {
+    id: provider?.id || state.codex.provider,
+    label: provider?.label || state.codex.provider,
+    model: state.codex.model
+  };
+
+  if (isHttpProviderStatus(provider)) {
+    const providerId = String(provider.id || "").replace(/^http:/, "");
+    const httpProvider = getHttpProviderStatusSources().find((item) => item.id === providerId);
+    if (httpProvider) {
+      snapshot.httpProvider = {
+        ...httpProvider,
+        model: state.codex.model || httpProvider.model || httpProvider.models?.[0] || "default"
+      };
+    }
+  }
+
+  return snapshot;
 }
 
 function ensureSelectedProviderAvailable() {
@@ -3377,6 +3419,12 @@ async function handleChatSubmit(event) {
   const questionContext = tabToPageContext(questionTab);
   rememberSidebarContextFromTab(questionTab);
   rememberActiveTab(questionTab);
+  if (state.composerMode === "deep-search") {
+    state.composerDraft = "";
+    await launchDeepSearchRun(text, questionContext);
+    render({ preserveComposer: false, focusComposer: true });
+    return;
+  }
   const messageId = crypto.randomUUID();
   const createdAt = Date.now();
 
@@ -3392,6 +3440,94 @@ async function handleChatSubmit(event) {
   render({ preserveComposer: false, focusComposer: true });
 
   processOutboundQueue();
+}
+
+async function launchDeepSearchRun(text, planContext) {
+  const selectedProvider = getSelectedProviderStatus();
+
+  if (state.codex.provider === GEMINI_NANO_PROVIDER_ID) {
+    state.messages.push({
+      role: "user",
+      text,
+      createdAt: Date.now()
+    });
+    state.messages.push({
+      role: "assistant",
+      text: "Deep Search v1 currently runs through the native-host providers and is not available for Chrome Gemini Nano yet.",
+      variant: "error",
+      createdAt: Date.now()
+    });
+    state.activity.unshift("Deep Search launch blocked because Gemini Nano is not supported for this mode yet.");
+    return;
+  }
+
+  if (!isSelectedProviderConnected()) {
+    state.messages.push({
+      role: "user",
+      text,
+      createdAt: Date.now()
+    });
+    state.messages.push({
+      role: "assistant",
+      text: `${selectedProvider?.label || "The selected provider"} is not ready yet. Connect it first, then launch Deep Search again.`,
+      variant: "error",
+      createdAt: Date.now()
+    });
+    state.activity.unshift("Deep Search launch blocked because the selected provider is not connected.");
+    return;
+  }
+
+  const providerSnapshot = getSelectedDeepSearchProviderSnapshot();
+  const run = createDeepSearchRun({
+    goal: text,
+    provider: providerSnapshot.id,
+    providerLabel: providerSnapshot.label,
+    model: providerSnapshot.model,
+    providerSnapshot,
+    windowId: planContext?.windowId ?? state.sidebarContext.windowId,
+    originTabId: planContext?.tabId ?? state.sidebarContext.tabId,
+    responseLanguage: detectUserLanguage(text),
+    observation: state.page.observation || null,
+    page: planContext || null
+  });
+
+  try {
+    await persistDeepSearchRun(run);
+
+    const reportUrl = chrome.runtime.getURL(`src/deep-search/index.html?run=${encodeURIComponent(run.id)}`);
+    await chrome.tabs.create({
+      url: reportUrl,
+      active: true,
+      ...(run.windowId != null ? { windowId: run.windowId } : {})
+    });
+  } catch (error) {
+    state.messages.push({
+      role: "user",
+      text,
+      createdAt: Date.now()
+    });
+    state.messages.push({
+      role: "assistant",
+      text: error.message || "Deep Search could not open the report tab.",
+      variant: "error",
+      createdAt: Date.now()
+    });
+    state.activity.unshift(`Deep Search launch failed: ${error.message || "Unexpected error."}`);
+    return;
+  }
+
+  state.messages.push({
+    role: "user",
+    text,
+    createdAt: Date.now()
+  });
+  state.messages.push({
+    role: "assistant",
+    text: `Started a Deep Search report in a new tab. It will research in the background and keep the full write-up, sources, and methodology there.`,
+    createdAt: Date.now()
+  });
+  state.activity.unshift(`Started Deep Search in window ${run.windowId == null ? "?" : run.windowId}.`);
+  persistSession();
 }
 
 async function processOutboundQueue() {
@@ -9429,6 +9565,17 @@ function persistConnectorSelection() {
   persistSession();
   persistProviderSettings().catch((error) => {
     state.activity.unshift(`Provider selection could not be saved: ${error.message || error}`);
+  });
+}
+
+async function persistDeepSearchRun(run) {
+  const stored = await chrome.storage.local.get([DEEP_SEARCH_STORAGE_KEY]);
+  const runs = Array.isArray(stored[DEEP_SEARCH_STORAGE_KEY])
+    ? stored[DEEP_SEARCH_STORAGE_KEY].map((item) => normalizeDeepSearchRun(item))
+    : [];
+  const nextRuns = upsertDeepSearchRunList(runs, run);
+  await chrome.storage.local.set({
+    [DEEP_SEARCH_STORAGE_KEY]: nextRuns
   });
 }
 

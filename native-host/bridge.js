@@ -161,6 +161,52 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "deep_search_plan_request") {
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runDeepSearchPlanRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId
+    }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
+        type: "deep_search_plan_result",
+        status: "error",
+        message: error.message || "Deep Search planning failed."
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
+    return;
+  }
+
+  if (message?.type === "deep_search_report_request") {
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runDeepSearchReportRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId
+    }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
+        type: "deep_search_report_result",
+        status: "error",
+        message: error.message || "Deep Search final report failed."
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
+    return;
+  }
+
   if (message?.type === "stop_active_request") {
     const targetRequestId = String(message.payload?.targetRequestId || "");
     const controller = targetRequestId ? activeRequestControllers.get(targetRequestId) : null;
@@ -1795,6 +1841,158 @@ function runSynthesisRequest(payload = {}, options = {}) {
   }
 }
 
+async function runDeepSearchPlanRequest(payload = {}, options = {}) {
+  const stage = payload.stage === "refine" ? "refine" : "initial";
+  const prompt = stage === "refine"
+    ? buildDeepSearchRefinementPrompt(payload)
+    : buildDeepSearchPlanningPrompt(payload);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+
+  if (!parsed.ok) {
+    return {
+      type: "deep_search_plan_result",
+      status: "error",
+      stage,
+      message: parsed.message
+    };
+  }
+
+  if (stage === "refine") {
+    return {
+      type: "deep_search_plan_result",
+      status: "ok",
+      stage,
+      refinement: normalizeDeepSearchRefinementResponse(parsed.value)
+    };
+  }
+
+  return {
+    type: "deep_search_plan_result",
+    status: "ok",
+    stage,
+    plan: normalizeDeepSearchPlanningResponse(parsed.value)
+  };
+}
+
+async function runDeepSearchReportRequest(payload = {}, options = {}) {
+  const prompt = buildDeepSearchReportPrompt(payload);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+
+  if (!parsed.ok) {
+    return {
+      type: "deep_search_report_result",
+      status: "error",
+      message: parsed.message
+    };
+  }
+
+  return {
+    type: "deep_search_report_result",
+    status: "ok",
+    report: normalizeDeepSearchReportResponse(parsed.value)
+  };
+}
+
+async function runStructuredProviderJsonRequest(payload = {}, prompt, options = {}) {
+  if (payload.httpProvider) {
+    try {
+      const { text } = await runHttpProviderCompletion(payload.httpProvider, prompt, true, options);
+      return {
+        ok: true,
+        value: JSON.parse(extractJsonObject(compactProviderOutput(text)))
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error.message || "HTTP provider Deep Search request failed."
+      };
+    }
+  }
+
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  if (provider.id !== "openai-codex") {
+    const status = getProviderStatus(provider);
+    if (!status.installed) {
+      return {
+        ok: false,
+        message: `${provider.label} is not installed.`
+      };
+    }
+
+    const result = await runProviderPromptWithModelFallback(provider, prompt, payload.model, true, options);
+    if (result.error || result.status !== 0) {
+      noteProviderFailure(provider, result);
+      return {
+        ok: false,
+        message: summarizeProviderFailure(provider, result)
+      };
+    }
+
+    noteProviderSuccess(provider.id);
+    try {
+      return {
+        ok: true,
+        value: JSON.parse(extractJsonObject(compactProviderOutput(result.stdout || result.stderr || "")))
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error.message || `${provider.label} did not return valid Deep Search JSON.`
+      };
+    }
+  }
+
+  const health = getHealth();
+  const codexStatus = health.providers.find((item) => item.id === "openai-codex");
+  if (!codexStatus?.connected) {
+    return {
+      ok: false,
+      message: codexStatus?.message || "Codex is not connected."
+    };
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-deep-search-"));
+  const outputPath = path.join(tempDir, "deep-search.json");
+  const result = runCodex([
+    "exec",
+    "--model",
+    normalizeModel(payload.model),
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "--output-last-message",
+    outputPath,
+    "-"
+  ], {
+    input: prompt,
+    timeout: 120000
+  });
+
+  if (result.error || result.status !== 0) {
+    noteProviderFailure(providerDefinitions["openai-codex"], result);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    return {
+      ok: false,
+      message: summarizeCodexFailure(result)
+    };
+  }
+
+  try {
+    noteProviderSuccess("openai-codex");
+    return {
+      ok: true,
+      value: JSON.parse(extractJsonObject(fs.readFileSync(outputPath, "utf8").trim()))
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error.message || "Codex returned invalid Deep Search JSON."
+    };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function runCliAgentRequest(provider, payload = {}, options = {}) {
   const status = getProviderStatus(provider);
   if (!status.installed) {
@@ -3070,6 +3268,164 @@ function buildAgentPrompt(payload, options = {}) {
   ].filter((line) => line !== "").join("\n");
 }
 
+function buildDeepSearchPlanningPrompt(payload = {}) {
+  const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
+  const seedPage = payload.seedPageContext || payload.observation || null;
+
+  return [
+    systemPrompt,
+    "",
+    "Task: Plan a web-first Deep Search run for Browser Companion.",
+    "Return only one JSON object. Do not wrap it in Markdown.",
+    "Do not return browser actions. Do not ask the user for confirmation. Do not write a prose strategy summary.",
+    `JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to ${6} focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}`,
+    "",
+    "Planning rules:",
+    "- Web-first research only.",
+    "- Favor public sources that can be read with normal HTTP fetches.",
+    "- Use the current page only as optional seed context, not as a browsing target.",
+    "- Keep queries diverse but concrete.",
+    "- Respect the user's explicit constraints and language.",
+    "",
+    "User goal:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Fixed Deep Search caps:",
+    "- Initial queries max: 6",
+    "- Search results retained per query max: 5",
+    "- Total fetched pages max: 12",
+    "- Optional refinement queries max: 3",
+    "",
+    "Seed page context JSON:",
+    JSON.stringify(seedPage || null, null, 2),
+    "",
+    "Local user memory JSON:",
+    JSON.stringify(payload.userMemory || [], null, 2),
+    "",
+    "Return only valid JSON."
+  ].join("\n");
+}
+
+function buildDeepSearchRefinementPrompt(payload = {}) {
+  return [
+    "Task: Review the first-wave Deep Search evidence and decide whether a second wave is necessary.",
+    "Return only one JSON object. Do not wrap it in Markdown.",
+    'JSON shape: {"additional_queries":["up to 3 queries"],"rationale":"short reason","stop_early":false}',
+    "",
+    "User goal:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Initial Deep Search plan JSON:",
+    JSON.stringify(payload.plan || null, null, 2),
+    "",
+    "Collected source summary JSON:",
+    JSON.stringify(payload.sources || payload.fetchedSources || [], null, 2),
+    "",
+    "Search trail JSON:",
+    JSON.stringify(payload.searchArtifacts || [], null, 2),
+    "",
+    "Rules:",
+    "- Use stop_early=true when the current evidence is already sufficient for a strong final report.",
+    "- If more research is needed, propose only the highest-value follow-up queries.",
+    "- Do not repeat the same query phrasing unless a genuinely tighter variant is needed.",
+    "",
+    "Return only valid JSON."
+  ].join("\n");
+}
+
+function buildDeepSearchReportPrompt(payload = {}) {
+  return [
+    "Task: Write the final Deep Search report for Browser Companion from collected public web evidence.",
+    "Return only one JSON object. Do not wrap it in Markdown.",
+    'JSON shape: {"title":"report title","objective":"research objective","executive_summary":"short synthesis","key_findings":[{"title":"finding","summary":"why it matters","source_urls":["https://..."]}],"sections":[{"heading":"section title","body":"source-backed narrative","source_urls":["https://..."]}],"methodology":["step"],"open_questions":["remaining unknown"],"sources":[{"url":"https://...","title":"source title","snippet":"short note","statusCode":200}]}',
+    "",
+    "Report rules:",
+    "- Be source-backed, concrete, and concise.",
+    "- Prefer synthesis over dumping raw search output.",
+    "- Mention uncertainty when evidence is thin or conflicting.",
+    "- Cite relevant URLs for findings and sections.",
+    "- Keep the report aligned with the user's language.",
+    "",
+    "User goal:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Deep Search plan JSON:",
+    JSON.stringify(payload.plan || null, null, 2),
+    "",
+    "Search artifacts JSON:",
+    JSON.stringify(payload.searchArtifacts || [], null, 2),
+    "",
+    "Fetched source artifacts JSON:",
+    JSON.stringify(payload.fetchedSources || [], null, 2),
+    "",
+    "Local user memory JSON:",
+    JSON.stringify(payload.userMemory || [], null, 2),
+    "",
+    "Return only valid JSON."
+  ].join("\n");
+}
+
+function normalizeDeepSearchPlanningResponse(value = {}) {
+  return {
+    title: compact(value?.title || ""),
+    objective: compact(value?.objective || ""),
+    search_queries: normalizeStructuredStringList(value?.search_queries || [], 6),
+    desired_sections: normalizeStructuredStringList(value?.desired_sections || [], 12),
+    evaluation_focus: normalizeStructuredStringList(value?.evaluation_focus || [], 12),
+    constraints: normalizeStructuredStringList(value?.constraints || [], 16),
+    stop_early_if_sufficient: Boolean(value?.stop_early_if_sufficient)
+  };
+}
+
+function normalizeDeepSearchRefinementResponse(value = {}) {
+  return {
+    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 3),
+    rationale: compact(value?.rationale || ""),
+    stop_early: Boolean(value?.stop_early)
+  };
+}
+
+function normalizeDeepSearchReportResponse(value = {}) {
+  return {
+    title: compact(value?.title || ""),
+    objective: compact(value?.objective || ""),
+    executive_summary: compact(value?.executive_summary || ""),
+    key_findings: Array.isArray(value?.key_findings)
+      ? value.key_findings.slice(0, 12).map((item) => ({
+          title: compact(item?.title || ""),
+          summary: compact(item?.summary || ""),
+          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 8)
+        }))
+      : [],
+    sections: Array.isArray(value?.sections)
+      ? value.sections.slice(0, 12).map((item) => ({
+          heading: compact(item?.heading || ""),
+          body: compact(item?.body || ""),
+          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 12)
+        }))
+      : [],
+    methodology: normalizeStructuredStringList(value?.methodology || [], 16),
+    open_questions: normalizeStructuredStringList(value?.open_questions || [], 16),
+    sources: Array.isArray(value?.sources)
+      ? value.sources.slice(0, 24).map((item) => ({
+          url: normalizeStructuredUrl(item?.url || ""),
+          title: compact(item?.title || ""),
+          snippet: compact(item?.snippet || ""),
+          statusCode: Number.isFinite(Number(item?.statusCode)) ? Number(item.statusCode) : null
+        })).filter((item) => item.url)
+      : []
+  };
+}
+
 function compactObservationForPrompt(observation = {}) {
   const safeObservation = observation && typeof observation === "object" ? observation : {};
   return {
@@ -3198,6 +3554,40 @@ function compactAttachmentsForPrompt(attachments = []) {
     status: attachment.status || "",
     text: String(attachment.text || "").slice(0, 8000)
   }));
+}
+
+function normalizeStructuredStringList(values, limit) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return values
+    .map((value) => compact(value))
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function normalizeStructuredUrlList(values, limit) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return values
+    .map((value) => normalizeStructuredUrl(value))
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function normalizeStructuredUrl(value) {
+  const text = String(value || "").trim();
+  if (!/^https?:\/\//i.test(text)) {
+    return "";
+  }
+  try {
+    return new URL(text).toString();
+  } catch {
+    return "";
+  }
 }
 
 function buildSynthesisPrompt(payload) {
