@@ -35,7 +35,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleMessage(message) {
   if (message?.type === MESSAGE_TYPES.OBSERVE_ACTIVE_TAB) {
-    return observeActiveTab();
+    return observeActiveTab(message.payload);
   }
 
   if (message?.type === MESSAGE_TYPES.NATIVE_HEALTH) {
@@ -114,7 +114,7 @@ async function handleMessage(message) {
   }
 
   if (message?.type === MESSAGE_TYPES.EXECUTE_ACTION_PLAN) {
-    return executeActionPlan(message.payload?.plan);
+    return executeActionPlan(message.payload?.plan, message.payload?.executionContext || null);
   }
 
   return {
@@ -123,8 +123,8 @@ async function handleMessage(message) {
   };
 }
 
-async function observeActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+async function observeActiveTab(context = null) {
+  const tab = await resolveExecutionContextTab(context);
 
   if (!tab?.id) {
     throw new Error("No active tab is available.");
@@ -140,6 +140,7 @@ async function observeActiveTab() {
   const observation = createObservation(
     {
       id: tab.id,
+      windowId: tab.windowId,
       url: tab.url,
       title: tab.title
     },
@@ -482,7 +483,7 @@ async function requestDevWatchStatus() {
   }
 }
 
-async function executeActionPlan(plan) {
+async function executeActionPlan(plan, executionContext = null) {
   const policy = validateActionPlan(plan);
 
   if (!policy.allowed) {
@@ -493,7 +494,7 @@ async function executeActionPlan(plan) {
     };
   }
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await resolveExecutionContextTab(executionContext);
 
   if (!tab?.id) {
     throw new Error("No active tab is available.");
@@ -568,6 +569,25 @@ async function executeActionPlan(plan) {
       results
     })
   };
+}
+
+async function resolveExecutionContextTab(context = null) {
+  if (Number.isInteger(context?.tabId)) {
+    const exactTab = await chrome.tabs.get(context.tabId).catch(() => null);
+    if (exactTab?.id) {
+      return exactTab;
+    }
+  }
+
+  if (Number.isInteger(context?.windowId)) {
+    const [windowTab] = await chrome.tabs.query({ active: true, windowId: context.windowId }).catch(() => []);
+    if (windowTab?.id) {
+      return windowTab;
+    }
+  }
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
 }
 
 async function ensureActionScripts(tabId) {
@@ -853,6 +873,7 @@ async function executeBrowserLevelAction(tab, action, options = {}) {
       artifact: {
         kind: "tab_opened",
         tabId: created?.id || null,
+        windowId: created?.windowId || tab.windowId || null,
         url,
         title: warmed?.title || created?.title || "",
         accessStatus: warmed?.accessStatus || "known",

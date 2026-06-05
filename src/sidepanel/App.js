@@ -80,6 +80,10 @@ const state = {
     summary: "Open a page and observe it before asking the agent to work with page context.",
     observation: null
   },
+  sidebarContext: {
+    windowId: null,
+    tabId: null
+  },
   attachments: [],
   messages: [
     {
@@ -198,6 +202,7 @@ initialize();
 async function initialize() {
   await restoreProviderSettings();
   await restoreSession();
+  await captureSidebarContext();
   await refreshAccessibleTabsState();
   applyTheme();
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
@@ -2179,6 +2184,9 @@ function getConnectorInstallCommand() {
 async function observePage(options = {}) {
   const silent = Boolean(options.silent);
   const reason = options.reason || "read the current page";
+  const targetContext = options.planContext || {
+    windowId: state.sidebarContext?.windowId || null
+  };
 
   if (!silent && !options.skipWaitingMessage) {
     state.page.status = "observing";
@@ -2186,7 +2194,7 @@ async function observePage(options = {}) {
     render();
   }
 
-  const permission = await ensureCurrentSitePermission();
+  const permission = await ensureCurrentSitePermission(targetContext);
 
   if (!permission.ok) {
     addDebugLog("observe.permission_blocked", { reason, permission }, permission.error);
@@ -2211,7 +2219,7 @@ async function observePage(options = {}) {
     render();
   }
 
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.OBSERVE_ACTIVE_TAB));
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.OBSERVE_ACTIVE_TAB, targetContext || {}));
   addDebugLog("observe.response", {
     ok: response.ok,
     error: response.error || "",
@@ -2229,6 +2237,7 @@ async function observePage(options = {}) {
   }
 
   const observation = response.envelope.payload;
+  rememberSidebarContextFromTab(observation?.tab);
   rememberObservedTab(observation, "observe");
   state.page = {
     status: "ready",
@@ -2329,8 +2338,8 @@ async function fetchGoogleDocText(docId) {
   return null;
 }
 
-async function ensureCurrentSitePermission() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+async function ensureCurrentSitePermission(context = null) {
+  const tab = await getCurrentActiveTab({ context });
 
   if (!tab?.url) {
     return {
@@ -3366,6 +3375,7 @@ async function handleChatSubmit(event) {
 
   const questionTab = await getCurrentActiveTab();
   const questionContext = tabToPageContext(questionTab);
+  rememberSidebarContextFromTab(questionTab);
   rememberActiveTab(questionTab);
   const messageId = crypto.randomUUID();
   const createdAt = Date.now();
@@ -4069,6 +4079,7 @@ async function buildRuntimeContext(goal, options = {}) {
 function formatTabContextForPrompt(tab) {
   const parts = [];
   if (tab.tabId || tab.id) parts.push(`id=${tab.tabId || tab.id}`);
+  if (tab.windowId) parts.push(`window=${tab.windowId}`);
   if (tab.isCurrent) parts.push("current=true");
   if (tab.title) parts.push(`title="${String(tab.title).slice(0, 120)}"`);
   if (tab.url) parts.push(`url=${String(tab.url).slice(0, 220)}`);
@@ -4585,9 +4596,10 @@ function getObservationForContext(context) {
 
   const observedTab = observation.tab || {};
   const sameTab = context.tabId && observedTab.id && context.tabId === observedTab.id;
+  const sameWindow = !context.windowId || !observedTab.windowId || context.windowId === observedTab.windowId;
   const sameUrl = normalizeUrlForContext(context.url) === normalizeUrlForContext(observedTab.url || state.page.url);
 
-  return sameTab || sameUrl ? observation : null;
+  return sameTab || (sameWindow && sameUrl) ? observation : null;
 }
 
 async function refreshAccessibleTabsState() {
@@ -4614,6 +4626,7 @@ async function refreshAccessibleTabsState() {
       return [key, {
         ...tab,
         tabId: liveTab.id,
+        windowId: liveTab.windowId,
         url: liveTab.url || tab.url || "",
         title: liveTab.title || tab.title || ""
       }];
@@ -4627,6 +4640,13 @@ async function refreshAccessibleTabsState() {
 function handleTabRemoved(tabId) {
   if (!Number.isInteger(tabId)) {
     return;
+  }
+
+  if (state.sidebarContext?.tabId === tabId) {
+    state.sidebarContext = {
+      ...state.sidebarContext,
+      tabId: null
+    };
   }
 
   const entries = Object.entries(state.accessibleTabs || {});
@@ -6024,7 +6044,10 @@ async function executeActionPlan(plan, options = {}) {
   addDebugLog("action.execute.start", { plan: normalizedPlan }, `${actions.length} action(s).`);
   render();
 
-  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, { plan: normalizedPlan }));
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, {
+    plan: normalizedPlan,
+    executionContext: getLatestPlanContext(options.planContext)
+  }));
   addDebugLog("action.execute.end", {
     ok: response.ok,
     error: response.error || "",
@@ -6363,7 +6386,29 @@ function getLastUserMessageText() {
 }
 
 function getLatestPlanContext(fallbackContext = null) {
-  return getObservedPageContext() || fallbackContext || null;
+  const observed = getObservedPageContext();
+  if (observed) {
+    return observed;
+  }
+
+  if (fallbackContext) {
+    return {
+      ...fallbackContext,
+      windowId: fallbackContext.windowId || state.sidebarContext.windowId || null
+    };
+  }
+
+  if (state.sidebarContext?.windowId || state.sidebarContext?.tabId) {
+    return {
+      tabId: state.sidebarContext.tabId || null,
+      windowId: state.sidebarContext.windowId || null,
+      url: "",
+      title: "",
+      capturedAt: ""
+    };
+  }
+
+  return null;
 }
 
 function expandAgentGoal(goal) {
@@ -6394,13 +6439,43 @@ function isRetryLikeGoal(text) {
   return /^(retry|try again|riprova|again|again please|ripeti|ritenta)\b/.test(value);
 }
 
-async function getCurrentActiveTab() {
+async function getCurrentActiveTab(options = {}) {
   try {
+    const context = options?.context || null;
+    if (context?.windowId) {
+      const [tab] = await chrome.tabs.query({ active: true, windowId: context.windowId });
+      if (tab) {
+        return tab;
+      }
+    }
+
+    if (state.sidebarContext?.windowId) {
+      const [tab] = await chrome.tabs.query({ active: true, windowId: state.sidebarContext.windowId });
+      if (tab) {
+        return tab;
+      }
+    }
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     return tab || null;
   } catch {
     return null;
   }
+}
+
+async function captureSidebarContext() {
+  const tab = await getCurrentActiveTab({ context: null });
+  rememberSidebarContextFromTab(tab);
+  return tab;
+}
+
+function rememberSidebarContextFromTab(tab) {
+  const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : Number.parseInt(String(tab?.windowId || ""), 10);
+  const tabId = Number.isInteger(tab?.id) ? tab.id : Number.parseInt(String(tab?.id || tab?.tabId || ""), 10);
+  state.sidebarContext = {
+    windowId: Number.isInteger(windowId) ? windowId : (state.sidebarContext?.windowId ?? null),
+    tabId: Number.isInteger(tabId) ? tabId : (state.sidebarContext?.tabId ?? null)
+  };
 }
 
 async function recoverAndRetryStaleActionPlan(plan, pageMatch, options = {}) {
@@ -6486,6 +6561,7 @@ function getObservedPageContext() {
 
   return {
     tabId: tab.id || null,
+    windowId: tab.windowId || state.sidebarContext.windowId || null,
     url: tab.url || state.page.url || "",
     title: tab.title || state.page.title || "",
     capturedAt: state.page.observation?.capturedAt || ""
@@ -6493,12 +6569,13 @@ function getObservedPageContext() {
 }
 
 function tabToPageContext(tab) {
-  if (!tab?.id && !tab?.url && !tab?.title) {
+  if (!tab?.id && !tab?.url && !tab?.title && !tab?.windowId) {
     return null;
   }
 
   return {
     tabId: tab?.id || null,
+    windowId: tab?.windowId || null,
     url: tab?.url || "",
     title: tab?.title || "",
     capturedAt: new Date().toISOString()
@@ -6510,9 +6587,10 @@ async function verifyActionPlanPageContext(actions, expectedContext) {
     return { ok: true };
   }
 
-  const tab = await getCurrentActiveTab();
+  const tab = await getCurrentActiveTab({ context: expectedContext });
   const current = {
     tabId: tab?.id || null,
+    windowId: tab?.windowId || null,
     url: tab?.url || "",
     title: tab?.title || ""
   };
@@ -6555,6 +6633,7 @@ async function restoreExpectedTab(expectedContext) {
         ok: false,
         current: {
           tabId: tab?.id || null,
+          windowId: tab?.windowId || null,
           url: tab?.url || "",
           title: tab?.title || ""
         }
@@ -6567,6 +6646,7 @@ async function restoreExpectedTab(expectedContext) {
       ok: true,
       current: {
         tabId: tab.id || null,
+        windowId: tab.windowId || null,
         url: tab.url || "",
         title: tab.title || ""
       }
@@ -6606,6 +6686,7 @@ function rememberObservedTab(observation, source = "observation") {
   state.accessibleTabs[id] = {
     id,
     tabId: tab.id || previous.tabId || null,
+    windowId: tab.windowId || previous.windowId || null,
     url: tab.url || previous.url || "",
     title: tab.title || previous.title || "",
     source,
@@ -6631,6 +6712,7 @@ function rememberActiveTab(tab) {
   state.accessibleTabs[id] = {
     id,
     tabId: tab.id || previous.tabId || null,
+    windowId: tab.windowId || previous.windowId || null,
     url: tab.url || previous.url || "",
     title: tab.title || previous.title || "",
     source: previous.source || "active-tab",
@@ -6672,6 +6754,7 @@ function rememberOpenedTab(artifact, result = null) {
   state.accessibleTabs[id] = {
     id,
     tabId: artifact.tabId || previous.tabId || null,
+    windowId: artifact.windowId || previous.windowId || null,
     url: artifact.url || previous.url || "",
     title: artifact.title || previous.title || "",
     source: "opened-tab",
@@ -6937,7 +7020,7 @@ async function getActionPlanCurrentOriginPattern(actions, planContext) {
     return contextOriginPattern;
   }
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  const tab = await getCurrentActiveTab({ context: planContext }).catch(() => null);
   return getOriginPatternForTab(tab);
 }
 
@@ -7031,7 +7114,7 @@ function needsActiveTabReadPermission(action) {
 }
 
 async function refreshPageAfterAction() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await getCurrentActiveTab({ context: getLatestPlanContext(state.pendingPlanContext) });
 
   if (!tab?.url) {
     return;
