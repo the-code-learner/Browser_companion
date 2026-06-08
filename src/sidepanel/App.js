@@ -1,4 +1,5 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
+import { prefixUserMessageWithTimestamp } from "../shared/runtime-log.js";
 import {
   DEEP_SEARCH_STORAGE_KEY,
   createDeepSearchRun,
@@ -3478,6 +3479,7 @@ async function launchDeepSearchRun(text, planContext) {
   }
 
   const providerSnapshot = getSelectedDeepSearchProviderSnapshot();
+  const createdAt = Date.now();
   const run = createDeepSearchRun({
     goal: text,
     provider: providerSnapshot.id,
@@ -3487,6 +3489,8 @@ async function launchDeepSearchRun(text, planContext) {
     windowId: planContext?.windowId ?? state.sidebarContext.windowId,
     originTabId: planContext?.tabId ?? state.sidebarContext.tabId,
     responseLanguage: detectUserLanguage(text),
+    userMessageLog: getProviderLoggedUserText(text, createdAt),
+    createdAt: new Date(createdAt).toISOString(),
     observation: state.page.observation || null,
     page: planContext || null
   });
@@ -3504,7 +3508,7 @@ async function launchDeepSearchRun(text, planContext) {
     state.messages.push({
       role: "user",
       text,
-      createdAt: Date.now()
+      createdAt
     });
     state.messages.push({
       role: "assistant",
@@ -3519,7 +3523,7 @@ async function launchDeepSearchRun(text, planContext) {
   state.messages.push({
     role: "user",
     text,
-    createdAt: Date.now()
+    createdAt
   });
   state.messages.push({
     role: "assistant",
@@ -3612,7 +3616,10 @@ async function processQueuedMessage(item) {
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
   state.liveThinking = null;
   state.liveThinkingOpen = false;
-  const agentResult = await getAgentResult(text, { planContext });
+  const agentResult = await getAgentResult(text, {
+    planContext,
+    createdAt: item?.createdAt || Date.now()
+  });
   if (state.liveThinking) {
     state.liveThinking.streaming = false;
     if (!refreshChatLog()) {
@@ -4057,6 +4064,7 @@ function normalizeGeminiNanoAgentPayload(result, payload = {}) {
 async function getAgentResult(goal, options = {}) {
   goal = expandAgentGoal(goal);
   const responseLanguage = detectUserLanguage(goal);
+  const providerGoal = getProviderLoggedUserText(goal, options.createdAt);
   const navigationPlan = buildNavigationPlan(goal, responseLanguage);
 
   if (navigationPlan) {
@@ -4077,7 +4085,7 @@ async function getAgentResult(goal, options = {}) {
     const runtimeContext = await buildRuntimeContext(goal, options);
     const accessibleTabs = await getAccessibleTabsForProvider();
     const conversationContext = getRecentConversationForProvider(goal);
-    const recentReferences = getRecentReferencesForProvider(goal, rawObservation, conversationContext);
+    const recentReferences = getRecentReferencesForProvider(providerGoal, rawObservation, conversationContext);
     const recentActions = getRecentActionsForProvider();
     const taskMemory = getTaskMemoryForProvider(goal);
     const observationForRequest = compactObservationForProvider(rawObservation, {
@@ -4087,7 +4095,7 @@ async function getAgentResult(goal, options = {}) {
       recentReferences
     });
     const payload = {
-      goal,
+      goal: providerGoal,
       responseLanguage,
       provider: state.codex.provider,
       model: state.codex.model,
@@ -4134,6 +4142,7 @@ async function getAgentResult(goal, options = {}) {
       }, "Retrying provider request without attachments after timeout.");
       return getAgentResult(goal, {
         ...options,
+        createdAt: options.createdAt,
         omitAttachmentsForProvider: true,
         continuationReason: compact(`${options.continuationReason || ""}\nThe previous provider attempt timed out. Retry with lighter context and no attachments. If the answer still depends on missing material, ask for the rest explicitly.`)
       });
@@ -4257,9 +4266,23 @@ function getRecentConversationForProvider(currentGoal) {
 
   return trimmed.map((message) => ({
     role: message.role,
-    text: String(message.text || "").slice(0, PROVIDER_CONVERSATION_TEXT_LIMIT),
+    text: getProviderConversationMessageText(message).slice(0, PROVIDER_CONVERSATION_TEXT_LIMIT),
     createdAt: message.createdAt || 0
   }));
+}
+
+function getProviderConversationMessageText(message = {}) {
+  const text = String(message?.text || "");
+  if (message?.role !== "user") {
+    return text;
+  }
+  return getProviderLoggedUserText(text, message?.createdAt || Date.now());
+}
+
+function getProviderLoggedUserText(text, createdAt = Date.now()) {
+  return prefixUserMessageWithTimestamp(text, createdAt, {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  });
 }
 
 function getRecentReferencesForProvider(currentGoal, observation, conversationContext = []) {
@@ -8854,14 +8877,16 @@ async function maybeSynthesizeResults(plan, results) {
     return { text: "", error: null };
   }
 
-  const lastUserMessage = [...state.messages].reverse().find((message) => message.role === "user")?.text || plan.goal || "";
+  const lastUserEntry = [...state.messages].reverse().find((message) => message.role === "user") || null;
+  const lastUserMessage = lastUserEntry?.text || plan.goal || "";
+  const loggedLastUserMessage = getProviderLoggedUserText(lastUserMessage, lastUserEntry?.createdAt || Date.now());
   const selectedHttpProvider = getSelectedHttpProvider();
   let latestObservation = getLatestObservationFromResults(results);
   if (!latestObservation) {
     latestObservation = await recoverObservationForProvider("refresh page context before synthesis");
   }
   const conversationContext = getRecentConversationForProvider(lastUserMessage);
-  const recentReferences = getRecentReferencesForProvider(lastUserMessage, latestObservation, conversationContext);
+  const recentReferences = getRecentReferencesForProvider(loggedLastUserMessage, latestObservation, conversationContext);
   const taskMemory = getTaskMemoryForProvider(lastUserMessage);
   const accessibleTabs = getRecentAccessibleTabs(null)
     .slice(0, PROVIDER_RECENT_TAB_LIMIT)
@@ -8881,7 +8906,7 @@ async function maybeSynthesizeResults(plan, results) {
     }));
   const recentActions = getRecentActionsForProvider();
   const buildPayload = (mode = "full") => ({
-    goal: lastUserMessage,
+    goal: loggedLastUserMessage,
     responseLanguage: detectUserLanguage(lastUserMessage),
     provider: state.codex.provider,
     model: state.codex.model,
@@ -8892,7 +8917,7 @@ async function maybeSynthesizeResults(plan, results) {
     recentActions,
     taskMemory,
     observation: compactObservationForSynthesis(latestObservation, mode, {
-      goal: lastUserMessage,
+      goal: loggedLastUserMessage,
       conversationContext,
       userMemory: state.userMemory.items,
       recentReferences

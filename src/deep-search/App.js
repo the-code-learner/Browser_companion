@@ -1,4 +1,5 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
+import { prefixUserMessageWithTimestamp } from "../shared/runtime-log.js";
 import {
   DEEP_SEARCH_FETCH_LIMIT,
   DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT,
@@ -69,6 +70,9 @@ async function boot() {
 async function orchestrateRun() {
   let run = state.run;
   const userMemory = await loadUserMemory();
+  const loggedGoal = run.userMessageLog || prefixUserMessageWithTimestamp(run.goal, run.createdAt || Date.now(), {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  });
 
   run = await saveRun(updateDeepSearchRun(run, {
     status: "running",
@@ -78,7 +82,7 @@ async function orchestrateRun() {
 
   const planResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_PLAN_REQUEST, {
     stage: "initial",
-    goal: run.goal,
+    goal: loggedGoal,
     responseLanguage: run.responseLanguage || "same language as the user",
     provider: run.providerSnapshot?.id || run.provider,
     model: run.providerSnapshot?.model || run.model,
@@ -124,7 +128,7 @@ async function orchestrateRun() {
 
     const refinementResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_PLAN_REQUEST, {
       stage: "refine",
-      goal: run.goal,
+      goal: loggedGoal,
       responseLanguage: run.responseLanguage || "same language as the user",
       provider: run.providerSnapshot?.id || run.provider,
       model: run.providerSnapshot?.model || run.model,
@@ -174,7 +178,7 @@ async function orchestrateRun() {
   }));
 
   const reportResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_REPORT_REQUEST, {
-    goal: run.goal,
+    goal: loggedGoal,
     responseLanguage: run.responseLanguage || "same language as the user",
     provider: run.providerSnapshot?.id || run.provider,
     model: run.providerSnapshot?.model || run.model,

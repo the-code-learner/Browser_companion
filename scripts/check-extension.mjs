@@ -13,6 +13,7 @@ const requiredFiles = [
   "src/content/actions.js",
   "src/shared/messages.js",
   "src/shared/deep-search.js",
+  "src/shared/runtime-log.js",
   "src/shared/policy.js",
   "src/shared/schemas.js",
   "codex/system-prompt.md",

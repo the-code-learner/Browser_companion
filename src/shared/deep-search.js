@@ -25,6 +25,7 @@ export function createDeepSearchRun(payload = {}) {
     windowId: normalizeOptionalNumber(payload.windowId),
     originTabId: normalizeOptionalNumber(payload.originTabId),
     responseLanguage: compact(payload.responseLanguage || ""),
+    userMessageLog: compact(payload.userMessageLog || ""),
     seedContext: {
       page: summarizeObservationForDeepSearch(payload.observation, payload.page || {}),
       runtimeContext: compact(payload.runtimeContext || "")
@@ -64,6 +65,7 @@ export function normalizeDeepSearchRun(run = {}) {
     windowId: normalizeOptionalNumber(run.windowId),
     originTabId: normalizeOptionalNumber(run.originTabId),
     responseLanguage: compact(run.responseLanguage || ""),
+    userMessageLog: compact(run.userMessageLog || ""),
     seedContext: {
       page: summarizeObservationForDeepSearch(run.seedContext?.page, run.seedContext?.page || {}),
       runtimeContext: compact(run.seedContext?.runtimeContext || "")
