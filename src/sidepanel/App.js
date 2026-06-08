@@ -1489,7 +1489,7 @@ function renderRichText(text) {
 }
 
 function renderMarkdown(text) {
-  const blocks = String(text || "").split(/\n{2,}/);
+  const blocks = normalizeMarkdownInput(text).split(/\n{2,}/);
 
   return blocks.map((block) => {
     const trimmed = block.trim();
@@ -1524,6 +1524,16 @@ function renderInlineMarkdown(text) {
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+}
+
+function normalizeMarkdownInput(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/([^\n])\s+(#{1,6}\s+)/g, "$1\n\n$2")
+    .replace(/([^\n])\s+((?:[-*])\s+)/g, "$1\n$2")
+    .replace(/([^\n])\s+((?:\d{1,2}\.)\s+)/g, "$1\n$2")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function renderMermaidBlock(source) {
