@@ -89,5 +89,92 @@ const fallback = buildFallbackDeepSearchReport({
 assert.equal(fallback.title.length > 0, true);
 assert.equal(fallback.key_findings.length, 1);
 assert.equal(fallback.open_questions[0], "Provider timed out.");
+assert.equal(fallback.presentation.available_views.includes("print"), true);
+assert.equal(fallback.collections.length, 1);
+assert.equal(fallback.document.chapters.length > 0, true);
+
+const richReport = normalizeDeepSearchRun({
+  ...run,
+  status: "completed",
+  finalReport: {
+    title: "Rich output",
+    objective: "Compare many options",
+    executive_summary: "Summary",
+    key_findings: [],
+    sections: [],
+    methodology: ["Collected sources"],
+    open_questions: [],
+    sources: [
+      {
+        url: "https://example.com/role-a",
+        title: "Role A",
+        snippet: "Strong match",
+        heroImageUrl: "https://example.com/hero.jpg"
+      }
+    ],
+    presentation: {
+      primary_view: "hybrid",
+      available_views: ["report", "list", "map", "print"],
+      print_ready: true
+    },
+    collections: [
+      {
+        title: "Jobs",
+        record_type: "job",
+        columns: [
+          { key: "organization", label: "Organization", kind: "text" }
+        ],
+        items: [
+          {
+            label: "Operations Lead",
+            primary_url: "https://example.com/apply",
+            fields: {
+              organization: "Example Org"
+            },
+            location: {
+              label: "Milan",
+              query: "Milan Italy"
+            }
+          }
+        ]
+      }
+    ],
+    document: {
+      title: "Printable report",
+      chapters: [
+        {
+          heading: "Chapter 1",
+          body: "Body"
+        }
+      ]
+    },
+    map_data: [
+      {
+        title: "Map",
+        points: [
+          {
+            label: "Milan",
+            location: {
+              label: "Milan",
+              query: "Milan Italy"
+            }
+          }
+        ]
+      }
+    ],
+    media: [
+      {
+        url: "https://example.com/hero.jpg",
+        caption: "Hero"
+      }
+    ]
+  }
+});
+
+assert.equal(richReport.finalReport.presentation.primary_view, "hybrid");
+assert.equal(richReport.finalReport.collections[0].items[0].location.query, "Milan Italy");
+assert.equal(richReport.finalReport.document.chapters[0].heading, "Chapter 1");
+assert.equal(richReport.finalReport.map_data[0].points[0].label, "Milan");
+assert.equal(richReport.finalReport.media[0].url, "https://example.com/hero.jpg");
 
 console.log("Deep Search helper tests passed.");

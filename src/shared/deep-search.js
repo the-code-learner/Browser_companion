@@ -132,7 +132,7 @@ export function normalizeDeepSearchReport(report = null) {
     return null;
   }
 
-  return {
+  const normalized = {
     title: compact(report.title || ""),
     objective: compact(report.objective || ""),
     executive_summary: sanitizePreviewText(report.executive_summary || ""),
@@ -152,8 +152,28 @@ export function normalizeDeepSearchReport(report = null) {
       : [],
     methodology: normalizeStringList(report.methodology || [], 24),
     open_questions: normalizeStringList(report.open_questions || [], 20),
-    sources: normalizeSourceList(report.sources || [])
+    sources: normalizeSourceList(report.sources || []),
+    presentation: normalizePresentation(report.presentation || null),
+    collections: normalizeCollectionList(report.collections || []),
+    document: normalizeDocument(report.document || null),
+    map_data: normalizeMapDataList(report.map_data || []),
+    media: normalizeMediaList(report.media || [])
   };
+
+  const availableViews = inferAvailableViews(normalized);
+  const preferredView = normalizeViewName(normalized.presentation?.primary_view || inferPrimaryView(normalized));
+
+  normalized.presentation = {
+    primary_view: availableViews.includes(preferredView) ? preferredView : availableViews[0],
+    available_views: availableViews,
+    print_ready: Boolean(normalized.presentation?.print_ready || normalized.document)
+  };
+
+  if (normalized.document && !normalized.document.title) {
+    normalized.document.title = normalized.title || normalized.objective || "Deep Search document";
+  }
+
+  return normalized;
 }
 
 export function normalizeSearchArtifacts(artifacts = []) {
@@ -190,7 +210,14 @@ export function normalizeFetchedSources(sources = []) {
     snippet: sanitizePreviewText(source?.snippet || ""),
     bodyPreview: sanitizePreviewText(source?.bodyPreview || source?.body || "").slice(0, 12000),
     fetchedAt: normalizeIsoString(source?.fetchedAt),
-    query: compact(source?.query || "")
+    query: compact(source?.query || ""),
+    siteName: compact(source?.siteName || ""),
+    canonicalUrl: normalizeUrl(source?.canonicalUrl || ""),
+    description: sanitizePreviewText(source?.description || ""),
+    heroImageUrl: normalizeUrl(source?.heroImageUrl || ""),
+    imageCandidates: normalizeMediaList(source?.imageCandidates || [], 4),
+    publishedAt: normalizeIsoString(source?.publishedAt),
+    locationHints: normalizeStringList(source?.locationHints || [], 10)
   }));
 }
 
@@ -203,8 +230,237 @@ export function normalizeSourceList(sources = []) {
     url: normalizeUrl(source?.url || ""),
     title: compact(source?.title || ""),
     snippet: sanitizePreviewText(source?.snippet || ""),
-    statusCode: normalizeOptionalNumber(source?.statusCode)
+    statusCode: normalizeOptionalNumber(source?.statusCode),
+    siteName: compact(source?.siteName || ""),
+    heroImageUrl: normalizeUrl(source?.heroImageUrl || "")
   }));
+}
+
+export function normalizePresentation(presentation = null) {
+  if (!presentation || typeof presentation !== "object") {
+    return {
+      primary_view: "report",
+      available_views: ["report"],
+      print_ready: false
+    };
+  }
+
+  const availableViews = Array.isArray(presentation.available_views)
+    ? presentation.available_views.map((value) => normalizeViewName(value)).filter(Boolean)
+    : [];
+
+  return {
+    primary_view: normalizeViewName(presentation.primary_view || "report"),
+    available_views: availableViews.length ? [...new Set(availableViews)] : ["report"],
+    print_ready: Boolean(presentation.print_ready)
+  };
+}
+
+export function normalizeCollectionList(collections = []) {
+  if (!Array.isArray(collections)) {
+    return [];
+  }
+
+  return collections.slice(0, 8).map((collection, index) => ({
+    id: compact(collection?.id || `collection-${index + 1}`),
+    title: compact(collection?.title || ""),
+    description: sanitizePreviewText(collection?.description || ""),
+    record_type: compact(collection?.record_type || "result"),
+    columns: normalizeCollectionColumns(collection?.columns || []),
+    items: normalizeCollectionItems(collection?.items || []),
+    source_urls: normalizeUrlList(collection?.source_urls || [], 20)
+  })).filter((collection) => collection.items.length || collection.title);
+}
+
+function normalizeCollectionColumns(columns = []) {
+  if (!Array.isArray(columns)) {
+    return [];
+  }
+
+  return columns.slice(0, 12).map((column, index) => ({
+    key: compact(column?.key || `column_${index + 1}`),
+    label: compact(column?.label || column?.key || `Column ${index + 1}`),
+    kind: compact(column?.kind || "text")
+  })).filter((column) => column.key);
+}
+
+function normalizeCollectionItems(items = []) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items.slice(0, 120).map((item, index) => ({
+    id: compact(item?.id || `item-${index + 1}`),
+    label: compact(item?.label || item?.title || ""),
+    title: compact(item?.title || item?.label || ""),
+    description: sanitizePreviewText(item?.description || ""),
+    primary_url: normalizeUrl(item?.primary_url || item?.url || ""),
+    evidence_note: sanitizePreviewText(item?.evidence_note || item?.note || ""),
+    tags: normalizeStringList(item?.tags || [], 10),
+    source_urls: normalizeUrlList(item?.source_urls || [], 12),
+    fields: normalizeCollectionFields(item?.fields || {}),
+    links: normalizeCollectionLinks(item?.links || []),
+    location: normalizeMapPointLocation(item?.location || null)
+  })).filter((item) => item.label || item.primary_url || Object.keys(item.fields).length);
+}
+
+function normalizeCollectionFields(fields = {}) {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+    return {};
+  }
+
+  const entries = Object.entries(fields).slice(0, 20).map(([key, value]) => {
+    return [compact(key), sanitizePreviewText(value)];
+  }).filter(([key, value]) => key && value);
+
+  return Object.fromEntries(entries);
+}
+
+function normalizeCollectionLinks(links = []) {
+  if (!Array.isArray(links)) {
+    return [];
+  }
+
+  return links.slice(0, 12).map((link, index) => ({
+    id: compact(link?.id || `link-${index + 1}`),
+    label: compact(link?.label || link?.type || link?.url || ""),
+    type: compact(link?.type || "source"),
+    url: normalizeUrl(link?.url || ""),
+    note: sanitizePreviewText(link?.note || "")
+  })).filter((link) => link.label && link.url);
+}
+
+function normalizeDocument(document = null) {
+  if (!document || typeof document !== "object") {
+    return null;
+  }
+
+  return {
+    title: compact(document?.title || ""),
+    subtitle: sanitizePreviewText(document?.subtitle || ""),
+    toc: normalizeDocumentToc(document?.toc || []),
+    chapters: normalizeDocumentChapters(document?.chapters || []),
+    appendix: normalizeDocumentAppendix(document?.appendix || []),
+    selected_images: normalizeMediaList(document?.selected_images || [], 8)
+  };
+}
+
+function normalizeDocumentToc(items = []) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items.slice(0, 24).map((item, index) => ({
+    id: compact(item?.id || `toc-${index + 1}`),
+    label: compact(item?.label || item?.title || "")
+  })).filter((item) => item.label);
+}
+
+function normalizeDocumentChapters(chapters = []) {
+  if (!Array.isArray(chapters)) {
+    return [];
+  }
+
+  return chapters.slice(0, 20).map((chapter, index) => ({
+    id: compact(chapter?.id || `chapter-${index + 1}`),
+    heading: compact(chapter?.heading || chapter?.title || ""),
+    summary: sanitizePreviewText(chapter?.summary || ""),
+    body: sanitizePreviewText(chapter?.body || ""),
+    source_urls: normalizeUrlList(chapter?.source_urls || [], 16),
+    image_urls: normalizeUrlList(chapter?.image_urls || [], 6)
+  })).filter((chapter) => chapter.heading || chapter.body);
+}
+
+function normalizeDocumentAppendix(items = []) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items.slice(0, 20).map((item, index) => ({
+    id: compact(item?.id || `appendix-${index + 1}`),
+    heading: compact(item?.heading || item?.title || ""),
+    body: sanitizePreviewText(item?.body || "")
+  })).filter((item) => item.heading || item.body);
+}
+
+export function normalizeMapDataList(mapData = []) {
+  if (!Array.isArray(mapData)) {
+    return [];
+  }
+
+  return mapData.slice(0, 4).map((entry, index) => ({
+    id: compact(entry?.id || `map-${index + 1}`),
+    title: compact(entry?.title || ""),
+    description: sanitizePreviewText(entry?.description || ""),
+    points: normalizeMapPoints(entry?.points || []),
+    bounds: normalizeMapBounds(entry?.bounds || null),
+    source_urls: normalizeUrlList(entry?.source_urls || [], 20)
+  })).filter((entry) => entry.points.length || entry.title);
+}
+
+function normalizeMapPoints(points = []) {
+  if (!Array.isArray(points)) {
+    return [];
+  }
+
+  return points.slice(0, 20).map((point, index) => ({
+    id: compact(point?.id || `point-${index + 1}`),
+    label: compact(point?.label || point?.title || ""),
+    note: sanitizePreviewText(point?.note || point?.description || ""),
+    source_url: normalizeUrl(point?.source_url || ""),
+    primary_url: normalizeUrl(point?.primary_url || point?.url || ""),
+    lat: normalizeCoordinate(point?.lat),
+    lng: normalizeCoordinate(point?.lng),
+    location: normalizeMapPointLocation(point?.location || point)
+  })).filter((point) => point.label || point.location?.label || Number.isFinite(point.lat));
+}
+
+function normalizeMapPointLocation(location = null) {
+  if (!location || typeof location !== "object") {
+    return {
+      label: "",
+      address: "",
+      query: ""
+    };
+  }
+
+  return {
+    label: compact(location?.label || location?.name || location?.place || ""),
+    address: compact(location?.address || ""),
+    query: compact(location?.query || location?.location_text || "")
+  };
+}
+
+function normalizeMapBounds(bounds = null) {
+  if (!bounds || typeof bounds !== "object") {
+    return null;
+  }
+
+  const north = normalizeCoordinate(bounds?.north);
+  const south = normalizeCoordinate(bounds?.south);
+  const east = normalizeCoordinate(bounds?.east);
+  const west = normalizeCoordinate(bounds?.west);
+
+  if (![north, south, east, west].every((value) => Number.isFinite(value))) {
+    return null;
+  }
+
+  return { north, south, east, west };
+}
+
+export function normalizeMediaList(media = [], limit = 12) {
+  if (!Array.isArray(media)) {
+    return [];
+  }
+
+  return media.slice(0, limit).map((item, index) => ({
+    id: compact(item?.id || `media-${index + 1}`),
+    kind: compact(item?.kind || "image"),
+    url: normalizeUrl(item?.url || item?.src || ""),
+    alt: sanitizePreviewText(item?.alt || ""),
+    caption: sanitizePreviewText(item?.caption || ""),
+    source_url: normalizeUrl(item?.source_url || "")
+  })).filter((item) => item.url);
 }
 
 export function normalizeDeepSearchError(error = null) {
@@ -340,6 +596,8 @@ export function buildFallbackDeepSearchReport(run = {}) {
     .map((artifact) => artifact.query)
     .filter(Boolean);
   const topSources = normalized.fetchedSources.slice(0, 12);
+  const fallbackCollection = buildFallbackCollection(normalized);
+  const fallbackMedia = buildFallbackMedia(normalized);
 
   return normalizeDeepSearchReport({
     title: normalized.plan?.title || normalized.goal || "Deep Search report",
@@ -376,8 +634,18 @@ export function buildFallbackDeepSearchReport(run = {}) {
       url: source.url,
       title: source.title,
       snippet: source.snippet || source.bodyPreview.slice(0, 220),
-      statusCode: source.statusCode
-    }))
+      statusCode: source.statusCode,
+      siteName: source.siteName,
+      heroImageUrl: source.heroImageUrl
+    })),
+    collections: fallbackCollection ? [fallbackCollection] : [],
+    document: buildFallbackDocument(normalized, topSources, fallbackMedia),
+    media: fallbackMedia,
+    presentation: {
+      primary_view: fallbackCollection ? "hybrid" : "report",
+      available_views: fallbackCollection ? ["report", "list", "print"] : ["report", "print"],
+      print_ready: true
+    }
   });
 }
 
@@ -520,6 +788,156 @@ function normalizeUrl(value) {
   } catch {
     return "";
   }
+}
+
+function normalizeViewName(value) {
+  return ["report", "list", "hybrid", "map", "print", "auto"].includes(compact(value))
+    ? compact(value)
+    : "";
+}
+
+function inferPrimaryView(report = {}) {
+  if (Array.isArray(report.collections) && report.collections.length && Array.isArray(report.sections) && report.sections.length) {
+    return "hybrid";
+  }
+  if (Array.isArray(report.collections) && report.collections.length) {
+    return "list";
+  }
+  if (Array.isArray(report.map_data) && report.map_data.some((entry) => entry.points.length)) {
+    return "map";
+  }
+  return "report";
+}
+
+function inferAvailableViews(report = {}) {
+  const views = ["report"];
+  if (Array.isArray(report.collections) && report.collections.length) {
+    views.push("list");
+  }
+  if (Array.isArray(report.map_data) && report.map_data.some((entry) => entry.points.length)) {
+    views.push("map");
+  }
+  if (report.document || (Array.isArray(report.collections) && report.collections.length) || (Array.isArray(report.sections) && report.sections.length)) {
+    views.push("print");
+  }
+  if (
+    Array.isArray(report.collections) && report.collections.length
+    && (
+      (Array.isArray(report.sections) && report.sections.length)
+      || (Array.isArray(report.key_findings) && report.key_findings.length)
+      || report.executive_summary
+    )
+  ) {
+    views.unshift("hybrid");
+  }
+  return [...new Set(views)];
+}
+
+function normalizeCoordinate(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildFallbackCollection(run = {}) {
+  const items = (run.fetchedSources || []).slice(0, 30).map((source, index) => ({
+    id: `source-${index + 1}`,
+    label: source.title || source.url,
+    title: source.title || source.url,
+    description: source.description || source.snippet || source.bodyPreview.slice(0, 220),
+    primary_url: source.url,
+    evidence_note: source.snippet || "",
+    tags: [source.domain].filter(Boolean),
+    source_urls: [source.url],
+    fields: {
+      domain: source.domain || "",
+      query: source.query || "",
+      status: source.statusCode == null ? "" : String(source.statusCode)
+    },
+    links: [
+      {
+        label: "Source",
+        type: "source",
+        url: source.url
+      }
+    ]
+  })).filter((item) => item.primary_url);
+
+  if (!items.length) {
+    return null;
+  }
+
+  return {
+    id: "fallback-results",
+    title: "Collected Sources",
+    description: "Fallback list built from the fetched sources collected during the run.",
+    record_type: "source",
+    columns: [
+      { key: "title", label: "Title", kind: "text" },
+      { key: "domain", label: "Domain", kind: "text" },
+      { key: "query", label: "Query", kind: "text" },
+      { key: "status", label: "Status", kind: "text" }
+    ],
+    items,
+    source_urls: items.flatMap((item) => item.source_urls).slice(0, 20)
+  };
+}
+
+function buildFallbackMedia(run = {}) {
+  return (run.fetchedSources || [])
+    .flatMap((source, index) => {
+      const media = [];
+      if (source.heroImageUrl) {
+        media.push({
+          id: `hero-${index + 1}`,
+          kind: "image",
+          url: source.heroImageUrl,
+          alt: source.title || source.siteName || "Source image",
+          caption: source.description || source.snippet || "",
+          source_url: source.url
+        });
+      }
+      return media;
+    })
+    .slice(0, 6);
+}
+
+function buildFallbackDocument(run = {}, topSources = [], media = []) {
+  const chapters = [];
+  if (run.executive_summary || run.latestSummary || run.goal) {
+    chapters.push({
+      heading: "Executive Summary",
+      summary: run.latestSummary || "",
+      body: run.goal || "",
+      source_urls: []
+    });
+  }
+  if (topSources.length) {
+    chapters.push({
+      heading: "Collected Evidence",
+      summary: `Fetched ${topSources.length} source ${topSources.length === 1 ? "page" : "pages"}.`,
+      body: topSources.map((source) => `${source.title || source.url}: ${source.description || source.snippet || source.bodyPreview.slice(0, 180)}`).join(" | "),
+      source_urls: topSources.map((source) => source.url)
+    });
+  }
+
+  return {
+    title: run.plan?.title || run.goal || "Deep Search document",
+    subtitle: run.plan?.objective || "",
+    toc: chapters.map((chapter, index) => ({
+      id: `fallback-chapter-${index + 1}`,
+      label: chapter.heading
+    })),
+    chapters: chapters.map((chapter, index) => ({
+      id: `fallback-chapter-${index + 1}`,
+      heading: chapter.heading,
+      summary: chapter.summary,
+      body: chapter.body,
+      source_urls: chapter.source_urls,
+      image_urls: media.slice(index, index + 1).map((item) => item.url)
+    })),
+    appendix: [],
+    selected_images: media
+  };
 }
 
 function extractDomain(value) {

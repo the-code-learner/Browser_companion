@@ -15,8 +15,12 @@ import {
   upsertDeepSearchRunList,
   updateDeepSearchRun
 } from "../shared/deep-search.js";
+import L from "../../node_modules/leaflet/dist/leaflet-src.esm.js";
 
 const app = document.getElementById("app");
+const DEEP_SEARCH_GEOCODE_CACHE_KEY = "browserCompanionDeepSearchGeoCache";
+const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
+const NOMINATIM_DELAY_MS = 1100;
 const state = {
   runId: new URLSearchParams(window.location.search).get("run") || "",
   run: null,
@@ -25,7 +29,9 @@ const state = {
   error: "",
   threadDraft: "",
   threadMode: "ask",
-  threadBusy: false
+  threadBusy: false,
+  selectedView: "auto",
+  mapHydrationToken: ""
 };
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -42,7 +48,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   state.run = matched;
   render();
-  bindThreadControls();
+  bindInteractiveControls();
 });
 
 boot().catch((error) => {
@@ -64,7 +70,7 @@ async function boot() {
   state.run = run;
   state.loading = false;
   render();
-  bindThreadControls();
+  bindInteractiveControls();
 
   if (run.status === "queued" && !state.orchestrationStarted) {
     state.orchestrationStarted = true;
@@ -292,18 +298,26 @@ async function collectWave(run, queries = [], options = {}) {
     }
 
     const payload = fetchResponse.envelope?.payload || {};
+    const metadata = extractFetchedPageMetadata(payload, candidate);
     const fetchedSources = [
       ...nextRun.fetchedSources,
       {
         url: payload.finalUrl || payload.url || candidate.url,
-        title: candidate.title,
-        domain: candidate.domain,
+        title: metadata.title || candidate.title,
+        domain: metadata.domain || candidate.domain,
         status: payload.status,
         statusCode: payload.statusCode,
         snippet: candidate.snippet,
         bodyPreview: String(payload.bodyPreview || "").slice(0, 8000),
         fetchedAt: new Date().toISOString(),
-        query: candidate.query
+        query: candidate.query,
+        siteName: metadata.siteName,
+        canonicalUrl: metadata.canonicalUrl,
+        description: metadata.description,
+        heroImageUrl: metadata.heroImageUrl,
+        imageCandidates: metadata.imageCandidates,
+        publishedAt: metadata.publishedAt,
+        locationHints: metadata.locationHints
       }
     ];
 
@@ -361,7 +375,7 @@ async function saveRun(run) {
   });
   state.run = nextRun;
   render();
-  bindThreadControls();
+  bindInteractiveControls();
   return nextRun;
 }
 
@@ -385,8 +399,28 @@ function render() {
   }
 
   const run = state.run;
-  const report = run.finalReport;
-  const sources = report?.sources?.length ? report.sources : run.fetchedSources;
+  const report = getRenderableReport(run);
+  const collections = getRenderableCollections(run, report);
+  const sources = getRenderableSources(run, report);
+  const media = getRenderableMedia(run, report, sources);
+  const documentView = getRenderableDocument(run, report, media);
+  const mapEntries = getRenderableMapData(run, report, collections);
+  const viewOptions = getRenderableViews(report, collections, mapEntries, documentView);
+  const activeView = resolveActiveView(viewOptions, report?.presentation?.primary_view || "report");
+  const findings = report?.key_findings?.length ? report.key_findings : buildFindingFallback(run);
+  const sections = report?.sections?.length ? report.sections : buildSectionFallback(run);
+  const openQuestions = report?.open_questions?.length ? report.open_questions : buildOpenQuestionsFallback(run);
+  state.renderContext = {
+    report,
+    collections,
+    sources,
+    media,
+    documentView,
+    mapEntries,
+    activeView,
+    viewOptions
+  };
+
   app.innerHTML = `
     <section class="report-shell">
       <header class="hero">
@@ -396,7 +430,10 @@ function render() {
           <p class="hero-summary">${escapeHtml(report?.executive_summary || run.plan?.objective || run.goal || "")}</p>
         </div>
         <div class="hero-meta">
-          <span class="status-chip status-${escapeHtml(run.status)}">${escapeHtml(formatStatusLabel(run.status))}</span>
+          <div class="hero-status-row">
+            <span class="status-chip status-${escapeHtml(run.status)}">${escapeHtml(formatStatusLabel(run.status))}</span>
+            ${report?.presentation?.print_ready ? `<button type="button" class="secondary-button" id="print-report-button">Print</button>` : ""}
+          </div>
           <dl class="meta-grid">
             <div><dt>Provider</dt><dd>${escapeHtml(run.providerLabel || run.providerSnapshot?.label || run.provider || "Unknown")}</dd></div>
             <div><dt>Model</dt><dd>${escapeHtml(run.providerSnapshot?.model || run.model || "default")}</dd></div>
@@ -417,40 +454,67 @@ function render() {
         </article>
       </section>
 
-      <section class="grid findings-grid">
-        ${(report?.key_findings?.length ? report.key_findings : buildFindingFallback(run)).map((item) => `
-          <article class="finding-card">
-            <h3>${escapeHtml(item.title || "Finding")}</h3>
-            <p>${escapeHtml(item.summary || "")}</p>
-            ${renderSourceLinks(item.source_urls || [])}
-          </article>
-        `).join("")}
+      <section class="panel view-switcher-panel">
+        <div>
+          <h2>View</h2>
+          <p class="muted">Auto follows the model's preferred format. You can switch the same run between report, list, map, and print views.</p>
+        </div>
+        <div class="view-switcher" role="tablist" aria-label="Deep Search view mode">
+          ${renderViewButton("auto", "Auto")}
+          ${viewOptions.includes("report") ? renderViewButton("report", "Report") : ""}
+          ${viewOptions.includes("hybrid") ? renderViewButton("hybrid", "Hybrid") : ""}
+          ${viewOptions.includes("list") ? renderViewButton("list", "List") : ""}
+          ${viewOptions.includes("map") ? renderViewButton("map", "Map") : ""}
+          ${viewOptions.includes("print") ? renderViewButton("print", "Print") : ""}
+        </div>
       </section>
 
       <section class="grid main-grid">
         <div class="stack">
-          <article class="panel prose">
-            <h2>Detailed Sections</h2>
-            ${(report?.sections?.length ? report.sections : buildSectionFallback(run)).map((section) => `
-              <section class="report-section">
-                <h3>${escapeHtml(section.heading || "Section")}</h3>
-                <p>${escapeHtml(section.body || "")}</p>
-                ${renderSourceLinks(section.source_urls || [])}
-              </section>
-            `).join("")}
-          </article>
+          ${renderPrimarySurface(activeView, {
+            run,
+            report,
+            collections,
+            sources,
+            media,
+            documentView,
+            mapEntries,
+            findings,
+            sections
+          })}
 
           <article class="panel">
             <h2>Sources</h2>
             <div class="sources-list">
               ${sources.length ? sources.map((source) => `
                 <a class="source-item" href="${escapeAttribute(source.url)}" target="_blank" rel="noreferrer">
-                  <strong>${escapeHtml(source.title || source.url)}</strong>
-                  <span>${escapeHtml(source.snippet || source.bodyPreview || source.url)}</span>
+                  <div class="source-item-copy">
+                    <strong>${escapeHtml(source.title || source.url)}</strong>
+                    <span>${escapeHtml(source.siteName || formatDomain(source.url))}</span>
+                    <span>${escapeHtml(source.snippet || source.description || source.bodyPreview || source.url)}</span>
+                  </div>
+                  ${source.heroImageUrl ? `<img class="source-thumb" src="${escapeAttribute(source.heroImageUrl)}" alt="${escapeAttribute(source.title || "Source image")}">` : ""}
                 </a>
               `).join("") : `<p class="muted">No fetched sources yet.</p>`}
             </div>
           </article>
+
+          ${media.length ? `
+            <article class="panel">
+              <h2>Images</h2>
+              <div class="media-grid">
+                ${media.map((item) => `
+                  <a class="media-card" href="${escapeAttribute(item.source_url || item.url)}" target="_blank" rel="noreferrer">
+                    <img src="${escapeAttribute(item.url)}" alt="${escapeAttribute(item.alt || item.caption || "Deep Search image")}">
+                    <div class="media-card-copy">
+                      <strong>${escapeHtml(item.caption || item.alt || formatDomain(item.source_url || item.url))}</strong>
+                      <span>${escapeHtml(item.source_url ? formatDomain(item.source_url) : "")}</span>
+                    </div>
+                  </a>
+                `).join("")}
+              </div>
+            </article>
+          ` : ""}
 
           <article class="panel thread-panel">
             <div class="thread-header">
@@ -494,7 +558,7 @@ function render() {
 
           <article class="panel">
             <h2>Open Questions</h2>
-            ${renderList(report?.open_questions?.length ? report.open_questions : buildOpenQuestionsFallback(run))}
+            ${renderList(openQuestions)}
           </article>
 
           <article class="panel">
@@ -507,9 +571,10 @@ function render() {
   `;
 }
 
-function bindThreadControls() {
+function bindInteractiveControls() {
   const form = document.getElementById("thread-form");
   const input = document.getElementById("thread-input");
+  const printButton = document.getElementById("print-report-button");
   if (form) {
     form.addEventListener("submit", handleThreadSubmit);
   }
@@ -529,9 +594,790 @@ function bindThreadControls() {
     button.addEventListener("click", () => {
       state.threadMode = button.dataset.threadMode === "refine" ? "refine" : "ask";
       render();
-      bindThreadControls();
+      bindInteractiveControls();
     });
   });
+  document.querySelectorAll("[data-view-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedView = button.dataset.viewMode || "auto";
+      render();
+      bindInteractiveControls();
+    });
+  });
+  if (printButton) {
+    printButton.addEventListener("click", () => window.print());
+  }
+  void hydrateMaps();
+}
+
+function getRenderableReport(run) {
+  return run.finalReport || buildFallbackDeepSearchReport(run);
+}
+
+function getRenderableSources(run, report) {
+  return report?.sources?.length ? report.sources : run.fetchedSources;
+}
+
+function getRenderableCollections(run, report) {
+  if (report?.collections?.length) {
+    return report.collections;
+  }
+
+  const sourceItems = run.fetchedSources.slice(0, 30).map((source, index) => ({
+    id: `source-${index + 1}`,
+    label: source.title || source.url,
+    title: source.title || source.url,
+    description: source.description || source.snippet || source.bodyPreview.slice(0, 220),
+    primary_url: source.url,
+    evidence_note: source.snippet || "",
+    tags: [source.domain].filter(Boolean),
+    source_urls: [source.url],
+    fields: {
+      domain: source.domain || "",
+      query: source.query || "",
+      status: source.statusCode == null ? "" : String(source.statusCode)
+    },
+    links: [
+      {
+        label: "Source",
+        type: "source",
+        url: source.url
+      }
+    ]
+  })).filter((item) => item.primary_url);
+
+  if (!sourceItems.length) {
+    return [];
+  }
+
+  return [
+    {
+      id: "fallback-results",
+      title: "Collected Sources",
+      description: "Source-derived list built from the pages fetched during this run.",
+      record_type: "source",
+      columns: [
+        { key: "title", label: "Title", kind: "text" },
+        { key: "domain", label: "Domain", kind: "text" },
+        { key: "query", label: "Query", kind: "text" },
+        { key: "status", label: "Status", kind: "text" }
+      ],
+      items: sourceItems,
+      source_urls: sourceItems.flatMap((item) => item.source_urls).slice(0, 20)
+    }
+  ];
+}
+
+function getRenderableMedia(run, report, sources) {
+  if (report?.media?.length) {
+    return report.media;
+  }
+  if (report?.document?.selected_images?.length) {
+    return report.document.selected_images;
+  }
+  return (sources || []).flatMap((source, index) => {
+    if (!source.heroImageUrl) {
+      return [];
+    }
+    return [{
+      id: `hero-${index + 1}`,
+      kind: "image",
+      url: source.heroImageUrl,
+      alt: source.title || source.siteName || "Source image",
+      caption: source.description || source.snippet || "",
+      source_url: source.url
+    }];
+  }).slice(0, 6);
+}
+
+function getRenderableDocument(run, report, media) {
+  if (report?.document) {
+    return report.document;
+  }
+
+  const sections = report?.sections?.length ? report.sections : buildSectionFallback(run);
+  const findings = report?.key_findings?.length ? report.key_findings : buildFindingFallback(run);
+  const chapters = [
+    {
+      id: "chapter-summary",
+      heading: "Executive Summary",
+      summary: report?.executive_summary || run.latestSummary || "",
+      body: report?.objective || run.goal,
+      source_urls: []
+    },
+    ...sections.map((section, index) => ({
+      id: `chapter-${index + 1}`,
+      heading: section.heading || `Section ${index + 1}`,
+      summary: findings[index]?.summary || "",
+      body: section.body || "",
+      source_urls: section.source_urls || [],
+      image_urls: media.slice(index, index + 1).map((item) => item.url)
+    }))
+  ];
+
+  return {
+    title: report?.title || run.goal || "Deep Search document",
+    subtitle: report?.objective || run.plan?.objective || "",
+    toc: chapters.map((chapter) => ({
+      id: chapter.id,
+      label: chapter.heading
+    })),
+    chapters,
+    appendix: (run.notes || []).slice(0, 6).map((note, index) => ({
+      id: `appendix-${index + 1}`,
+      heading: `Run note ${index + 1}`,
+      body: note
+    })),
+    selected_images: media
+  };
+}
+
+function getRenderableMapData(run, report, collections) {
+  if (report?.map_data?.length) {
+    return report.map_data;
+  }
+
+  const points = collections.flatMap((collection, collectionIndex) => {
+    return (collection.items || []).flatMap((item, itemIndex) => {
+      const location = item.location || {};
+      if (!location.label && !location.address && !location.query) {
+        return [];
+      }
+      return [{
+        id: `${collection.id || collectionIndex}-point-${item.id || itemIndex}`,
+        label: item.title || item.label || location.label,
+        note: item.evidence_note || item.description || collection.title || "",
+        source_url: item.source_urls?.[0] || item.primary_url || "",
+        primary_url: item.primary_url || item.links?.[0]?.url || "",
+        lat: null,
+        lng: null,
+        location
+      }];
+    });
+  }).slice(0, 20);
+
+  if (!points.length) {
+    return [];
+  }
+
+  return [{
+    id: "derived-map",
+    title: "Mapped results",
+    description: "Locations inferred from the result list.",
+    points,
+    bounds: null,
+    source_urls: points.map((point) => point.source_url).filter(Boolean).slice(0, 20)
+  }];
+}
+
+function getRenderableViews(report, collections, mapEntries, documentView) {
+  const views = new Set(["report"]);
+  if (collections.length) {
+    views.add("list");
+  }
+  if (collections.length && (report?.sections?.length || report?.key_findings?.length)) {
+    views.add("hybrid");
+  }
+  if (mapEntries.some((entry) => entry.points?.length)) {
+    views.add("map");
+  }
+  if (documentView) {
+    views.add("print");
+  }
+  return Array.from(views);
+}
+
+function resolveActiveView(viewOptions, primaryView) {
+  const preferred = state.selectedView === "auto"
+    ? primaryView
+    : state.selectedView;
+  if (preferred && viewOptions.includes(preferred)) {
+    return preferred;
+  }
+  if (primaryView && viewOptions.includes(primaryView)) {
+    return primaryView;
+  }
+  return viewOptions[0] || "report";
+}
+
+function renderViewButton(mode, label) {
+  const selected = state.selectedView === mode;
+  return `<button type="button" class="view-button${selected ? " active" : ""}" data-view-mode="${escapeAttribute(mode)}" aria-pressed="${selected ? "true" : "false"}">${escapeHtml(label)}</button>`;
+}
+
+function renderPrimarySurface(activeView, context) {
+  if (activeView === "list") {
+    return renderCollectionsPanel(context.collections);
+  }
+  if (activeView === "map") {
+    return renderMapPanels(context.mapEntries, context.collections);
+  }
+  if (activeView === "print") {
+    return renderPrintDocument(context.documentView);
+  }
+  if (activeView === "hybrid") {
+    return [
+      renderFindingsGrid(context.findings),
+      renderSectionsPanel(context.sections),
+      renderCollectionsPanel(context.collections)
+    ].join("");
+  }
+  return [
+    renderFindingsGrid(context.findings),
+    renderSectionsPanel(context.sections)
+  ].join("");
+}
+
+function renderFindingsGrid(findings = []) {
+  return `
+    <section class="grid findings-grid">
+      ${findings.map((item) => `
+        <article class="finding-card">
+          <h3>${escapeHtml(item.title || "Finding")}</h3>
+          <p>${escapeHtml(item.summary || "")}</p>
+          ${renderSourceLinks(item.source_urls || [])}
+        </article>
+      `).join("")}
+    </section>
+  `;
+}
+
+function renderSectionsPanel(sections = []) {
+  return `
+    <article class="panel prose">
+      <h2>Detailed Sections</h2>
+      ${sections.map((section) => `
+        <section class="report-section">
+          <h3>${escapeHtml(section.heading || "Section")}</h3>
+          <div class="rich-prose">${renderRichText(section.body || "")}</div>
+          ${renderSourceLinks(section.source_urls || [])}
+        </section>
+      `).join("")}
+    </article>
+  `;
+}
+
+function renderCollectionsPanel(collections = []) {
+  if (!collections.length) {
+    return `
+      <article class="panel">
+        <h2>Result List</h2>
+        <p class="muted">No structured result list was produced for this run.</p>
+      </article>
+    `;
+  }
+
+  return collections.map((collection) => {
+    const columns = deriveCollectionColumns(collection);
+    return `
+      <article class="panel list-panel">
+        <div class="panel-header">
+          <div>
+            <h2>${escapeHtml(collection.title || "Results")}</h2>
+            <p class="muted">${escapeHtml(collection.description || `${collection.items.length} records`)}</p>
+          </div>
+          <span class="collection-count">${escapeHtml(String(collection.items.length))}</span>
+        </div>
+        <div class="records-table-wrap">
+          <table class="records-table">
+            <thead>
+              <tr>
+                ${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}
+              </tr>
+            </thead>
+            <tbody>
+              ${collection.items.map((item) => `
+                <tr>
+                  ${columns.map((column) => `<td>${renderCollectionCell(item, column)}</td>`).join("")}
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+        <div class="record-cards">
+          ${collection.items.map((item) => renderCollectionCard(item, columns)).join("")}
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function deriveCollectionColumns(collection) {
+  if (Array.isArray(collection.columns) && collection.columns.length) {
+    return collection.columns;
+  }
+
+  const firstItem = collection.items?.[0];
+  const fieldKeys = firstItem ? Object.keys(firstItem.fields || {}).slice(0, 4) : [];
+  return [
+    { key: "title", label: "Title", kind: "text" },
+    ...fieldKeys.map((key) => ({ key, label: key, kind: "text" })),
+    { key: "links", label: "Links", kind: "link" }
+  ];
+}
+
+function renderCollectionCell(item, column) {
+  const key = column.key;
+  if (key === "title") {
+    return `
+      <div class="record-title-cell">
+        <strong>${item.primary_url ? `<a href="${escapeAttribute(item.primary_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title || item.label || "Untitled")}</a>` : escapeHtml(item.title || item.label || "Untitled")}</strong>
+        ${item.description ? `<span>${escapeHtml(item.description)}</span>` : ""}
+      </div>
+    `;
+  }
+  if (key === "links") {
+    return renderCollectionLinks(item.links || [], item.primary_url);
+  }
+  const value = item.fields?.[key] || "";
+  if (!value && key === "location") {
+    return escapeHtml(item.location?.label || item.location?.address || item.location?.query || "");
+  }
+  return value ? escapeHtml(value) : `<span class="muted">—</span>`;
+}
+
+function renderCollectionCard(item, columns) {
+  return `
+    <article class="record-card">
+      <div class="record-card-header">
+        <strong>${item.primary_url ? `<a href="${escapeAttribute(item.primary_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title || item.label || "Untitled")}</a>` : escapeHtml(item.title || item.label || "Untitled")}</strong>
+        ${item.tags?.length ? `<div class="tag-row">${item.tags.map((tag) => `<span class="tag-pill">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+      </div>
+      ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+      <dl class="record-meta">
+        ${columns.filter((column) => !["title", "links"].includes(column.key)).map((column) => {
+          const value = item.fields?.[column.key] || (column.key === "location" ? (item.location?.label || item.location?.address || item.location?.query || "") : "");
+          if (!value) {
+            return "";
+          }
+          return `<div><dt>${escapeHtml(column.label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+        }).join("")}
+      </dl>
+      ${item.evidence_note ? `<p class="muted">${escapeHtml(item.evidence_note)}</p>` : ""}
+      ${renderCollectionLinks(item.links || [], item.primary_url)}
+    </article>
+  `;
+}
+
+function renderCollectionLinks(links = [], primaryUrl = "") {
+  const safeLinks = Array.isArray(links) ? links.filter((link) => link?.url) : [];
+  const deduped = primaryUrl && !safeLinks.some((link) => link.url === primaryUrl)
+    ? [{ label: "Open", type: "primary", url: primaryUrl }, ...safeLinks]
+    : safeLinks;
+  if (!deduped.length) {
+    return `<span class="muted">No direct links.</span>`;
+  }
+  return `<div class="record-links">${deduped.map((link) => `<a href="${escapeAttribute(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.label || link.type || "Link")}</a>`).join("")}</div>`;
+}
+
+function renderPrintDocument(documentView) {
+  if (!documentView) {
+    return `
+      <article class="panel">
+        <h2>Print View</h2>
+        <p class="muted">No printable document is available for this run yet.</p>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="panel print-panel">
+      <div class="print-cover">
+        <span class="eyebrow">Print View</span>
+        <h2>${escapeHtml(documentView.title || "Deep Search document")}</h2>
+        ${documentView.subtitle ? `<p class="hero-summary">${escapeHtml(documentView.subtitle)}</p>` : ""}
+      </div>
+      ${documentView.toc?.length ? `
+        <section class="print-section">
+          <h3>Contents</h3>
+          <ol class="plain-list toc-list">
+            ${documentView.toc.map((item) => `<li><a href="#${escapeAttribute(item.id)}">${escapeHtml(item.label)}</a></li>`).join("")}
+          </ol>
+        </section>
+      ` : ""}
+      ${documentView.selected_images?.length ? `
+        <section class="print-section">
+          <h3>Selected Images</h3>
+          <div class="media-grid">
+            ${documentView.selected_images.map((item) => `
+              <figure class="print-figure">
+                <img src="${escapeAttribute(item.url)}" alt="${escapeAttribute(item.alt || item.caption || "Selected image")}">
+                ${item.caption ? `<figcaption>${escapeHtml(item.caption)}</figcaption>` : ""}
+              </figure>
+            `).join("")}
+          </div>
+        </section>
+      ` : ""}
+      ${documentView.chapters.map((chapter) => `
+        <section class="print-section" id="${escapeAttribute(chapter.id)}">
+          <h3>${escapeHtml(chapter.heading || "Chapter")}</h3>
+          ${chapter.summary ? `<p class="muted">${escapeHtml(chapter.summary)}</p>` : ""}
+          <div class="rich-prose">${renderRichText(chapter.body || "")}</div>
+          ${renderSourceLinks(chapter.source_urls || [])}
+        </section>
+      `).join("")}
+      ${documentView.appendix?.length ? `
+        <section class="print-section">
+          <h3>Appendix</h3>
+          ${documentView.appendix.map((item) => `
+            <section class="report-section">
+              <h4>${escapeHtml(item.heading || "Appendix item")}</h4>
+              <p>${escapeHtml(item.body || "")}</p>
+            </section>
+          `).join("")}
+        </section>
+      ` : ""}
+    </article>
+  `;
+}
+
+function renderMapPanels(mapEntries = [], collections = []) {
+  if (!mapEntries.length) {
+    return `
+      <article class="panel">
+        <h2>Map</h2>
+        <p class="muted">No geographic view was generated for this run.</p>
+      </article>
+    `;
+  }
+
+  return mapEntries.map((entry) => `
+    <article class="panel map-panel">
+      <div class="panel-header">
+        <div>
+          <h2>${escapeHtml(entry.title || "Map")}</h2>
+          <p class="muted">${escapeHtml(entry.description || "Mapped points inferred from the current research.")}</p>
+        </div>
+        <span class="collection-count">${escapeHtml(String(entry.points.length))}</span>
+      </div>
+      <div class="map-canvas" data-map-entry-id="${escapeAttribute(entry.id)}" aria-label="${escapeAttribute(entry.title || "Deep Search map")}"></div>
+      <div class="map-point-list">
+        ${entry.points.map((point) => `
+          <article class="map-point-card">
+            <strong>${point.primary_url ? `<a href="${escapeAttribute(point.primary_url)}" target="_blank" rel="noreferrer">${escapeHtml(point.label || point.location?.label || "Point")}</a>` : escapeHtml(point.label || point.location?.label || "Point")}</strong>
+            <span>${escapeHtml(point.location?.address || point.location?.query || point.location?.label || "")}</span>
+            ${point.note ? `<p>${escapeHtml(point.note)}</p>` : ""}
+          </article>
+        `).join("")}
+      </div>
+      ${collections.length ? `<p class="muted">Tip: switch to List to compare the same results in a denser format.</p>` : ""}
+    </article>
+  `).join("");
+}
+
+async function hydrateMaps() {
+  if (!state.renderContext?.mapEntries?.length) {
+    return;
+  }
+
+  const token = `${state.runId}:${state.run?.updatedAt || ""}:${state.renderContext.activeView}`;
+  state.mapHydrationToken = token;
+
+  for (const container of document.querySelectorAll(".map-canvas[data-map-entry-id]")) {
+    if (container.dataset.hydrated === token) {
+      continue;
+    }
+    const entry = state.renderContext.mapEntries.find((item) => item.id === container.dataset.mapEntryId);
+    if (!entry) {
+      continue;
+    }
+    const hydratedEntry = await ensureMapPointsResolved(entry);
+    if (state.mapHydrationToken !== token) {
+      return;
+    }
+    mountLeafletMap(container, hydratedEntry);
+    container.dataset.hydrated = token;
+  }
+}
+
+async function ensureMapPointsResolved(entry) {
+  const points = [];
+  for (const point of entry.points || []) {
+    if (Number.isFinite(point.lat) && Number.isFinite(point.lng)) {
+      points.push(point);
+      continue;
+    }
+    const resolved = await geocodePoint(point);
+    points.push(resolved || point);
+  }
+
+  return {
+    ...entry,
+    points: points.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+  };
+}
+
+async function geocodePoint(point) {
+  const query = [
+    point.location?.query,
+    point.location?.address,
+    point.location?.label,
+    point.label
+  ].map((value) => String(value || "").trim()).find(Boolean);
+
+  if (!query) {
+    return null;
+  }
+
+  const cache = await loadGeocodeCache();
+  if (cache[query]) {
+    return {
+      ...point,
+      lat: cache[query].lat,
+      lng: cache[query].lng,
+      location: {
+        ...point.location,
+        label: point.location?.label || cache[query].label || "",
+        address: point.location?.address || cache[query].display_name || ""
+      }
+    };
+  }
+
+  await wait(NOMINATIM_DELAY_MS);
+  const url = `${NOMINATIM_SEARCH_URL}?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
+  const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.HTTP_REQUEST, {
+    url,
+    method: "GET",
+    headers: {
+      "Accept-Language": "en,it;q=0.8",
+      "User-Agent": "BrowserCompanion/0.1 (DeepSearchMap)"
+    }
+  })).catch(() => null);
+
+  const bodyPreview = String(response?.envelope?.payload?.bodyPreview || "");
+  if (!response?.ok || !bodyPreview) {
+    return null;
+  }
+
+  let parsed = [];
+  try {
+    parsed = JSON.parse(bodyPreview);
+  } catch {
+    parsed = [];
+  }
+  const first = Array.isArray(parsed) ? parsed[0] : null;
+  if (!first || !Number.isFinite(Number(first.lat)) || !Number.isFinite(Number(first.lon))) {
+    return null;
+  }
+
+  const nextCache = {
+    ...cache,
+    [query]: {
+      lat: Number(first.lat),
+      lng: Number(first.lon),
+      label: first.name || point.label || "",
+      display_name: first.display_name || "",
+      updatedAt: new Date().toISOString()
+    }
+  };
+  await saveGeocodeCache(nextCache);
+
+  return {
+    ...point,
+    lat: Number(first.lat),
+    lng: Number(first.lon),
+    location: {
+      ...point.location,
+      label: point.location?.label || first.name || point.label || "",
+      address: point.location?.address || first.display_name || ""
+    }
+  };
+}
+
+async function loadGeocodeCache() {
+  const stored = await chrome.storage.local.get([DEEP_SEARCH_GEOCODE_CACHE_KEY]);
+  const cache = stored[DEEP_SEARCH_GEOCODE_CACHE_KEY];
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) {
+    return {};
+  }
+  return cache;
+}
+
+async function saveGeocodeCache(cache) {
+  const entries = Object.entries(cache || {}).slice(-200);
+  await chrome.storage.local.set({
+    [DEEP_SEARCH_GEOCODE_CACHE_KEY]: Object.fromEntries(entries)
+  });
+}
+
+function mountLeafletMap(container, entry) {
+  container.innerHTML = "";
+  if (!entry.points.length) {
+    container.innerHTML = `<p class="muted">No geocoded points were available for this map.</p>`;
+    return;
+  }
+
+  const map = L.map(container, {
+    zoomControl: true,
+    scrollWheelZoom: false
+  });
+
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+
+  const latLngs = [];
+  entry.points.forEach((point) => {
+    if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) {
+      return;
+    }
+    const marker = L.circleMarker([point.lat, point.lng], {
+      radius: 7,
+      color: "#7aa2ff",
+      weight: 2,
+      fillColor: "#7aa2ff",
+      fillOpacity: 0.7
+    }).addTo(map);
+    const popupBits = [
+      `<strong>${escapeHtml(point.label || point.location?.label || "Point")}</strong>`,
+      point.location?.address ? `<div>${escapeHtml(point.location.address)}</div>` : "",
+      point.note ? `<div>${escapeHtml(point.note)}</div>` : "",
+      point.primary_url ? `<div><a href="${escapeAttribute(point.primary_url)}" target="_blank" rel="noreferrer">Open result</a></div>` : ""
+    ].filter(Boolean).join("");
+    marker.bindPopup(popupBits);
+    latLngs.push([point.lat, point.lng]);
+  });
+
+  if (entry.bounds) {
+    map.fitBounds([
+      [entry.bounds.south, entry.bounds.west],
+      [entry.bounds.north, entry.bounds.east]
+    ], { padding: [24, 24] });
+  } else if (latLngs.length === 1) {
+    map.setView(latLngs[0], 11);
+  } else {
+    map.fitBounds(latLngs, { padding: [24, 24] });
+  }
+}
+
+function wait(durationMs) {
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+function extractFetchedPageMetadata(payload = {}, candidate = {}) {
+  const html = String(payload.bodyPreview || "");
+  const fallbackUrl = payload.finalUrl || payload.url || candidate.url || "";
+  const contentType = String(payload.contentType || "").toLowerCase();
+  const metadata = {
+    title: compactText(candidate.title || ""),
+    domain: formatDomain(fallbackUrl),
+    siteName: "",
+    canonicalUrl: "",
+    description: "",
+    heroImageUrl: "",
+    imageCandidates: [],
+    publishedAt: "",
+    locationHints: []
+  };
+
+  if (!html || !contentType.includes("html")) {
+    return metadata;
+  }
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const pickMeta = (selector) => doc.querySelector(selector)?.getAttribute("content") || "";
+  const canonical = doc.querySelector("link[rel='canonical']")?.getAttribute("href") || "";
+  const images = [
+    pickMeta("meta[property='og:image']"),
+    pickMeta("meta[name='twitter:image']"),
+    ...Array.from(doc.querySelectorAll("img[src]")).slice(0, 3).map((img) => img.getAttribute("src") || "")
+  ].map((value) => absolutizeUrl(value, fallbackUrl)).filter(Boolean);
+  const locationHints = [
+    pickMeta("meta[property='place:location:latitude']") && pickMeta("meta[property='place:location:longitude']")
+      ? `${pickMeta("meta[property='place:location:latitude']")}, ${pickMeta("meta[property='place:location:longitude']")}`
+      : "",
+    pickMeta("meta[property='og:locality']"),
+    pickMeta("meta[name='geo.position']"),
+    ...extractAddressHints(doc)
+  ].filter(Boolean);
+
+  metadata.title = compactText(doc.querySelector("title")?.textContent || metadata.title || "");
+  metadata.siteName = compactText(pickMeta("meta[property='og:site_name']") || doc.location?.hostname || "");
+  metadata.canonicalUrl = absolutizeUrl(canonical, fallbackUrl);
+  metadata.description = compactText(pickMeta("meta[name='description']") || pickMeta("meta[property='og:description']") || "");
+  metadata.heroImageUrl = images[0] || "";
+  metadata.imageCandidates = images.slice(0, 4).map((url, index) => ({
+    id: `image-${index + 1}`,
+    kind: "image",
+    url,
+    alt: metadata.title || metadata.siteName || "Source image",
+    caption: metadata.description,
+    source_url: fallbackUrl
+  }));
+  metadata.publishedAt = normalizeMaybeIso(pickMeta("meta[property='article:published_time']") || pickMeta("meta[name='date']"));
+  metadata.locationHints = Array.from(new Set(locationHints.map((value) => compactText(value)).filter(Boolean))).slice(0, 8);
+  return metadata;
+}
+
+function extractAddressHints(doc) {
+  const scripts = Array.from(doc.querySelectorAll("script[type='application/ld+json']")).slice(0, 6);
+  const hints = [];
+  for (const script of scripts) {
+    const text = script.textContent || "";
+    if (!text.trim()) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      collectAddressHintsFromJsonLd(parsed, hints);
+    } catch {
+      continue;
+    }
+  }
+  return hints;
+}
+
+function collectAddressHintsFromJsonLd(value, hints) {
+  if (!value || typeof value !== "object") {
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 12).forEach((entry) => collectAddressHintsFromJsonLd(entry, hints));
+    return;
+  }
+  const address = value.address;
+  if (address && typeof address === "object") {
+    const line = [
+      address.streetAddress,
+      address.addressLocality,
+      address.addressRegion,
+      address.postalCode,
+      address.addressCountry
+    ].map((item) => compactText(item)).filter(Boolean).join(", ");
+    if (line) {
+      hints.push(line);
+    }
+  }
+  if (value.location && typeof value.location === "object") {
+    collectAddressHintsFromJsonLd(value.location, hints);
+  }
+}
+
+function absolutizeUrl(value, baseUrl) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    return new URL(text, baseUrl).toString();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeMaybeIso(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString();
+}
+
+function compactText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 async function handleThreadSubmit(event) {
@@ -544,7 +1390,7 @@ async function handleThreadSubmit(event) {
   state.threadBusy = true;
   state.threadDraft = "";
   render();
-  bindThreadControls();
+  bindInteractiveControls();
   const createdAt = new Date().toISOString();
   const userMessage = {
     id: crypto.randomUUID(),
@@ -598,7 +1444,7 @@ async function handleThreadSubmit(event) {
   } finally {
     state.threadBusy = false;
     render();
-    bindThreadControls();
+    bindInteractiveControls();
   }
 }
 

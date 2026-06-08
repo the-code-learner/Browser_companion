@@ -3407,6 +3407,7 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     "- Be ambitious about source coverage. Use multiple query angles, not just a single phrasing.",
     "- Prefer official company pages, direct job pages, public documentation, reputable org pages, strong directories, and transparent public writeups over vague aggregator fluff when possible.",
     "- Plan enough query diversity to support a detailed final report, not just a quick answer.",
+    "- Anticipate whether the final answer will work best as a report, a list of records, a hybrid report plus list, or a map-backed result, and plan source coverage accordingly.",
     "- Use the current page only as optional seed context, not as a browsing target.",
     "- Keep queries diverse but concrete.",
     "- Respect the user's explicit constraints and language.",
@@ -3484,7 +3485,7 @@ function buildDeepSearchReportPrompt(payload = {}) {
   return [
     "Task: Write the final Deep Search report for Browser Companion from collected public web evidence.",
     "Return only one JSON object. Do not wrap it in Markdown.",
-    'JSON shape: {"title":"report title","objective":"research objective","executive_summary":"short synthesis","key_findings":[{"title":"finding","summary":"why it matters","source_urls":["https://..."]}],"sections":[{"heading":"section title","body":"source-backed narrative","source_urls":["https://..."]}],"methodology":["step"],"open_questions":["remaining unknown"],"sources":[{"url":"https://...","title":"source title","snippet":"short note","statusCode":200}]}',
+    'JSON shape: {"title":"report title","objective":"research objective","executive_summary":"short synthesis","key_findings":[{"title":"finding","summary":"why it matters","source_urls":["https://..."]}],"sections":[{"heading":"section title","body":"source-backed narrative","source_urls":["https://..."]}],"methodology":["step"],"open_questions":["remaining unknown"],"sources":[{"url":"https://...","title":"source title","snippet":"short note","statusCode":200,"siteName":"optional","heroImageUrl":"https://..."}],"presentation":{"primary_view":"report|list|hybrid|map","available_views":["report","list","map","print"],"print_ready":true},"collections":[{"id":"collection-id","title":"collection title","description":"what the list contains","record_type":"job|hotel|event|listing|result","columns":[{"key":"organization","label":"Organization","kind":"text|link|tag"}],"items":[{"id":"item-id","label":"short label","title":"display title","description":"short summary","primary_url":"https://...","evidence_note":"why it qualifies","tags":["tag"],"source_urls":["https://..."],"fields":{"organization":"Acme","location":"Remote Europe"},"links":[{"label":"Apply","type":"application","url":"https://..."}],"location":{"label":"Milan","address":"Milan, Italy","query":"Milan Italy"}}],"source_urls":["https://..."]}],"document":{"title":"print title","subtitle":"print subtitle","toc":[{"id":"chapter-1","label":"Chapter 1"}],"chapters":[{"id":"chapter-1","heading":"Chapter 1","summary":"short summary","body":"print-friendly narrative","source_urls":["https://..."],"image_urls":["https://..."]}],"appendix":[{"id":"appendix-1","heading":"Appendix","body":"extra notes"}],"selected_images":[{"url":"https://...","alt":"alt text","caption":"caption","source_url":"https://..."}]},"map_data":[{"id":"map-1","title":"map title","description":"why the map helps","points":[{"id":"point-1","label":"point label","note":"why it matters","source_url":"https://...","primary_url":"https://...","lat":45.4,"lng":11.9,"location":{"label":"Padua","address":"Padua, Italy","query":"Padua Italy"}}],"source_urls":["https://..."]}],"media":[{"url":"https://...","alt":"alt text","caption":"caption","source_url":"https://..."}]}',
     "",
     "Report rules:",
     "- Be source-backed, concrete, and concise.",
@@ -3494,6 +3495,10 @@ function buildDeepSearchReportPrompt(payload = {}) {
     "- Pull out concrete comparisons, tradeoffs, patterns, and caveats where the evidence supports them.",
     "- Mention uncertainty when evidence is thin or conflicting.",
     "- Cite relevant URLs for findings and sections.",
+    "- Use collections when the user would benefit from scanning or comparing many concrete results.",
+    "- Use map_data only when location meaningfully helps interpretation, comparison, or planning.",
+    "- Build a document when the result would benefit from a print-friendly report with chapters and a table of contents.",
+    "- Include media only when it genuinely improves comprehension; prefer public page images such as hero or og:image assets tied to cited sources.",
     "- Keep the report aligned with the user's language.",
     "",
     "User goal:",
@@ -3599,10 +3604,205 @@ function normalizeDeepSearchReportResponse(value = {}) {
           url: normalizeStructuredUrl(item?.url || ""),
           title: compact(item?.title || ""),
           snippet: compact(item?.snippet || ""),
-          statusCode: Number.isFinite(Number(item?.statusCode)) ? Number(item.statusCode) : null
+          statusCode: Number.isFinite(Number(item?.statusCode)) ? Number(item.statusCode) : null,
+          siteName: compact(item?.siteName || ""),
+          heroImageUrl: normalizeStructuredUrl(item?.heroImageUrl || "")
         })).filter((item) => item.url)
-      : []
+      : [],
+    presentation: normalizeDeepSearchPresentationResponse(value?.presentation || null),
+    collections: normalizeDeepSearchCollectionsResponse(value?.collections || []),
+    document: normalizeDeepSearchDocumentResponse(value?.document || null),
+    map_data: normalizeDeepSearchMapDataResponse(value?.map_data || []),
+    media: normalizeDeepSearchMediaResponse(value?.media || [])
   };
+}
+
+function normalizeDeepSearchPresentationResponse(value = null) {
+  if (!value || typeof value !== "object") {
+    return {
+      primary_view: "report",
+      available_views: ["report"],
+      print_ready: false
+    };
+  }
+
+  const availableViews = Array.isArray(value?.available_views)
+    ? value.available_views.map((item) => compact(item)).filter((item) => ["report", "list", "hybrid", "map", "print"].includes(item))
+    : [];
+
+  return {
+    primary_view: ["report", "list", "hybrid", "map", "print"].includes(compact(value?.primary_view || ""))
+      ? compact(value.primary_view)
+      : "report",
+    available_views: availableViews.length ? [...new Set(availableViews)] : ["report"],
+    print_ready: Boolean(value?.print_ready)
+  };
+}
+
+function normalizeDeepSearchCollectionsResponse(collections = []) {
+  if (!Array.isArray(collections)) {
+    return [];
+  }
+
+  return collections.slice(0, 8).map((collection, index) => ({
+    id: compact(collection?.id || `collection-${index + 1}`),
+    title: compact(collection?.title || ""),
+    description: compact(collection?.description || ""),
+    record_type: compact(collection?.record_type || "result"),
+    columns: Array.isArray(collection?.columns)
+      ? collection.columns.slice(0, 12).map((column, columnIndex) => ({
+          key: compact(column?.key || `column_${columnIndex + 1}`),
+          label: compact(column?.label || column?.key || `Column ${columnIndex + 1}`),
+          kind: compact(column?.kind || "text")
+        })).filter((column) => column.key)
+      : [],
+    items: Array.isArray(collection?.items)
+      ? collection.items.slice(0, 120).map((item, itemIndex) => ({
+          id: compact(item?.id || `item-${itemIndex + 1}`),
+          label: compact(item?.label || item?.title || ""),
+          title: compact(item?.title || item?.label || ""),
+          description: compact(item?.description || ""),
+          primary_url: normalizeStructuredUrl(item?.primary_url || item?.url || ""),
+          evidence_note: compact(item?.evidence_note || item?.note || ""),
+          tags: normalizeStructuredStringList(item?.tags || [], 10),
+          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 12),
+          fields: normalizeDeepSearchObjectFieldMap(item?.fields || {}),
+          links: Array.isArray(item?.links)
+            ? item.links.slice(0, 12).map((link, linkIndex) => ({
+                id: compact(link?.id || `link-${linkIndex + 1}`),
+                label: compact(link?.label || link?.type || link?.url || ""),
+                type: compact(link?.type || "source"),
+                url: normalizeStructuredUrl(link?.url || ""),
+                note: compact(link?.note || "")
+              })).filter((link) => link.label && link.url)
+            : [],
+          location: normalizeDeepSearchLocationResponse(item?.location || null)
+        })).filter((item) => item.label || item.primary_url || Object.keys(item.fields).length)
+      : [],
+    source_urls: normalizeStructuredUrlList(collection?.source_urls || [], 20)
+  })).filter((collection) => collection.items.length || collection.title);
+}
+
+function normalizeDeepSearchDocumentResponse(document = null) {
+  if (!document || typeof document !== "object") {
+    return null;
+  }
+
+  return {
+    title: compact(document?.title || ""),
+    subtitle: compact(document?.subtitle || ""),
+    toc: Array.isArray(document?.toc)
+      ? document.toc.slice(0, 24).map((item, index) => ({
+          id: compact(item?.id || `toc-${index + 1}`),
+          label: compact(item?.label || item?.title || "")
+        })).filter((item) => item.label)
+      : [],
+    chapters: Array.isArray(document?.chapters)
+      ? document.chapters.slice(0, 20).map((chapter, index) => ({
+          id: compact(chapter?.id || `chapter-${index + 1}`),
+          heading: compact(chapter?.heading || chapter?.title || ""),
+          summary: compact(chapter?.summary || ""),
+          body: compact(chapter?.body || ""),
+          source_urls: normalizeStructuredUrlList(chapter?.source_urls || [], 16),
+          image_urls: normalizeStructuredUrlList(chapter?.image_urls || [], 6)
+        })).filter((chapter) => chapter.heading || chapter.body)
+      : [],
+    appendix: Array.isArray(document?.appendix)
+      ? document.appendix.slice(0, 20).map((item, index) => ({
+          id: compact(item?.id || `appendix-${index + 1}`),
+          heading: compact(item?.heading || item?.title || ""),
+          body: compact(item?.body || "")
+        })).filter((item) => item.heading || item.body)
+      : [],
+    selected_images: normalizeDeepSearchMediaResponse(document?.selected_images || [], 8)
+  };
+}
+
+function normalizeDeepSearchMapDataResponse(mapData = []) {
+  if (!Array.isArray(mapData)) {
+    return [];
+  }
+
+  return mapData.slice(0, 4).map((entry, index) => ({
+    id: compact(entry?.id || `map-${index + 1}`),
+    title: compact(entry?.title || ""),
+    description: compact(entry?.description || ""),
+    points: Array.isArray(entry?.points)
+      ? entry.points.slice(0, 20).map((point, pointIndex) => ({
+          id: compact(point?.id || `point-${pointIndex + 1}`),
+          label: compact(point?.label || point?.title || ""),
+          note: compact(point?.note || point?.description || ""),
+          source_url: normalizeStructuredUrl(point?.source_url || ""),
+          primary_url: normalizeStructuredUrl(point?.primary_url || point?.url || ""),
+          lat: Number.isFinite(Number(point?.lat)) ? Number(point.lat) : null,
+          lng: Number.isFinite(Number(point?.lng)) ? Number(point.lng) : null,
+          location: normalizeDeepSearchLocationResponse(point?.location || point)
+        })).filter((point) => point.label || point.location?.label || Number.isFinite(point.lat))
+      : [],
+    bounds: normalizeDeepSearchBoundsResponse(entry?.bounds || null),
+    source_urls: normalizeStructuredUrlList(entry?.source_urls || [], 20)
+  })).filter((entry) => entry.points.length || entry.title);
+}
+
+function normalizeDeepSearchMediaResponse(media = [], limit = 12) {
+  if (!Array.isArray(media)) {
+    return [];
+  }
+
+  return media.slice(0, limit).map((item, index) => ({
+    id: compact(item?.id || `media-${index + 1}`),
+    kind: compact(item?.kind || "image"),
+    url: normalizeStructuredUrl(item?.url || item?.src || ""),
+    alt: compact(item?.alt || ""),
+    caption: compact(item?.caption || ""),
+    source_url: normalizeStructuredUrl(item?.source_url || "")
+  })).filter((item) => item.url);
+}
+
+function normalizeDeepSearchBoundsResponse(bounds = null) {
+  if (!bounds || typeof bounds !== "object") {
+    return null;
+  }
+
+  const north = Number(bounds?.north);
+  const south = Number(bounds?.south);
+  const east = Number(bounds?.east);
+  const west = Number(bounds?.west);
+
+  if (![north, south, east, west].every((value) => Number.isFinite(value))) {
+    return null;
+  }
+
+  return { north, south, east, west };
+}
+
+function normalizeDeepSearchLocationResponse(location = null) {
+  if (!location || typeof location !== "object") {
+    return {
+      label: "",
+      address: "",
+      query: ""
+    };
+  }
+
+  return {
+    label: compact(location?.label || location?.name || location?.place || ""),
+    address: compact(location?.address || ""),
+    query: compact(location?.query || location?.location_text || "")
+  };
+}
+
+function normalizeDeepSearchObjectFieldMap(fields = {}) {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(fields)
+      .slice(0, 20)
+      .map(([key, fieldValue]) => [compact(key), compact(fieldValue)])
+      .filter(([key, fieldValue]) => key && fieldValue)
+  );
 }
 
 function compactObservationForPrompt(observation = {}) {
