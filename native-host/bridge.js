@@ -3278,11 +3278,14 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     "Task: Plan a web-first Deep Search run for Browser Companion.",
     "Return only one JSON object. Do not wrap it in Markdown.",
     "Do not return browser actions. Do not ask the user for confirmation. Do not write a prose strategy summary.",
-    `JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to ${6} focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}`,
+    'JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to 10 focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}',
     "",
     "Planning rules:",
     "- Web-first research only.",
     "- Favor public sources that can be read with normal HTTP fetches.",
+    "- Be ambitious about source coverage. Use multiple query angles, not just a single phrasing.",
+    "- Prefer official company pages, direct job pages, public documentation, reputable org pages, strong directories, and transparent public writeups over vague aggregator fluff when possible.",
+    "- Plan enough query diversity to support a detailed final report, not just a quick answer.",
     "- Use the current page only as optional seed context, not as a browsing target.",
     "- Keep queries diverse but concrete.",
     "- Respect the user's explicit constraints and language.",
@@ -3294,10 +3297,11 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     payload.responseLanguage || "same language as the user",
     "",
     "Fixed Deep Search caps:",
-    "- Initial queries max: 6",
-    "- Search results retained per query max: 5",
-    "- Total fetched pages max: 12",
-    "- Optional refinement queries max: 3",
+    "- Initial queries max: 10",
+    "- Search results retained per query max: 8",
+    "- Total fetched pages max: 24",
+    "- Optional refinement queries per round max: 5",
+    "- Optional refinement rounds max: 2",
     "",
     "Seed page context JSON:",
     JSON.stringify(seedPage || null, null, 2),
@@ -3313,7 +3317,7 @@ function buildDeepSearchRefinementPrompt(payload = {}) {
   return [
     "Task: Review the first-wave Deep Search evidence and decide whether a second wave is necessary.",
     "Return only one JSON object. Do not wrap it in Markdown.",
-    'JSON shape: {"additional_queries":["up to 3 queries"],"rationale":"short reason","stop_early":false}',
+    'JSON shape: {"additional_queries":["up to 5 queries"],"rationale":"short reason","stop_early":false}',
     "",
     "User goal:",
     payload.goal || "",
@@ -3332,7 +3336,8 @@ function buildDeepSearchRefinementPrompt(payload = {}) {
     "",
     "Rules:",
     "- Use stop_early=true when the current evidence is already sufficient for a strong final report.",
-    "- If more research is needed, propose only the highest-value follow-up queries.",
+    "- If more research is needed, propose the highest-value follow-up queries that expand source coverage, quality, or specificity.",
+    "- Prefer follow-up queries that add new organizations, new domains, new evidence classes, or tighter constraints.",
     "- Do not repeat the same query phrasing unless a genuinely tighter variant is needed.",
     "",
     "Return only valid JSON."
@@ -3348,6 +3353,9 @@ function buildDeepSearchReportPrompt(payload = {}) {
     "Report rules:",
     "- Be source-backed, concrete, and concise.",
     "- Prefer synthesis over dumping raw search output.",
+    "- Produce a detailed report with multiple distinct findings and rich sections when evidence allows.",
+    "- Use a broad share of the collected evidence instead of relying on only one or two sources.",
+    "- Pull out concrete comparisons, tradeoffs, patterns, and caveats where the evidence supports them.",
     "- Mention uncertainty when evidence is thin or conflicting.",
     "- Cite relevant URLs for findings and sections.",
     "- Keep the report aligned with the user's language.",
@@ -3378,17 +3386,17 @@ function normalizeDeepSearchPlanningResponse(value = {}) {
   return {
     title: compact(value?.title || ""),
     objective: compact(value?.objective || ""),
-    search_queries: normalizeStructuredStringList(value?.search_queries || [], 6),
-    desired_sections: normalizeStructuredStringList(value?.desired_sections || [], 12),
-    evaluation_focus: normalizeStructuredStringList(value?.evaluation_focus || [], 12),
-    constraints: normalizeStructuredStringList(value?.constraints || [], 16),
+    search_queries: normalizeStructuredStringList(value?.search_queries || [], 10),
+    desired_sections: normalizeStructuredStringList(value?.desired_sections || [], 18),
+    evaluation_focus: normalizeStructuredStringList(value?.evaluation_focus || [], 18),
+    constraints: normalizeStructuredStringList(value?.constraints || [], 20),
     stop_early_if_sufficient: Boolean(value?.stop_early_if_sufficient)
   };
 }
 
 function normalizeDeepSearchRefinementResponse(value = {}) {
   return {
-    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 3),
+    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 5),
     rationale: compact(value?.rationale || ""),
     stop_early: Boolean(value?.stop_early)
   };
@@ -3400,23 +3408,23 @@ function normalizeDeepSearchReportResponse(value = {}) {
     objective: compact(value?.objective || ""),
     executive_summary: compact(value?.executive_summary || ""),
     key_findings: Array.isArray(value?.key_findings)
-      ? value.key_findings.slice(0, 12).map((item) => ({
+      ? value.key_findings.slice(0, 16).map((item) => ({
           title: compact(item?.title || ""),
           summary: compact(item?.summary || ""),
-          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 8)
+          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 10)
         }))
       : [],
     sections: Array.isArray(value?.sections)
-      ? value.sections.slice(0, 12).map((item) => ({
+      ? value.sections.slice(0, 18).map((item) => ({
           heading: compact(item?.heading || ""),
           body: compact(item?.body || ""),
-          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 12)
+          source_urls: normalizeStructuredUrlList(item?.source_urls || [], 16)
         }))
       : [],
-    methodology: normalizeStructuredStringList(value?.methodology || [], 16),
-    open_questions: normalizeStructuredStringList(value?.open_questions || [], 16),
+    methodology: normalizeStructuredStringList(value?.methodology || [], 24),
+    open_questions: normalizeStructuredStringList(value?.open_questions || [], 20),
     sources: Array.isArray(value?.sources)
-      ? value.sources.slice(0, 24).map((item) => ({
+      ? value.sources.slice(0, 40).map((item) => ({
           url: normalizeStructuredUrl(item?.url || ""),
           title: compact(item?.title || ""),
           snippet: compact(item?.snippet || ""),

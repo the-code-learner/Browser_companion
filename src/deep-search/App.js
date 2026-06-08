@@ -3,6 +3,7 @@ import {
   DEEP_SEARCH_FETCH_LIMIT,
   DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT,
   DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT,
+  DEEP_SEARCH_REFINEMENT_ROUND_LIMIT,
   DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT,
   DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT,
   DEEP_SEARCH_STORAGE_KEY,
@@ -100,47 +101,68 @@ async function orchestrateRun() {
     evaluationFocus: plan.evaluation_focus || [],
     constraints: plan.constraints || [],
     latestSummary: plan.objective || plan.title,
-    notes: appendNote(run.notes, `Planned ${plan.search_queries.length} first-wave query${plan.search_queries.length === 1 ? "" : "ies"}.`)
+    notes: appendNote(run.notes, `Planned ${plan.search_queries.length} first-wave ${pluralize("query", plan.search_queries.length)}.`)
   }));
 
-  run = await collectWave(run, run.plannedQueries.slice(0, DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT));
+  run = await collectWave(
+    run,
+    run.plannedQueries.slice(0, DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT),
+    { waveLabel: "first-wave" }
+  );
   if (run.status === "failed_partial") {
     return;
   }
 
-  const refinementResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_PLAN_REQUEST, {
-    stage: "refine",
-    goal: run.goal,
-    responseLanguage: run.responseLanguage || "same language as the user",
-    provider: run.providerSnapshot?.id || run.provider,
-    model: run.providerSnapshot?.model || run.model,
-    httpProvider: run.providerSnapshot?.httpProvider || null,
-    plan: run.plan,
-    searchArtifacts: run.searchArtifacts,
-    sources: run.fetchedSources.map((source) => ({
-      url: source.url,
-      title: source.title,
-      snippet: source.snippet || source.bodyPreview,
-      statusCode: source.statusCode
-    }))
-  }));
+  for (let round = 1; round <= DEEP_SEARCH_REFINEMENT_ROUND_LIMIT; round += 1) {
+    if (run.fetchedSources.length >= DEEP_SEARCH_FETCH_LIMIT) {
+      run = await saveRun(updateDeepSearchRun(run, {
+        phase: "synthesizing",
+        notes: appendNote(run.notes, "Reached the Deep Search fetch cap; moving to synthesis.")
+      }));
+      break;
+    }
 
-  const refinement = refinementResponse.ok && refinementResponse.envelope?.payload?.status === "ok"
-    ? normalizeDeepSearchRefinement(refinementResponse.envelope.payload.refinement)
-    : { additional_queries: [], rationale: "", stop_early: false };
+    const refinementResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_PLAN_REQUEST, {
+      stage: "refine",
+      goal: run.goal,
+      responseLanguage: run.responseLanguage || "same language as the user",
+      provider: run.providerSnapshot?.id || run.provider,
+      model: run.providerSnapshot?.model || run.model,
+      httpProvider: run.providerSnapshot?.httpProvider || null,
+      round,
+      plan: run.plan,
+      searchArtifacts: run.searchArtifacts,
+      sources: run.fetchedSources.map((source) => ({
+        url: source.url,
+        title: source.title,
+        snippet: source.snippet || source.bodyPreview,
+        statusCode: source.statusCode
+      }))
+    }));
 
-  run = await saveRun(updateDeepSearchRun(run, {
-    phase: refinement.stop_early ? "synthesizing" : "refining",
-    refinementQueries: refinement.additional_queries || [],
-    notes: refinement.stop_early
-      ? appendNote(run.notes, "Provider marked the evidence as sufficient; skipping second-wave search.")
-      : appendNote(run.notes, refinement.additional_queries.length
-        ? `Added ${refinement.additional_queries.length} second-wave query${refinement.additional_queries.length === 1 ? "" : "ies"}.`
-        : "No second-wave queries were proposed.")
-  }));
+    const refinement = refinementResponse.ok && refinementResponse.envelope?.payload?.status === "ok"
+      ? normalizeDeepSearchRefinement(refinementResponse.envelope.payload.refinement)
+      : { additional_queries: [], rationale: "", stop_early: false };
 
-  if (!refinement.stop_early && refinement.additional_queries.length && run.fetchedSources.length < DEEP_SEARCH_FETCH_LIMIT) {
-    run = await collectWave(run, refinement.additional_queries.slice(0, DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT));
+    run = await saveRun(updateDeepSearchRun(run, {
+      phase: refinement.stop_early ? "synthesizing" : "refining",
+      refinementQueries: [...run.refinementQueries, ...(refinement.additional_queries || [])],
+      notes: refinement.stop_early
+        ? appendNote(run.notes, `Refinement round ${round} marked the evidence as sufficient.`)
+        : appendNote(run.notes, refinement.additional_queries.length
+          ? `Refinement round ${round} added ${refinement.additional_queries.length} follow-up ${pluralize("query", refinement.additional_queries.length)}.`
+          : `Refinement round ${round} produced no additional queries.`)
+    }));
+
+    if (refinement.stop_early || !refinement.additional_queries.length) {
+      break;
+    }
+
+    run = await collectWave(
+      run,
+      refinement.additional_queries.slice(0, DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT),
+      { waveLabel: `refinement round ${round}` }
+    );
     if (run.status === "failed_partial") {
       return;
     }
@@ -187,9 +209,15 @@ async function orchestrateRun() {
   }));
 }
 
-async function collectWave(run, queries = []) {
+async function collectWave(run, queries = [], options = {}) {
   let nextRun = run;
-  for (const query of queries.slice(0, DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT + DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT)) {
+  const waveLabel = String(options.waveLabel || "search wave");
+  nextRun = await saveRun(updateDeepSearchRun(nextRun, {
+    phase: "searching",
+    notes: appendNote(nextRun.notes, `Starting ${waveLabel} with ${queries.length} ${pluralize("query", queries.length)}.`)
+  }));
+
+  for (const query of queries) {
     const searchResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.WEB_SEARCH, {
       query,
       limit: DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT
@@ -216,7 +244,7 @@ async function collectWave(run, queries = []) {
     nextRun = await saveRun(updateDeepSearchRun(nextRun, {
       searchArtifacts,
       latestSummary: payload.message || nextRun.latestSummary,
-      notes: appendNote(nextRun.notes, `Collected ${payload.results?.length || 0} result${payload.results?.length === 1 ? "" : "s"} for "${query}".`)
+      notes: appendNote(nextRun.notes, `Collected ${payload.results?.length || 0} ${pluralize("result", payload.results?.length || 0)} for "${query}".`)
     }));
   }
 
@@ -225,6 +253,11 @@ async function collectWave(run, queries = []) {
     maxTotal: DEEP_SEARCH_FETCH_LIMIT,
     maxPerDomain: DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT
   }).filter((candidate) => candidate.url && !usedUrls.has(candidate.url));
+
+  nextRun = await saveRun(updateDeepSearchRun(nextRun, {
+    phase: "fetching",
+    notes: appendNote(nextRun.notes, `${waveLabel} produced ${candidates.length} fetch candidate ${pluralize("page", candidates.length)} after dedupe.`)
+  }));
 
   for (const candidate of candidates) {
     if (nextRun.fetchedSources.length >= DEEP_SEARCH_FETCH_LIMIT) {
@@ -261,6 +294,7 @@ async function collectWave(run, queries = []) {
 
     nextRun = await saveRun(updateDeepSearchRun(nextRun, {
       fetchedSources,
+      latestSummary: `Fetched ${fetchedSources.length}/${DEEP_SEARCH_FETCH_LIMIT} sources so far across ${new Set(fetchedSources.map((source) => source.domain).filter(Boolean)).size} domains.`,
       notes: appendNote(nextRun.notes, `Fetched ${payload.statusCode || "?"} from ${candidate.url}.`)
     }));
   }
@@ -433,7 +467,7 @@ function render() {
 
 function buildMethodologyFallback(run) {
   return [
-    `Ran ${run.searchArtifacts.length} web search query${run.searchArtifacts.length === 1 ? "" : "ies"} against public search results.`,
+    `Ran ${run.searchArtifacts.length} web search ${pluralize("query", run.searchArtifacts.length)} against public search results.`,
     `Deduped candidate links before fetching up to ${DEEP_SEARCH_FETCH_LIMIT} public source pages.`,
     `Kept the run in the originating Chrome window ${run.windowId == null ? "?" : run.windowId}.`
   ];
@@ -465,7 +499,7 @@ function buildSectionFallback(run) {
     {
       heading: "Evidence Collected So Far",
       body: run.fetchedSources.length
-        ? `Fetched ${run.fetchedSources.length} public page${run.fetchedSources.length === 1 ? "" : "s"} after ${run.searchArtifacts.length} search query${run.searchArtifacts.length === 1 ? "" : "ies"}.`
+        ? `Fetched ${run.fetchedSources.length} public ${pluralize("page", run.fetchedSources.length)} after ${run.searchArtifacts.length} search ${pluralize("query", run.searchArtifacts.length)}.`
         : "No public pages have been fetched successfully yet.",
       source_urls: run.fetchedSources.slice(0, 4).map((source) => source.url)
     }
@@ -514,6 +548,10 @@ function formatDomain(url) {
   } catch {
     return url;
   }
+}
+
+function pluralize(noun, count) {
+  return count === 1 ? noun : `${noun}s`;
 }
 
 function sendRuntimeMessage(message) {

@@ -1,10 +1,11 @@
 export const DEEP_SEARCH_STORAGE_KEY = "browserCompanionDeepSearchRuns";
 export const DEEP_SEARCH_RUN_LIMIT = 10;
-export const DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT = 6;
-export const DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT = 3;
-export const DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT = 5;
-export const DEEP_SEARCH_FETCH_LIMIT = 12;
-export const DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT = 2;
+export const DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT = 10;
+export const DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT = 5;
+export const DEEP_SEARCH_REFINEMENT_ROUND_LIMIT = 2;
+export const DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT = 8;
+export const DEEP_SEARCH_FETCH_LIMIT = 24;
+export const DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT = 3;
 
 export function createDeepSearchRun(payload = {}) {
   const now = new Date().toISOString();
@@ -70,14 +71,14 @@ export function normalizeDeepSearchRun(run = {}) {
     plan: normalizeDeepSearchPlan(run.plan || null),
     plannedQueries,
     refinementQueries,
-    desiredSections: normalizeStringList(run.desiredSections || run.plan?.desired_sections || [], 12),
-    evaluationFocus: normalizeStringList(run.evaluationFocus || run.plan?.evaluation_focus || [], 12),
-    constraints: normalizeStringList(run.constraints || run.plan?.constraints || [], 16),
+    desiredSections: normalizeStringList(run.desiredSections || run.plan?.desired_sections || [], 18),
+    evaluationFocus: normalizeStringList(run.evaluationFocus || run.plan?.evaluation_focus || [], 18),
+    constraints: normalizeStringList(run.constraints || run.plan?.constraints || [], 20),
     searchArtifacts: normalizeSearchArtifacts(run.searchArtifacts || []),
     fetchedSources: normalizeFetchedSources(run.fetchedSources || []),
     finalReport: normalizeDeepSearchReport(run.finalReport || null),
     lastError: normalizeDeepSearchError(run.lastError || null),
-    notes: normalizeStringList(run.notes || [], 24),
+    notes: normalizeStringList(run.notes || [], 40),
     latestSummary: compact(run.latestSummary || "")
   };
 }
@@ -91,9 +92,9 @@ export function normalizeDeepSearchPlan(plan = null) {
     title: compact(plan.title || ""),
     objective: compact(plan.objective || ""),
     search_queries: normalizeStringList(plan.search_queries || [], DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT),
-    desired_sections: normalizeStringList(plan.desired_sections || [], 12),
-    evaluation_focus: normalizeStringList(plan.evaluation_focus || [], 12),
-    constraints: normalizeStringList(plan.constraints || [], 16),
+    desired_sections: normalizeStringList(plan.desired_sections || [], 18),
+    evaluation_focus: normalizeStringList(plan.evaluation_focus || [], 18),
+    constraints: normalizeStringList(plan.constraints || [], 20),
     stop_early_if_sufficient: Boolean(plan.stop_early_if_sufficient)
   };
 }
@@ -124,21 +125,21 @@ export function normalizeDeepSearchReport(report = null) {
     objective: compact(report.objective || ""),
     executive_summary: compact(report.executive_summary || ""),
     key_findings: Array.isArray(report.key_findings)
-      ? report.key_findings.slice(0, 12).map((item) => ({
+      ? report.key_findings.slice(0, 16).map((item) => ({
           title: compact(item?.title || ""),
           summary: compact(item?.summary || ""),
-          source_urls: normalizeUrlList(item?.source_urls || [], 8)
+          source_urls: normalizeUrlList(item?.source_urls || [], 10)
         }))
       : [],
     sections: Array.isArray(report.sections)
-      ? report.sections.slice(0, 12).map((item) => ({
+      ? report.sections.slice(0, 18).map((item) => ({
           heading: compact(item?.heading || ""),
           body: compact(item?.body || ""),
-          source_urls: normalizeUrlList(item?.source_urls || [], 12)
+          source_urls: normalizeUrlList(item?.source_urls || [], 16)
         }))
       : [],
-    methodology: normalizeStringList(report.methodology || [], 16),
-    open_questions: normalizeStringList(report.open_questions || [], 16),
+    methodology: normalizeStringList(report.methodology || [], 24),
+    open_questions: normalizeStringList(report.open_questions || [], 20),
     sources: normalizeSourceList(report.sources || [])
   };
 }
@@ -148,7 +149,7 @@ export function normalizeSearchArtifacts(artifacts = []) {
     return [];
   }
 
-  return artifacts.slice(0, 80).map((artifact) => ({
+  return artifacts.slice(0, 160).map((artifact) => ({
     query: compact(artifact?.query || ""),
     provider: compact(artifact?.provider || ""),
     searchedAt: normalizeIsoString(artifact?.searchedAt),
@@ -175,7 +176,7 @@ export function normalizeFetchedSources(sources = []) {
     status: compact(source?.status || ""),
     statusCode: normalizeOptionalNumber(source?.statusCode),
     snippet: compact(source?.snippet || ""),
-    bodyPreview: compact(source?.bodyPreview || source?.body || ""),
+    bodyPreview: compact(source?.bodyPreview || source?.body || "").slice(0, 12000),
     fetchedAt: normalizeIsoString(source?.fetchedAt),
     query: compact(source?.query || "")
   }));
@@ -186,7 +187,7 @@ export function normalizeSourceList(sources = []) {
     return [];
   }
 
-  return sources.slice(0, 24).map((source) => ({
+  return sources.slice(0, 40).map((source) => ({
     url: normalizeUrl(source?.url || ""),
     title: compact(source?.title || ""),
     snippet: compact(source?.snippet || ""),
@@ -326,7 +327,7 @@ export function buildFallbackDeepSearchReport(run = {}) {
   const searchTrail = normalized.searchArtifacts
     .map((artifact) => artifact.query)
     .filter(Boolean);
-  const topSources = normalized.fetchedSources.slice(0, 8);
+  const topSources = normalized.fetchedSources.slice(0, 12);
 
   return normalizeDeepSearchReport({
     title: normalized.plan?.title || normalized.goal || "Deep Search report",
@@ -334,7 +335,7 @@ export function buildFallbackDeepSearchReport(run = {}) {
     executive_summary: normalized.fetchedSources.length
       ? "Deep Search gathered source material but could not complete the full final synthesis. The partial report below preserves the strongest findings and source trail."
       : "Deep Search could not gather enough source material to complete the report.",
-    key_findings: topSources.slice(0, 4).map((source) => ({
+    key_findings: topSources.slice(0, 6).map((source) => ({
       title: source.title || source.url,
       summary: source.snippet || source.bodyPreview.slice(0, 220),
       source_urls: [source.url]
