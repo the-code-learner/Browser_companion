@@ -6,6 +6,11 @@ export const DEEP_SEARCH_REFINEMENT_ROUND_LIMIT = 3;
 export const DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT = 16;
 export const DEEP_SEARCH_FETCH_LIMIT = 40;
 export const DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT = 5;
+export const DEEP_SEARCH_DIGEST_BATCH_SIZE = 4;
+export const DEEP_SEARCH_DIGEST_BATCH_LIMIT = 8;
+export const DEEP_SEARCH_FINAL_DIGEST_LIMIT = 16;
+export const DEEP_SEARCH_FINAL_DIGESTS_PER_DOMAIN_LIMIT = 3;
+export const DEEP_SEARCH_BATCH_SYNTHESIS_DIGEST_LIMIT = 6;
 
 export function createDeepSearchRun(payload = {}) {
   const now = new Date().toISOString();
@@ -43,6 +48,8 @@ export function createDeepSearchRun(payload = {}) {
     constraints: [],
     searchArtifacts: [],
     fetchedSources: [],
+    sourceDigests: [],
+    batchSummaries: [],
     finalReport: null,
     lastError: null,
     notes: [],
@@ -88,6 +95,8 @@ export function normalizeDeepSearchRun(run = {}) {
     constraints: normalizeStringList(run.constraints || run.plan?.constraints || [], 20),
     searchArtifacts: normalizeSearchArtifacts(run.searchArtifacts || []),
     fetchedSources: normalizeFetchedSources(run.fetchedSources || []),
+    sourceDigests: normalizeSourceDigestList(run.sourceDigests || []),
+    batchSummaries: normalizeBatchSummaryList(run.batchSummaries || []),
     finalReport: normalizeDeepSearchReport(run.finalReport || null),
     lastError: normalizeDeepSearchError(run.lastError || null),
     notes: normalizeStringList(run.notes || [], 40),
@@ -234,6 +243,47 @@ export function normalizeSourceList(sources = []) {
     siteName: compact(source?.siteName || ""),
     heroImageUrl: normalizeUrl(source?.heroImageUrl || "")
   }));
+}
+
+export function normalizeSourceDigestList(digests = []) {
+  if (!Array.isArray(digests)) {
+    return [];
+  }
+
+  return digests.slice(0, DEEP_SEARCH_FETCH_LIMIT).map((digest, index) => ({
+    id: compact(digest?.id || `digest-${index + 1}`),
+    url: normalizeUrl(digest?.url || ""),
+    title: compact(digest?.title || ""),
+    domain: compact(digest?.domain || extractDomain(digest?.url || "")),
+    sourceType: compact(digest?.sourceType || digest?.source_type || "general"),
+    relevanceScore: clampScore(digest?.relevanceScore ?? digest?.relevance_score),
+    confidence: clampScore(digest?.confidence),
+    summary: sanitizePreviewText(digest?.summary || ""),
+    keyFacts: normalizeStringList(digest?.keyFacts || digest?.key_facts || [], 10),
+    entities: normalizeStringList(digest?.entities || [], 12),
+    dates: normalizeStringList(digest?.dates || [], 10),
+    locations: normalizeStringList(digest?.locations || [], 10),
+    importantLinks: normalizeCollectionLinks(digest?.importantLinks || digest?.important_links || []),
+    matchesUserGoal: sanitizePreviewText(digest?.matchesUserGoal || digest?.matches_user_goal || ""),
+    risksOrGaps: normalizeStringList(digest?.risksOrGaps || digest?.risks_or_gaps || [], 8),
+    extractedAt: normalizeIsoString(digest?.extractedAt || digest?.extracted_at),
+    query: compact(digest?.query || ""),
+    siteName: compact(digest?.siteName || "")
+  })).filter((digest) => digest.url || digest.title);
+}
+
+export function normalizeBatchSummaryList(summaries = []) {
+  if (!Array.isArray(summaries)) {
+    return [];
+  }
+
+  return summaries.slice(0, DEEP_SEARCH_DIGEST_BATCH_LIMIT).map((summary, index) => ({
+    id: compact(summary?.id || `batch-${index + 1}`),
+    title: compact(summary?.title || ""),
+    summary: sanitizePreviewText(summary?.summary || ""),
+    keyPoints: normalizeStringList(summary?.keyPoints || summary?.key_points || [], 8),
+    topSourceUrls: normalizeUrlList(summary?.topSourceUrls || summary?.top_source_urls || [], 12)
+  })).filter((summary) => summary.title || summary.summary);
 }
 
 export function normalizePresentation(presentation = null) {
@@ -555,6 +605,47 @@ export function collectFetchCandidates(searchArtifacts = [], options = {}) {
   return dedupeSearchResults(flattened, { maxPerDomain }).slice(0, maxTotal);
 }
 
+export function chunkItems(items = [], size = 1) {
+  const normalizedSize = normalizePositiveInt(size, 1);
+  const list = Array.isArray(items) ? items : [];
+  const chunks = [];
+  for (let index = 0; index < list.length; index += normalizedSize) {
+    chunks.push(list.slice(index, index + normalizedSize));
+  }
+  return chunks;
+}
+
+export function selectTopSourceDigests(digests = [], options = {}) {
+  const maxTotal = normalizePositiveInt(options.maxTotal, DEEP_SEARCH_FINAL_DIGEST_LIMIT);
+  const maxPerDomain = normalizePositiveInt(options.maxPerDomain, DEEP_SEARCH_FINAL_DIGESTS_PER_DOMAIN_LIMIT);
+  const domainCounts = new Map();
+  const sorted = normalizeSourceDigestList(digests).sort((left, right) => {
+    const scoreGap = (right.relevanceScore || 0) - (left.relevanceScore || 0);
+    if (scoreGap !== 0) {
+      return scoreGap;
+    }
+    return (right.confidence || 0) - (left.confidence || 0);
+  });
+  const selected = [];
+
+  for (const digest of sorted) {
+    if (selected.length >= maxTotal) {
+      break;
+    }
+    const domain = digest.domain || extractDomain(digest.url);
+    const currentCount = domain ? (domainCounts.get(domain) || 0) : 0;
+    if (domain && currentCount >= maxPerDomain) {
+      continue;
+    }
+    if (domain) {
+      domainCounts.set(domain, currentCount + 1);
+    }
+    selected.push(digest);
+  }
+
+  return selected;
+}
+
 export function upsertDeepSearchRunList(existingRuns = [], run, options = {}) {
   const limit = normalizePositiveInt(options.limit, DEEP_SEARCH_RUN_LIMIT);
   const normalizedRun = normalizeDeepSearchRun(run);
@@ -596,6 +687,7 @@ export function buildFallbackDeepSearchReport(run = {}) {
     .map((artifact) => artifact.query)
     .filter(Boolean);
   const topSources = normalized.fetchedSources.slice(0, 12);
+  const topDigests = normalized.sourceDigests.slice(0, 8);
   const fallbackCollection = buildFallbackCollection(normalized);
   const fallbackMedia = buildFallbackMedia(normalized);
 
@@ -605,11 +697,15 @@ export function buildFallbackDeepSearchReport(run = {}) {
     executive_summary: normalized.fetchedSources.length
       ? "Deep Search gathered source material but could not complete the full final synthesis. The partial report below preserves the strongest findings and source trail."
       : "Deep Search could not gather enough source material to complete the report.",
-    key_findings: topSources.slice(0, 6).map((source) => ({
+    key_findings: (topDigests.length ? topDigests.slice(0, 6).map((digest) => ({
+      title: digest.title || digest.url,
+      summary: digest.summary || digest.matchesUserGoal || digest.keyFacts.join(" | "),
+      source_urls: [digest.url].filter(Boolean)
+    })) : topSources.slice(0, 6).map((source) => ({
       title: source.title || source.url,
       summary: source.snippet || source.bodyPreview.slice(0, 220),
       source_urls: [source.url]
-    })),
+    }))),
     sections: [
       {
         heading: "What Was Collected",
@@ -622,7 +718,11 @@ export function buildFallbackDeepSearchReport(run = {}) {
         body: searchTrail.length
           ? `Searches run: ${searchTrail.join(" | ")}`
           : "No successful searches were recorded before the run stopped."
-      }
+      },
+      ...(topDigests.length ? [{
+        heading: "Compressed Evidence",
+        body: topDigests.map((digest) => `${digest.title || digest.url}: ${digest.summary || digest.matchesUserGoal || digest.keyFacts.join(" | ")}`).join(" | ")
+      }] : [])
     ],
     methodology: [
       "The report used web search to collect candidate public URLs.",
@@ -776,6 +876,14 @@ function normalizePositiveInt(value, fallback) {
     return fallback;
   }
   return parsed;
+}
+
+function clampScore(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
 function normalizeUrl(value) {

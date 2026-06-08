@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
   buildFallbackDeepSearchReport,
+  chunkItems,
   collectFetchCandidates,
   createDeepSearchRun,
   normalizeDeepSearchRun,
+  selectTopSourceDigests,
   upsertDeepSearchRunList
 } from "../src/shared/deep-search.js";
 
@@ -92,6 +94,59 @@ assert.equal(fallback.open_questions[0], "Provider timed out.");
 assert.equal(fallback.presentation.available_views.includes("print"), true);
 assert.equal(fallback.collections.length, 1);
 assert.equal(fallback.document.chapters.length > 0, true);
+
+const digestRun = normalizeDeepSearchRun({
+  ...run,
+  sourceDigests: [
+    {
+      url: "https://example.com/role-a",
+      title: "Role A",
+      domain: "example.com",
+      relevance_score: 92,
+      confidence: 80,
+      summary: "Strong direct match"
+    },
+    {
+      url: "https://example.com/role-b",
+      title: "Role B",
+      domain: "example.com",
+      relevance_score: 91,
+      confidence: 79,
+      summary: "Second direct match"
+    },
+    {
+      url: "https://second.com/role-c",
+      title: "Role C",
+      domain: "second.com",
+      relevance_score: 89,
+      confidence: 82,
+      summary: "Good supporting source"
+    }
+  ],
+  batchSummaries: [
+    {
+      title: "Batch 1",
+      summary: "Compressed batch"
+    }
+  ]
+});
+
+assert.equal(digestRun.sourceDigests.length, 3);
+assert.equal(digestRun.batchSummaries[0].title, "Batch 1");
+
+const selectedDigests = selectTopSourceDigests(digestRun.sourceDigests, {
+  maxTotal: 2,
+  maxPerDomain: 1
+});
+
+assert.equal(selectedDigests.length, 2);
+assert.equal(selectedDigests[0].url, "https://example.com/role-a");
+assert.equal(selectedDigests[1].url, "https://second.com/role-c");
+
+const digestChunks = chunkItems(digestRun.sourceDigests, 2);
+assert.equal(digestChunks.length, 2);
+assert.equal(digestChunks[0].length, 2);
+assert.equal(digestChunks[1].length, 1);
 
 const richReport = normalizeDeepSearchRun({
   ...run,

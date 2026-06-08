@@ -184,6 +184,52 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "deep_search_digest_request") {
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runDeepSearchDigestRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId
+    }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
+        type: "deep_search_digest_result",
+        status: "error",
+        message: error.message || "Deep Search digest compression failed."
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
+    return;
+  }
+
+  if (message?.type === "deep_search_batch_synthesis_request") {
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runDeepSearchBatchSynthesisRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId
+    }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
+        type: "deep_search_batch_synthesis_result",
+        status: "error",
+        message: error.message || "Deep Search batch synthesis failed."
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
+    return;
+  }
+
   if (message?.type === "deep_search_report_request") {
     const controller = new AbortController();
     if (requestId) {
@@ -1897,6 +1943,44 @@ async function runDeepSearchPlanRequest(payload = {}, options = {}) {
   };
 }
 
+async function runDeepSearchDigestRequest(payload = {}, options = {}) {
+  const prompt = buildDeepSearchDigestPrompt(payload);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+
+  if (!parsed.ok) {
+    return {
+      type: "deep_search_digest_result",
+      status: "error",
+      message: parsed.message
+    };
+  }
+
+  return {
+    type: "deep_search_digest_result",
+    status: "ok",
+    digests: normalizeDeepSearchDigestResponse(parsed.value)
+  };
+}
+
+async function runDeepSearchBatchSynthesisRequest(payload = {}, options = {}) {
+  const prompt = buildDeepSearchBatchSynthesisPrompt(payload);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+
+  if (!parsed.ok) {
+    return {
+      type: "deep_search_batch_synthesis_result",
+      status: "error",
+      message: parsed.message
+    };
+  }
+
+  return {
+    type: "deep_search_batch_synthesis_result",
+    status: "ok",
+    summary: normalizeDeepSearchBatchSynthesisResponse(parsed.value)
+  };
+}
+
 async function runDeepSearchReportRequest(payload = {}, options = {}) {
   const prompt = buildDeepSearchReportPrompt(payload);
   const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
@@ -3481,6 +3565,70 @@ function buildDeepSearchRefinementPrompt(payload = {}) {
   ].join("\n");
 }
 
+function buildDeepSearchDigestPrompt(payload = {}) {
+  return [
+    "Task: Compress fetched Deep Search source pages into structured source digests.",
+    "Return only one JSON object. Do not wrap it in Markdown.",
+    'JSON shape: {"digests":[{"url":"https://...","title":"source title","domain":"example.com","source_type":"official|directory|article|listing|job|event|general","relevance_score":0,"confidence":0,"summary":"2-3 sentence compression","key_facts":["fact"],"entities":["entity"],"dates":["date"],"locations":["location"],"important_links":[{"label":"Apply","type":"application","url":"https://..."}],"matches_user_goal":"why it matters","risks_or_gaps":["what is missing or uncertain"],"query":"source query","siteName":"site"}]}',
+    "",
+    "Digest rules:",
+    "- Keep only information that is useful for the user's research goal.",
+    "- Remove prose fluff, navigation noise, and duplicated framing language.",
+    "- Preserve concrete facts, dates, requirements, prices, locations, organizations, and direct links when present.",
+    "- Score each source for relevance to the user's goal from 0 to 100.",
+    "- Confidence should reflect how directly the page supports the extracted claims.",
+    "- If a source is weak, say why in risks_or_gaps rather than inventing certainty.",
+    "",
+    "User goal:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Deep Search plan JSON:",
+    JSON.stringify(payload.plan || null, null, 2),
+    "",
+    "Batch index:",
+    `${payload.batchIndex || 1}/${payload.batchCount || 1}`,
+    "",
+    "Fetched source batch JSON:",
+    JSON.stringify(payload.sources || [], null, 2),
+    "",
+    "Return only valid JSON."
+  ].join("\n");
+}
+
+function buildDeepSearchBatchSynthesisPrompt(payload = {}) {
+  return [
+    "Task: Synthesize a batch of Deep Search source digests into a compact batch summary for later meta-synthesis.",
+    "Return only one JSON object. Do not wrap it in Markdown.",
+    'JSON shape: {"title":"batch title","summary":"compressed synthesis","key_points":["point"],"top_source_urls":["https://..."]}',
+    "",
+    "Batch synthesis rules:",
+    "- Combine overlapping digests and surface only the strongest takeaways.",
+    "- Prefer high-relevance, high-confidence evidence when there is conflict.",
+    "- Keep this batch summary compact and factual so it can be merged later.",
+    "- Mention uncertainty only when it materially affects interpretation.",
+    "",
+    "User goal:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Deep Search plan JSON:",
+    JSON.stringify(payload.plan || null, null, 2),
+    "",
+    "Batch index:",
+    `${payload.batchIndex || 1}/${payload.batchCount || 1}`,
+    "",
+    "Source digests batch JSON:",
+    JSON.stringify(payload.digests || [], null, 2),
+    "",
+    "Return only valid JSON."
+  ].join("\n");
+}
+
 function buildDeepSearchReportPrompt(payload = {}) {
   return [
     "Task: Write the final Deep Search report for Browser Companion from collected public web evidence.",
@@ -3513,7 +3661,13 @@ function buildDeepSearchReportPrompt(payload = {}) {
     "Search artifacts JSON:",
     JSON.stringify(payload.searchArtifacts || [], null, 2),
     "",
-    "Fetched source artifacts JSON:",
+    "Compressed source digests JSON:",
+    JSON.stringify(payload.sourceDigests || [], null, 2),
+    "",
+    "Batch synthesis summaries JSON:",
+    JSON.stringify(payload.batchSummaries || [], null, 2),
+    "",
+    "Representative top fetched sources JSON:",
     JSON.stringify(payload.fetchedSources || [], null, 2),
     "",
     "Local user memory JSON:",
@@ -3550,6 +3704,12 @@ function buildDeepSearchChatPrompt(payload = {}) {
     "Deep Search fetched sources JSON:",
     JSON.stringify(payload.fetchedSources || [], null, 2),
     "",
+    "Deep Search source digests JSON:",
+    JSON.stringify(payload.sourceDigests || [], null, 2),
+    "",
+    "Deep Search batch summaries JSON:",
+    JSON.stringify(payload.batchSummaries || [], null, 2),
+    "",
     "Deep Search search trail JSON:",
     JSON.stringify(payload.searchArtifacts || [], null, 2),
     "",
@@ -3570,12 +3730,65 @@ function normalizeDeepSearchPlanningResponse(value = {}) {
   };
 }
 
+function normalizeDeepSearchDigestResponse(value = {}) {
+  const rawDigests = Array.isArray(value?.digests)
+    ? value.digests
+    : (Array.isArray(value) ? value : []);
+
+  return rawDigests.slice(0, 40).map((digest, index) => ({
+    id: compact(digest?.id || `digest-${index + 1}`),
+    url: normalizeStructuredUrl(digest?.url || ""),
+    title: compact(digest?.title || ""),
+    domain: compact(digest?.domain || ""),
+    sourceType: compact(digest?.source_type || digest?.sourceType || "general"),
+    relevanceScore: normalizeScore(digest?.relevance_score ?? digest?.relevanceScore),
+    confidence: normalizeScore(digest?.confidence),
+    summary: compact(digest?.summary || ""),
+    keyFacts: normalizeStructuredStringList(digest?.key_facts || digest?.keyFacts || [], 10),
+    entities: normalizeStructuredStringList(digest?.entities || [], 12),
+    dates: normalizeStructuredStringList(digest?.dates || [], 10),
+    locations: normalizeStructuredStringList(digest?.locations || [], 10),
+    importantLinks: Array.isArray(digest?.important_links || digest?.importantLinks)
+      ? (digest.important_links || digest.importantLinks).slice(0, 10).map((link, linkIndex) => ({
+          id: compact(link?.id || `link-${linkIndex + 1}`),
+          label: compact(link?.label || link?.type || link?.url || ""),
+          type: compact(link?.type || "source"),
+          url: normalizeStructuredUrl(link?.url || ""),
+          note: compact(link?.note || "")
+        })).filter((link) => link.label && link.url)
+      : [],
+    matchesUserGoal: compact(digest?.matches_user_goal || digest?.matchesUserGoal || ""),
+    risksOrGaps: normalizeStructuredStringList(digest?.risks_or_gaps || digest?.risksOrGaps || [], 8),
+    extractedAt: new Date().toISOString(),
+    query: compact(digest?.query || ""),
+    siteName: compact(digest?.siteName || digest?.site_name || "")
+  })).filter((digest) => digest.url || digest.title);
+}
+
+function normalizeDeepSearchBatchSynthesisResponse(value = {}) {
+  return {
+    id: compact(value?.id || ""),
+    title: compact(value?.title || ""),
+    summary: compact(value?.summary || ""),
+    keyPoints: normalizeStructuredStringList(value?.key_points || value?.keyPoints || [], 8),
+    topSourceUrls: normalizeStructuredUrlList(value?.top_source_urls || value?.topSourceUrls || [], 12)
+  };
+}
+
 function normalizeDeepSearchRefinementResponse(value = {}) {
   return {
     additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 8),
     rationale: compact(value?.rationale || ""),
     stop_early: Boolean(value?.stop_early)
   };
+}
+
+function normalizeScore(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
 function normalizeDeepSearchReportResponse(value = {}) {

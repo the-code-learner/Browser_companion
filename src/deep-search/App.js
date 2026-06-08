@@ -1,8 +1,13 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
 import { prefixUserMessageWithTimestamp } from "../shared/runtime-log.js";
 import {
+  chunkItems,
   DEEP_SEARCH_FETCH_LIMIT,
+  DEEP_SEARCH_BATCH_SYNTHESIS_DIGEST_LIMIT,
+  DEEP_SEARCH_DIGEST_BATCH_SIZE,
   DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT,
+  DEEP_SEARCH_FINAL_DIGEST_LIMIT,
+  DEEP_SEARCH_FINAL_DIGESTS_PER_DOMAIN_LIMIT,
   DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT,
   DEEP_SEARCH_REFINEMENT_ROUND_LIMIT,
   DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT,
@@ -12,6 +17,7 @@ import {
   collectFetchCandidates,
   normalizeDeepSearchRefinement,
   normalizeDeepSearchRun,
+  selectTopSourceDigests,
   upsertDeepSearchRunList,
   updateDeepSearchRun
 } from "../shared/deep-search.js";
@@ -192,6 +198,31 @@ async function orchestrateRun() {
   }
 
   run = await saveRun(updateDeepSearchRun(run, {
+    phase: "digesting",
+    notes: appendNote(run.notes, "Compressing fetched source pages into structured source digests.")
+  }));
+
+  run = await buildSourceDigests(run, loggedGoal);
+  if (run.status === "failed_partial") {
+    return;
+  }
+
+  const selectedDigests = selectTopSourceDigests(run.sourceDigests, {
+    maxTotal: DEEP_SEARCH_FINAL_DIGEST_LIMIT,
+    maxPerDomain: DEEP_SEARCH_FINAL_DIGESTS_PER_DOMAIN_LIMIT
+  });
+
+  run = await saveRun(updateDeepSearchRun(run, {
+    phase: "synthesizing",
+    notes: appendNote(run.notes, `Selected ${selectedDigests.length} compressed source ${pluralize("digest", selectedDigests.length)} for the final synthesis.`)
+  }));
+
+  run = await buildBatchSummaries(run, loggedGoal, selectedDigests);
+  if (run.status === "failed_partial") {
+    return;
+  }
+
+  run = await saveRun(updateDeepSearchRun(run, {
     phase: "synthesizing",
     notes: appendNote(run.notes, "Building the final Deep Search report.")
   }));
@@ -204,7 +235,17 @@ async function orchestrateRun() {
     httpProvider: run.providerSnapshot?.httpProvider || null,
     plan: run.plan,
     searchArtifacts: run.searchArtifacts,
-    fetchedSources: run.fetchedSources,
+    sourceDigests: selectedDigests,
+    batchSummaries: run.batchSummaries,
+    fetchedSources: run.fetchedSources.slice(0, 6).map((source) => ({
+      url: source.url,
+      title: source.title,
+      domain: source.domain,
+      snippet: source.snippet || source.description || source.bodyPreview.slice(0, 220),
+      statusCode: source.statusCode,
+      siteName: source.siteName,
+      heroImageUrl: source.heroImageUrl
+    })),
     userMemory
   }));
 
@@ -327,6 +368,87 @@ async function collectWave(run, queries = [], options = {}) {
       fetchedSources,
       latestSummary: `Fetched ${fetchedSources.length}/${DEEP_SEARCH_FETCH_LIMIT} sources so far across ${new Set(fetchedSources.map((source) => source.domain).filter(Boolean)).size} domains.`,
       notes: appendNote(nextRun.notes, `Fetched ${payload.statusCode || "?"} from ${candidate.url}.`)
+    }));
+  }
+
+  return nextRun;
+}
+
+async function buildSourceDigests(run, loggedGoal) {
+  let nextRun = run;
+  const batches = chunkItems(nextRun.fetchedSources, DEEP_SEARCH_DIGEST_BATCH_SIZE);
+  const collectedDigests = [];
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batch = batches[batchIndex];
+    const digestResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_DIGEST_REQUEST, {
+      goal: loggedGoal,
+      responseLanguage: nextRun.responseLanguage || "same language as the user",
+      provider: nextRun.providerSnapshot?.id || nextRun.provider,
+      model: nextRun.providerSnapshot?.model || nextRun.model,
+      httpProvider: nextRun.providerSnapshot?.httpProvider || null,
+      batchIndex: batchIndex + 1,
+      batchCount: batches.length,
+      plan: nextRun.plan,
+      sources: batch
+    }));
+
+    if (!digestResponse.ok || digestResponse.envelope?.payload?.status !== "ok") {
+      await failRun("digesting", digestResponse.error || digestResponse.envelope?.payload?.message || "Source digest compression failed.");
+      return state.run;
+    }
+
+    const digests = Array.isArray(digestResponse.envelope?.payload?.digests)
+      ? digestResponse.envelope.payload.digests
+      : [];
+    collectedDigests.push(...digests);
+    nextRun = await saveRun(updateDeepSearchRun(nextRun, {
+      sourceDigests: collectedDigests,
+      latestSummary: `Compressed ${collectedDigests.length}/${nextRun.fetchedSources.length} fetched sources into source digests.`,
+      notes: appendNote(nextRun.notes, `Compressed digest batch ${batchIndex + 1}/${batches.length} into ${digests.length} structured ${pluralize("digest", digests.length)}.`)
+    }));
+  }
+
+  return nextRun;
+}
+
+async function buildBatchSummaries(run, loggedGoal, selectedDigests = []) {
+  let nextRun = run;
+  if (!selectedDigests.length) {
+    return nextRun;
+  }
+
+  const digestBatches = chunkItems(selectedDigests, DEEP_SEARCH_BATCH_SYNTHESIS_DIGEST_LIMIT);
+  const summaries = [];
+
+  for (let batchIndex = 0; batchIndex < digestBatches.length; batchIndex += 1) {
+    const batch = digestBatches[batchIndex];
+    const batchResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_BATCH_SYNTHESIS_REQUEST, {
+      goal: loggedGoal,
+      responseLanguage: nextRun.responseLanguage || "same language as the user",
+      provider: nextRun.providerSnapshot?.id || nextRun.provider,
+      model: nextRun.providerSnapshot?.model || nextRun.model,
+      httpProvider: nextRun.providerSnapshot?.httpProvider || null,
+      batchIndex: batchIndex + 1,
+      batchCount: digestBatches.length,
+      plan: nextRun.plan,
+      digests: batch
+    }));
+
+    if (!batchResponse.ok || batchResponse.envelope?.payload?.status !== "ok") {
+      await failRun("batch_synthesis", batchResponse.error || batchResponse.envelope?.payload?.message || "Batch synthesis failed while preparing the final report.");
+      return state.run;
+    }
+
+    const summary = batchResponse.envelope?.payload?.summary || null;
+    if (summary) {
+      summaries.push(summary);
+    }
+
+    nextRun = await saveRun(updateDeepSearchRun(nextRun, {
+      batchSummaries: summaries,
+      latestSummary: `Prepared ${summaries.length}/${digestBatches.length} batch ${pluralize("summary", summaries.length)} for the meta-synthesis.`,
+      notes: appendNote(nextRun.notes, `Prepared batch synthesis ${batchIndex + 1}/${digestBatches.length}.`)
     }));
   }
 
@@ -1526,6 +1648,8 @@ async function handleThreadSubmit(event) {
       runStatus: run.status,
       report: run.finalReport || buildFallbackDeepSearchReport(run),
       fetchedSources: run.fetchedSources,
+      sourceDigests: run.sourceDigests,
+      batchSummaries: run.batchSummaries,
       searchArtifacts: run.searchArtifacts,
       threadMessages: toProviderThreadMessages(run.threadMessages || [])
     }));

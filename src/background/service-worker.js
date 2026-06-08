@@ -102,6 +102,14 @@ async function handleMessage(message) {
     return requestDeepSearchPlan(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.DEEP_SEARCH_DIGEST_REQUEST) {
+    return requestDeepSearchDigest(message.payload);
+  }
+
+  if (message?.type === MESSAGE_TYPES.DEEP_SEARCH_BATCH_SYNTHESIS_REQUEST) {
+    return requestDeepSearchBatchSynthesis(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.DEEP_SEARCH_REPORT_REQUEST) {
     return requestDeepSearchReport(message.payload);
   }
@@ -357,6 +365,42 @@ async function requestDeepSearchPlan(payload) {
     return {
       ok: false,
       error: error.message || "Deep Search planning request failed."
+    };
+  }
+}
+
+async function requestDeepSearchDigest(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "deep_search_digest_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_DIGEST_RESULT, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Deep Search digest request failed."
+    };
+  }
+}
+
+async function requestDeepSearchBatchSynthesis(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "deep_search_batch_synthesis_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_BATCH_SYNTHESIS_RESULT, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Deep Search batch synthesis request failed."
     };
   }
 }
