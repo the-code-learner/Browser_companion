@@ -15,12 +15,12 @@ import {
   upsertDeepSearchRunList,
   updateDeepSearchRun
 } from "../shared/deep-search.js";
-import L from "../../node_modules/leaflet/dist/leaflet-src.esm.js";
 
 const app = document.getElementById("app");
 const DEEP_SEARCH_GEOCODE_CACHE_KEY = "browserCompanionDeepSearchGeoCache";
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const NOMINATIM_DELAY_MS = 1100;
+let leafletModulePromise = null;
 const state = {
   runId: new URLSearchParams(window.location.search).get("run") || "",
   run: null,
@@ -1085,7 +1085,7 @@ async function hydrateMaps() {
     if (state.mapHydrationToken !== token) {
       return;
     }
-    mountLeafletMap(container, hydratedEntry);
+    await mountLeafletMap(container, hydratedEntry);
     container.dataset.hydrated = token;
   }
 }
@@ -1200,10 +1200,16 @@ async function saveGeocodeCache(cache) {
   });
 }
 
-function mountLeafletMap(container, entry) {
+async function mountLeafletMap(container, entry) {
   container.innerHTML = "";
   if (!entry.points.length) {
     container.innerHTML = `<p class="muted">No geocoded points were available for this map.</p>`;
+    return;
+  }
+
+  const L = await loadLeaflet().catch(() => null);
+  if (!L) {
+    container.innerHTML = `<p class="muted">Map rendering could not start because Leaflet did not load correctly.</p>`;
     return;
   }
 
@@ -1253,6 +1259,14 @@ function mountLeafletMap(container, entry) {
 
 function wait(durationMs) {
   return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+function loadLeaflet() {
+  if (!leafletModulePromise) {
+    leafletModulePromise = import("../../node_modules/leaflet/dist/leaflet-src.esm.js")
+      .then((module) => module && typeof module === "object" ? module : null);
+  }
+  return leafletModulePromise;
 }
 
 function extractFetchedPageMetadata(payload = {}, candidate = {}) {
