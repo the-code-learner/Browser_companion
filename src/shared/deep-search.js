@@ -26,6 +26,11 @@ export function createDeepSearchRun(payload = {}) {
     originTabId: normalizeOptionalNumber(payload.originTabId),
     responseLanguage: compact(payload.responseLanguage || ""),
     userMessageLog: compact(payload.userMessageLog || ""),
+    parentRunId: compact(payload.parentRunId || ""),
+    followUpInstruction: compact(payload.followUpInstruction || ""),
+    followUpRuns: Array.isArray(payload.followUpRuns) ? payload.followUpRuns : [],
+    reviewNotes: Array.isArray(payload.reviewNotes) ? payload.reviewNotes : [],
+    threadMessages: Array.isArray(payload.threadMessages) ? payload.threadMessages : [],
     seedContext: {
       page: summarizeObservationForDeepSearch(payload.observation, payload.page || {}),
       runtimeContext: compact(payload.runtimeContext || "")
@@ -66,6 +71,11 @@ export function normalizeDeepSearchRun(run = {}) {
     originTabId: normalizeOptionalNumber(run.originTabId),
     responseLanguage: compact(run.responseLanguage || ""),
     userMessageLog: compact(run.userMessageLog || ""),
+    parentRunId: compact(run.parentRunId || ""),
+    followUpInstruction: compact(run.followUpInstruction || ""),
+    followUpRuns: normalizeStringList(run.followUpRuns || [], 20),
+    reviewNotes: normalizeStringList(run.reviewNotes || [], 20),
+    threadMessages: normalizeThreadMessages(run.threadMessages || []),
     seedContext: {
       page: summarizeObservationForDeepSearch(run.seedContext?.page, run.seedContext?.page || {}),
       runtimeContext: compact(run.seedContext?.runtimeContext || "")
@@ -369,6 +379,21 @@ export function buildFallbackDeepSearchReport(run = {}) {
       statusCode: source.statusCode
     }))
   });
+}
+
+export function normalizeThreadMessages(messages = []) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages.slice(0, 80).map((message, index) => ({
+    id: compact(message?.id || `thread-${index}`),
+    role: message?.role === "assistant" ? "assistant" : "user",
+    mode: message?.mode === "refine" ? "refine" : "ask",
+    text: sanitizePreviewText(message?.text || ""),
+    createdAt: normalizeIsoString(message?.createdAt) || new Date().toISOString(),
+    status: compact(message?.status || "")
+  }));
 }
 
 export function compact(value) {

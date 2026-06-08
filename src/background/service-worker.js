@@ -106,6 +106,10 @@ async function handleMessage(message) {
     return requestDeepSearchReport(message.payload);
   }
 
+  if (message?.type === MESSAGE_TYPES.DEEP_SEARCH_CHAT_REQUEST) {
+    return requestDeepSearchChat(message.payload);
+  }
+
   if (message?.type === MESSAGE_TYPES.STOP_ACTIVE_REQUEST) {
     return stopActiveProviderRequest();
   }
@@ -371,6 +375,24 @@ async function requestDeepSearchReport(payload) {
     return {
       ok: false,
       error: error.message || "Deep Search report request failed."
+    };
+  }
+}
+
+async function requestDeepSearchChat(payload) {
+  try {
+    const response = await sendNativeMessage({
+      type: "deep_search_chat_request",
+      payload
+    });
+    return {
+      ok: true,
+      envelope: makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_CHAT_RESULT, response)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Deep Search chat request failed."
     };
   }
 }

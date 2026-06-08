@@ -22,7 +22,10 @@ const state = {
   run: null,
   loading: true,
   orchestrationStarted: false,
-  error: ""
+  error: "",
+  threadDraft: "",
+  threadMode: "ask",
+  threadBusy: false
 };
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -39,6 +42,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   state.run = matched;
   render();
+  bindThreadControls();
 });
 
 boot().catch((error) => {
@@ -60,6 +64,7 @@ async function boot() {
   state.run = run;
   state.loading = false;
   render();
+  bindThreadControls();
 
   if (run.status === "queued" && !state.orchestrationStarted) {
     state.orchestrationStarted = true;
@@ -70,6 +75,7 @@ async function boot() {
 async function orchestrateRun() {
   let run = state.run;
   const userMemory = await loadUserMemory();
+  const parentRun = run.parentRunId ? await loadRun(run.parentRunId) : null;
   const loggedGoal = run.userMessageLog || prefixUserMessageWithTimestamp(run.goal, run.createdAt || Date.now(), {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   });
@@ -87,6 +93,11 @@ async function orchestrateRun() {
     provider: run.providerSnapshot?.id || run.provider,
     model: run.providerSnapshot?.model || run.model,
     httpProvider: run.providerSnapshot?.httpProvider || null,
+    followUpInstruction: run.followUpInstruction || "",
+    reviewNotes: run.reviewNotes || [],
+    priorReport: parentRun?.finalReport || null,
+    priorSearchArtifacts: parentRun?.searchArtifacts || [],
+    priorFetchedSources: parentRun?.fetchedSources || [],
     seedPageContext: run.seedContext?.page || null,
     userMemory
   }));
@@ -350,6 +361,7 @@ async function saveRun(run) {
   });
   state.run = nextRun;
   render();
+  bindThreadControls();
   return nextRun;
 }
 
@@ -439,6 +451,32 @@ function render() {
               `).join("") : `<p class="muted">No fetched sources yet.</p>`}
             </div>
           </article>
+
+          <article class="panel thread-panel">
+            <div class="thread-header">
+              <div>
+                <h2>Ask About This Research</h2>
+                <p class="muted">Use Ask to navigate the existing findings. Use Refine to point out errors and launch a linked rerun.</p>
+              </div>
+              ${renderRunLineage(run)}
+            </div>
+            <div class="thread-mode-switch" role="tablist" aria-label="Research thread mode">
+              <button type="button" class="thread-mode${state.threadMode === "ask" ? " active" : ""}" data-thread-mode="ask" aria-pressed="${state.threadMode === "ask" ? "true" : "false"}">Ask</button>
+              <button type="button" class="thread-mode${state.threadMode === "refine" ? " active" : ""}" data-thread-mode="refine" aria-pressed="${state.threadMode === "refine" ? "true" : "false"}">Refine</button>
+            </div>
+            <div class="thread-messages">
+              ${renderThreadMessages(run)}
+            </div>
+            <form id="thread-form" class="thread-form">
+              <textarea id="thread-input" rows="3" placeholder="${escapeAttribute(state.threadMode === "ask"
+                ? "Ask about these results, request a narrower view, or ask what seems weak."
+                : "Tell Browser Companion what it missed, what was wrong, or how the next Deep Search should change.")}">${escapeHtml(state.threadDraft)}</textarea>
+              <div class="thread-actions">
+                <span class="muted">${escapeHtml(state.threadMode === "ask" ? "No new search. Uses the current Deep Search results." : "Creates a linked Deep Search rerun from this report.")}</span>
+                <button type="submit" class="thread-submit" ${state.threadBusy ? "disabled" : ""}>${escapeHtml(state.threadBusy ? "Working..." : (state.threadMode === "ask" ? "Ask" : "Run Refined Search"))}</button>
+              </div>
+            </form>
+          </article>
         </div>
 
         <aside class="stack">
@@ -467,6 +505,207 @@ function render() {
       </section>
     </section>
   `;
+}
+
+function bindThreadControls() {
+  const form = document.getElementById("thread-form");
+  const input = document.getElementById("thread-input");
+  if (form) {
+    form.addEventListener("submit", handleThreadSubmit);
+  }
+  if (input) {
+    input.addEventListener("input", (event) => {
+      state.threadDraft = event.target.value;
+    });
+  }
+  document.querySelectorAll("[data-thread-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.threadMode = button.dataset.threadMode === "refine" ? "refine" : "ask";
+      render();
+      bindThreadControls();
+    });
+  });
+}
+
+async function handleThreadSubmit(event) {
+  event.preventDefault();
+  const text = String(state.threadDraft || "").trim();
+  if (!text || state.threadBusy || !state.run) {
+    return;
+  }
+
+  state.threadBusy = true;
+  const createdAt = new Date().toISOString();
+  const userMessage = {
+    id: crypto.randomUUID(),
+    role: "user",
+    mode: state.threadMode,
+    text,
+    createdAt,
+    status: "sent"
+  };
+
+  let run = await saveRun(updateDeepSearchRun(state.run, {
+    threadMessages: [...(state.run.threadMessages || []), userMessage]
+  }));
+  state.threadDraft = "";
+
+  try {
+    if (state.threadMode === "refine") {
+      await launchRefinedRun(run, userMessage);
+      return;
+    }
+
+    const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.DEEP_SEARCH_CHAT_REQUEST, {
+      goal: prefixUserMessageWithTimestamp(text, createdAt, {
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+      }),
+      originalGoal: run.userMessageLog || run.goal,
+      responseLanguage: run.responseLanguage || "same language as the user",
+      provider: run.providerSnapshot?.id || run.provider,
+      model: run.providerSnapshot?.model || run.model,
+      httpProvider: run.providerSnapshot?.httpProvider || null,
+      runStatus: run.status,
+      report: run.finalReport || buildFallbackDeepSearchReport(run),
+      fetchedSources: run.fetchedSources,
+      searchArtifacts: run.searchArtifacts,
+      threadMessages: toProviderThreadMessages(run.threadMessages || [])
+    }));
+
+    const assistantMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      mode: "ask",
+      text: response.ok && response.envelope?.payload?.status === "ok"
+        ? response.envelope.payload.text || "No answer returned."
+        : (response.error || response.envelope?.payload?.message || "Deep Search follow-up failed."),
+      createdAt: new Date().toISOString(),
+      status: response.ok ? "sent" : "error"
+    };
+
+    run = await saveRun(updateDeepSearchRun(run, {
+      threadMessages: [...(run.threadMessages || []), assistantMessage]
+    }));
+  } finally {
+    state.threadBusy = false;
+    render();
+    bindThreadControls();
+  }
+}
+
+async function launchRefinedRun(parentRun, feedbackMessage) {
+  const feedbackText = prefixUserMessageWithTimestamp(feedbackMessage.text, feedbackMessage.createdAt, {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  });
+  const childRun = normalizeDeepSearchRun({
+    ...createChildRunFromParent(parentRun, feedbackText),
+    threadMessages: [
+      ...(parentRun.threadMessages || []),
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        mode: "refine",
+        text: "Started a refined Deep Search run from the previous report and your feedback.",
+        createdAt: new Date().toISOString(),
+        status: "sent"
+      }
+    ]
+  });
+  const updatedParent = updateDeepSearchRun(parentRun, {
+    followUpRuns: [...new Set([...(parentRun.followUpRuns || []), childRun.id])],
+    reviewNotes: [...(parentRun.reviewNotes || []), feedbackText]
+  });
+
+  await persistRunPair(updatedParent, childRun);
+  window.location.assign(`./index.html?run=${encodeURIComponent(childRun.id)}`);
+}
+
+function createChildRunFromParent(parentRun, feedbackText) {
+  return {
+    goal: parentRun.goal,
+    provider: parentRun.provider,
+    providerLabel: parentRun.providerLabel,
+    model: parentRun.model,
+    providerSnapshot: parentRun.providerSnapshot,
+    windowId: parentRun.windowId,
+    originTabId: parentRun.originTabId,
+    responseLanguage: parentRun.responseLanguage,
+    userMessageLog: parentRun.userMessageLog,
+    seedContext: parentRun.seedContext,
+    parentRunId: parentRun.id,
+    followUpInstruction: feedbackText,
+    reviewNotes: [...(parentRun.reviewNotes || []), feedbackText],
+    threadMessages: parentRun.threadMessages || []
+  };
+}
+
+async function persistRunPair(firstRun, secondRun) {
+  const stored = await chrome.storage.local.get([DEEP_SEARCH_STORAGE_KEY]);
+  let runs = Array.isArray(stored[DEEP_SEARCH_STORAGE_KEY])
+    ? stored[DEEP_SEARCH_STORAGE_KEY].map((item) => normalizeDeepSearchRun(item))
+    : [];
+  runs = upsertDeepSearchRunList(runs, firstRun);
+  runs = upsertDeepSearchRunList(runs, secondRun);
+  await chrome.storage.local.set({
+    [DEEP_SEARCH_STORAGE_KEY]: runs
+  });
+}
+
+function renderThreadMessages(run) {
+  const messages = Array.isArray(run.threadMessages) ? run.threadMessages : [];
+  if (!messages.length) {
+    return `<p class="muted">No local research thread yet. Ask something about the results or launch a refined rerun from here.</p>`;
+  }
+
+  return messages.map((message) => `
+    <article class="thread-message ${message.role === "assistant" ? "assistant" : "user"}">
+      <header>
+        <strong>${escapeHtml(message.role === "assistant" ? "Companion" : (message.mode === "refine" ? "Refine request" : "Question"))}</strong>
+        <span>${escapeHtml(formatThreadTimestamp(message.createdAt))}</span>
+      </header>
+      <p>${escapeHtml(message.text || "")}</p>
+    </article>
+  `).join("");
+}
+
+function renderRunLineage(run) {
+  const bits = [];
+  if (run.parentRunId) {
+    bits.push(`<a class="lineage-link" href="./index.html?run=${encodeURIComponent(run.parentRunId)}">Parent run</a>`);
+  }
+  if (Array.isArray(run.followUpRuns) && run.followUpRuns.length) {
+    bits.push(...run.followUpRuns.slice(-3).map((id, index) => `<a class="lineage-link" href="./index.html?run=${encodeURIComponent(id)}">Refined ${index + 1}</a>`));
+  }
+  if (!bits.length) {
+    return "";
+  }
+  return `<div class="lineage-links">${bits.join("")}</div>`;
+}
+
+function toProviderThreadMessages(messages = []) {
+  return (Array.isArray(messages) ? messages : []).slice(-16).map((message) => ({
+    role: message.role === "assistant" ? "assistant" : "user",
+    text: message.role === "assistant"
+      ? String(message.text || "")
+      : prefixUserMessageWithTimestamp(message.text || "", message.createdAt, {
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+      }),
+    createdAt: message.createdAt || ""
+  }));
+}
+
+function formatThreadTimestamp(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+  return parsed.toLocaleString([], {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function buildMethodologyFallback(run) {

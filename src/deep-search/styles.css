@@ -263,6 +263,116 @@ a {
   color: var(--accent);
 }
 
+.thread-panel {
+  gap: 14px;
+}
+
+.thread-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lineage-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.lineage-link,
+.thread-mode {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.lineage-link:hover,
+.thread-mode:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.thread-mode-switch {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.thread-mode.active {
+  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.thread-messages {
+  display: grid;
+  gap: 10px;
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.thread-message {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--panel-soft);
+}
+
+.thread-message header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.thread-message.user {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.thread-form {
+  display: grid;
+  gap: 10px;
+}
+
+.thread-form textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--ink);
+  background: var(--panel-soft);
+  font: inherit;
+}
+
+.thread-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.thread-submit {
+  min-height: 34px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #fff;
+  background: var(--accent);
+  font-weight: 700;
+}
+
 .error-callout {
   border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   border-radius: 8px;

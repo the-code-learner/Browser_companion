@@ -207,6 +207,29 @@ function handleMessage(message) {
     return;
   }
 
+  if (message?.type === "deep_search_chat_request") {
+    const controller = new AbortController();
+    if (requestId) {
+      activeRequestControllers.set(requestId, controller);
+    }
+    Promise.resolve(runDeepSearchChatRequest(message.payload, {
+      abortSignal: controller.signal,
+      requestId
+    }))
+      .then((response) => writeResponse(requestId, response))
+      .catch((error) => writeResponse(requestId, {
+        type: "deep_search_chat_result",
+        status: "error",
+        message: error.message || "Deep Search chat failed."
+      }))
+      .finally(() => {
+        if (requestId) {
+          activeRequestControllers.delete(requestId);
+        }
+      });
+    return;
+  }
+
   if (message?.type === "stop_active_request") {
     const targetRequestId = String(message.payload?.targetRequestId || "");
     const controller = targetRequestId ? activeRequestControllers.get(targetRequestId) : null;
@@ -1893,6 +1916,104 @@ async function runDeepSearchReportRequest(payload = {}, options = {}) {
   };
 }
 
+async function runDeepSearchChatRequest(payload = {}, options = {}) {
+  const prompt = buildDeepSearchChatPrompt(payload);
+
+  if (payload.httpProvider) {
+    try {
+      const { text } = await runHttpProviderCompletion(payload.httpProvider, prompt, false, options);
+      return {
+        type: "deep_search_chat_result",
+        status: "ok",
+        text: compactProviderOutput(text)
+      };
+    } catch (error) {
+      return {
+        type: "deep_search_chat_result",
+        status: "error",
+        message: error.message || "HTTP provider Deep Search chat failed."
+      };
+    }
+  }
+
+  const provider = getProviderDefinition(payload.provider || payload.providerId || "openai-codex");
+  if (provider.id !== "openai-codex") {
+    const status = getProviderStatus(provider);
+    if (!status.installed) {
+      return {
+        type: "deep_search_chat_result",
+        status: "error",
+        message: `${provider.label} is not installed.`
+      };
+    }
+
+    const result = await runProviderPromptWithModelFallback(provider, prompt, payload.model, false, options);
+    if (result.error || result.status !== 0) {
+      noteProviderFailure(provider, result);
+      return {
+        type: "deep_search_chat_result",
+        status: "error",
+        message: summarizeProviderFailure(provider, result)
+      };
+    }
+
+    noteProviderSuccess(provider.id);
+    return {
+      type: "deep_search_chat_result",
+      status: "ok",
+      text: compactProviderOutput(result.stdout || result.stderr || "")
+    };
+  }
+
+  const health = getHealth();
+  const codexStatus = health.providers.find((item) => item.id === "openai-codex");
+  if (!codexStatus?.connected) {
+    return {
+      type: "deep_search_chat_result",
+      status: "error",
+      message: codexStatus?.message || "Codex is not connected."
+    };
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-deep-search-chat-"));
+  const outputPath = path.join(tempDir, "deep-search-chat.txt");
+  const result = runCodex([
+    "exec",
+    "--model",
+    normalizeModel(payload.model),
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "--output-last-message",
+    outputPath,
+    "-"
+  ], {
+    input: prompt,
+    timeout: 120000
+  });
+
+  if (result.error || result.status !== 0) {
+    noteProviderFailure(providerDefinitions["openai-codex"], result);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    return {
+      type: "deep_search_chat_result",
+      status: "error",
+      message: summarizeCodexFailure(result)
+    };
+  }
+
+  try {
+    noteProviderSuccess("openai-codex");
+    return {
+      type: "deep_search_chat_result",
+      status: "ok",
+      text: compact(fs.readFileSync(outputPath, "utf8").trim())
+    };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function runStructuredProviderJsonRequest(payload = {}, prompt, options = {}) {
   if (payload.httpProvider) {
     try {
@@ -3306,6 +3427,21 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     "Seed page context JSON:",
     JSON.stringify(seedPage || null, null, 2),
     "",
+    "Follow-up refinement instruction:",
+    payload.followUpInstruction || "",
+    "",
+    "Review notes JSON:",
+    JSON.stringify(payload.reviewNotes || [], null, 2),
+    "",
+    "Prior report JSON:",
+    JSON.stringify(payload.priorReport || null, null, 2),
+    "",
+    "Prior search trail JSON:",
+    JSON.stringify(payload.priorSearchArtifacts || [], null, 2),
+    "",
+    "Prior fetched sources JSON:",
+    JSON.stringify(payload.priorFetchedSources || [], null, 2),
+    "",
     "Local user memory JSON:",
     JSON.stringify(payload.userMemory || [], null, 2),
     "",
@@ -3379,6 +3515,41 @@ function buildDeepSearchReportPrompt(payload = {}) {
     JSON.stringify(payload.userMemory || [], null, 2),
     "",
     "Return only valid JSON."
+  ].join("\n");
+}
+
+function buildDeepSearchChatPrompt(payload = {}) {
+  return [
+    "Task: Answer a follow-up user message about an existing Browser Companion Deep Search run.",
+    "Do not return JSON.",
+    "Answer directly, using the collected report, sources, search trail, and thread context.",
+    "If the user is criticizing mistakes or gaps, acknowledge them plainly and use the evidence you have.",
+    "If the user asks for a narrower slice of the existing results, reorganize the current material instead of pretending you ran new research.",
+    "If the user asks for something the current evidence cannot support, say what is missing and suggest a refinement.",
+    "",
+    "Original Deep Search goal:",
+    payload.originalGoal || "",
+    "",
+    "Current follow-up user message:",
+    payload.goal || "",
+    "",
+    "Response language:",
+    payload.responseLanguage || "same language as the user",
+    "",
+    "Deep Search status:",
+    payload.runStatus || "",
+    "",
+    "Deep Search report JSON:",
+    JSON.stringify(payload.report || null, null, 2),
+    "",
+    "Deep Search fetched sources JSON:",
+    JSON.stringify(payload.fetchedSources || [], null, 2),
+    "",
+    "Deep Search search trail JSON:",
+    JSON.stringify(payload.searchArtifacts || [], null, 2),
+    "",
+    "Deep Search thread messages JSON:",
+    JSON.stringify(payload.threadMessages || [], null, 2)
   ].join("\n");
 }
 

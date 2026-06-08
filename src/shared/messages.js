@@ -21,6 +21,8 @@ export const MESSAGE_TYPES = Object.freeze({
   DEEP_SEARCH_PLAN_RESULT: "deep_search_plan_result",
   DEEP_SEARCH_REPORT_REQUEST: "deep_search_report_request",
   DEEP_SEARCH_REPORT_RESULT: "deep_search_report_result",
+  DEEP_SEARCH_CHAT_REQUEST: "deep_search_chat_request",
+  DEEP_SEARCH_CHAT_RESULT: "deep_search_chat_result",
   STOP_ACTIVE_REQUEST: "stop_active_request",
   PROVIDER_PROGRESS: "provider_progress",
   AGENT_RESPONSE: "agent_response",
