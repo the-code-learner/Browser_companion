@@ -2,6 +2,7 @@ import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
 import { prefixUserMessageWithTimestamp } from "../shared/runtime-log.js";
 import {
   chunkItems,
+  createDeepSearchRun,
   DEEP_SEARCH_FETCH_LIMIT,
   DEEP_SEARCH_BATCH_SYNTHESIS_DIGEST_LIMIT,
   DEEP_SEARCH_DIGEST_BATCH_SIZE,
@@ -1679,7 +1680,7 @@ async function launchRefinedRun(parentRun, feedbackMessage) {
   const feedbackText = prefixUserMessageWithTimestamp(feedbackMessage.text, feedbackMessage.createdAt, {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   });
-  const childRun = normalizeDeepSearchRun({
+  const childRun = normalizeDeepSearchRun(createDeepSearchRun({
     ...createChildRunFromParent(parentRun, feedbackText),
     threadMessages: [
       ...(parentRun.threadMessages || []),
@@ -1692,7 +1693,7 @@ async function launchRefinedRun(parentRun, feedbackMessage) {
         status: "sent"
       }
     ]
-  });
+  }));
   const updatedParent = updateDeepSearchRun(parentRun, {
     followUpRuns: [...new Set([...(parentRun.followUpRuns || []), childRun.id])],
     reviewNotes: [...(parentRun.reviewNotes || []), feedbackText]
