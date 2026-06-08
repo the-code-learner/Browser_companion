@@ -1,11 +1,11 @@
 export const DEEP_SEARCH_STORAGE_KEY = "browserCompanionDeepSearchRuns";
 export const DEEP_SEARCH_RUN_LIMIT = 10;
-export const DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT = 10;
-export const DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT = 5;
-export const DEEP_SEARCH_REFINEMENT_ROUND_LIMIT = 2;
-export const DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT = 8;
-export const DEEP_SEARCH_FETCH_LIMIT = 24;
-export const DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT = 3;
+export const DEEP_SEARCH_FIRST_WAVE_QUERY_LIMIT = 16;
+export const DEEP_SEARCH_SECOND_WAVE_QUERY_LIMIT = 8;
+export const DEEP_SEARCH_REFINEMENT_ROUND_LIMIT = 3;
+export const DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT = 16;
+export const DEEP_SEARCH_FETCH_LIMIT = 40;
+export const DEEP_SEARCH_FETCHES_PER_DOMAIN_LIMIT = 5;
 
 export function createDeepSearchRun(payload = {}) {
   const now = new Date().toISOString();

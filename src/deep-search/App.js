@@ -308,7 +308,7 @@ async function collectWave(run, queries = [], options = {}) {
         status: payload.status,
         statusCode: payload.statusCode,
         snippet: candidate.snippet,
-        bodyPreview: String(payload.bodyPreview || "").slice(0, 8000),
+        bodyPreview: String(payload.bodyPreview || "").slice(0, 16000),
         fetchedAt: new Date().toISOString(),
         query: candidate.query,
         siteName: metadata.siteName,

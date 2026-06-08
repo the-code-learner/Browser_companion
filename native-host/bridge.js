@@ -472,7 +472,7 @@ async function runHttpRequest(payload = {}) {
 
 async function runWebSearch(payload = {}) {
   const query = compact(payload.query || payload.value);
-  const limit = Math.min(Math.max(Number(payload.limit || 8), 1), 10);
+  const limit = Math.min(Math.max(Number(payload.limit || 8), 1), 16);
 
   if (!query) {
     throw new Error("Web search query is missing.");
@@ -3399,7 +3399,7 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     "Task: Plan a web-first Deep Search run for Browser Companion.",
     "Return only one JSON object. Do not wrap it in Markdown.",
     "Do not return browser actions. Do not ask the user for confirmation. Do not write a prose strategy summary.",
-    'JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to 10 focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}',
+    'JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to 16 focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}',
     "",
     "Planning rules:",
     "- Web-first research only.",
@@ -3419,11 +3419,11 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     payload.responseLanguage || "same language as the user",
     "",
     "Fixed Deep Search caps:",
-    "- Initial queries max: 10",
-    "- Search results retained per query max: 8",
-    "- Total fetched pages max: 24",
-    "- Optional refinement queries per round max: 5",
-    "- Optional refinement rounds max: 2",
+    "- Initial queries max: 16",
+    "- Search results retained per query max: 16",
+    "- Total fetched pages max: 40",
+    "- Optional refinement queries per round max: 8",
+    "- Optional refinement rounds max: 3",
     "",
     "Seed page context JSON:",
     JSON.stringify(seedPage || null, null, 2),
@@ -3454,7 +3454,7 @@ function buildDeepSearchRefinementPrompt(payload = {}) {
   return [
     "Task: Review the first-wave Deep Search evidence and decide whether a second wave is necessary.",
     "Return only one JSON object. Do not wrap it in Markdown.",
-    'JSON shape: {"additional_queries":["up to 5 queries"],"rationale":"short reason","stop_early":false}',
+    'JSON shape: {"additional_queries":["up to 8 queries"],"rationale":"short reason","stop_early":false}',
     "",
     "User goal:",
     payload.goal || "",
@@ -3473,7 +3473,7 @@ function buildDeepSearchRefinementPrompt(payload = {}) {
     "",
     "Rules:",
     "- Use stop_early=true when the current evidence is already sufficient for a strong final report.",
-    "- If more research is needed, propose the highest-value follow-up queries that expand source coverage, quality, or specificity.",
+    "- If more research is needed, propose the highest-value follow-up queries that expand source coverage, quality, specificity, and domain diversity.",
     "- Prefer follow-up queries that add new organizations, new domains, new evidence classes, or tighter constraints.",
     "- Do not repeat the same query phrasing unless a genuinely tighter variant is needed.",
     "",
@@ -3562,7 +3562,7 @@ function normalizeDeepSearchPlanningResponse(value = {}) {
   return {
     title: compact(value?.title || ""),
     objective: compact(value?.objective || ""),
-    search_queries: normalizeStructuredStringList(value?.search_queries || [], 10),
+    search_queries: normalizeStructuredStringList(value?.search_queries || [], 16),
     desired_sections: normalizeStructuredStringList(value?.desired_sections || [], 18),
     evaluation_focus: normalizeStructuredStringList(value?.evaluation_focus || [], 18),
     constraints: normalizeStructuredStringList(value?.constraints || [], 20),
@@ -3572,7 +3572,7 @@ function normalizeDeepSearchPlanningResponse(value = {}) {
 
 function normalizeDeepSearchRefinementResponse(value = {}) {
   return {
-    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 5),
+    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 8),
     rationale: compact(value?.rationale || ""),
     stop_early: Boolean(value?.stop_early)
   };
