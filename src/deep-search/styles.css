@@ -339,6 +339,49 @@ a {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
 }
 
+.thread-message-body {
+  display: grid;
+  gap: 8px;
+}
+
+.thread-message-body p,
+.thread-message-body ul,
+.thread-message-body ol,
+.thread-message-body pre {
+  margin: 0;
+}
+
+.thread-message-body ul,
+.thread-message-body ol {
+  padding-left: 18px;
+}
+
+.thread-message-body a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.thread-message-body code {
+  border-radius: 6px;
+  padding: 1px 5px;
+  background: color-mix(in srgb, var(--panel) 70%, var(--line));
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.thread-message-body pre {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel) 70%, var(--line));
+}
+
+.thread-message-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
 .thread-form {
   display: grid;
   gap: 10px;

@@ -517,6 +517,13 @@ function bindThreadControls() {
     input.addEventListener("input", (event) => {
       state.threadDraft = event.target.value;
     });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      form?.requestSubmit();
+    });
   }
   document.querySelectorAll("[data-thread-mode]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -535,6 +542,9 @@ async function handleThreadSubmit(event) {
   }
 
   state.threadBusy = true;
+  state.threadDraft = "";
+  render();
+  bindThreadControls();
   const createdAt = new Date().toISOString();
   const userMessage = {
     id: crypto.randomUUID(),
@@ -548,7 +558,6 @@ async function handleThreadSubmit(event) {
   let run = await saveRun(updateDeepSearchRun(state.run, {
     threadMessages: [...(state.run.threadMessages || []), userMessage]
   }));
-  state.threadDraft = "";
 
   try {
     if (state.threadMode === "refine") {
@@ -663,7 +672,7 @@ function renderThreadMessages(run) {
         <strong>${escapeHtml(message.role === "assistant" ? "Companion" : (message.mode === "refine" ? "Refine request" : "Question"))}</strong>
         <span>${escapeHtml(formatThreadTimestamp(message.createdAt))}</span>
       </header>
-      <p>${escapeHtml(message.text || "")}</p>
+      <div class="thread-message-body">${renderRichText(message.text || "")}</div>
     </article>
   `).join("");
 }
@@ -706,6 +715,49 @@ function formatThreadTimestamp(value) {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function renderRichText(text) {
+  const raw = String(text || "");
+  return renderMarkdown(raw) || "<p></p>";
+}
+
+function renderMarkdown(text) {
+  const blocks = String(text || "").split(/\n{2,}/);
+
+  return blocks.map((block) => {
+    const trimmed = block.trim();
+    if (!trimmed) return "";
+
+    if (/^```/.test(trimmed)) {
+      return `<pre><code>${escapeHtml(trimmed.replace(/^```[a-z]*\n?/i, "").replace(/```$/i, ""))}</code></pre>`;
+    }
+
+    if (/^#{1,3}\s+/.test(trimmed)) {
+      const level = Math.min(trimmed.match(/^#+/)?.[0].length || 2, 3);
+      return `<h${level + 2}>${renderInlineMarkdown(trimmed.replace(/^#{1,3}\s+/, ""))}</h${level + 2}>`;
+    }
+
+    if (/^[-*]\s+/m.test(trimmed)) {
+      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^[-*]\s+/, ""))}</li>`).join("");
+      return `<ul>${items}</ul>`;
+    }
+
+    if (/^\d+\.\s+/m.test(trimmed)) {
+      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ""))}</li>`).join("");
+      return `<ol>${items}</ol>`;
+    }
+
+    return `<p>${renderInlineMarkdown(trimmed).replace(/\n/g, "<br>")}</p>`;
+  }).join("");
+}
+
+function renderInlineMarkdown(text) {
+  return escapeHtml(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
 
 function buildMethodologyFallback(run) {
