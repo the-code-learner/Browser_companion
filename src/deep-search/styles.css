@@ -219,6 +219,8 @@ a {
 .grid {
   display: grid;
   gap: 18px;
+  align-items: start;
+  align-content: start;
 }
 
 .two-up {
@@ -227,21 +229,26 @@ a {
 
 .findings-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
 }
 
 .main-grid {
   grid-template-columns: minmax(0, 1.5fr) minmax(300px, 0.9fr);
+  align-items: start;
 }
 
 .stack {
   display: grid;
   gap: 18px;
+  align-content: start;
+  align-items: start;
 }
 
 .panel,
 .finding-card {
   padding: 18px;
   align-content: start;
+  align-self: start;
 }
 
 .panel {
@@ -367,6 +374,8 @@ a {
 .trail-list {
   display: grid;
   gap: 10px;
+  align-content: start;
+  align-items: start;
 }
 
 .source-item,
@@ -494,6 +503,7 @@ a {
 .record-cards {
   display: none;
   gap: 12px;
+  align-content: start;
 }
 
 .record-card {
@@ -563,6 +573,8 @@ a {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+  align-items: start;
+  align-content: start;
 }
 
 .media-card,
@@ -625,6 +637,8 @@ a {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+  align-items: start;
+  align-content: start;
 }
 
 .map-point-card {
