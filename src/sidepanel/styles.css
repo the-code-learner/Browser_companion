@@ -413,13 +413,21 @@ h2 {
 .message-body figure,
 .message-body h3,
 .message-body h4,
-.message-body h5 {
+.message-body h5,
+.message-body blockquote,
+.message-body table {
   margin: 0;
 }
 
 .message-body ul,
 .message-body ol {
   padding-left: 20px;
+}
+
+.message-body blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 10px;
+  color: var(--muted);
 }
 
 .message-body code {
@@ -440,6 +448,28 @@ h2 {
 
 .message-body a {
   color: var(--accent);
+}
+
+.message-body .markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.message-body .markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.message-body .markdown-table th,
+.message-body .markdown-table td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.message-body .markdown-table th {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 86%, var(--ink) 14%);
 }
 
 .planner-draft-card {

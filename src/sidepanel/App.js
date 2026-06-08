@@ -1,4 +1,11 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
+import {
+  EXTERNAL_DEBUG_LOGS_KEY,
+  clearExternalDebugLogs,
+  mergeDebugLogs,
+  normalizeDebugLogs
+} from "../shared/debug-log.js";
+import { renderRichText } from "../shared/markdown.js";
 import { prefixUserMessageWithTimestamp } from "../shared/runtime-log.js";
 import {
   DEEP_SEARCH_STORAGE_KEY,
@@ -162,7 +169,8 @@ const state = {
   liveThinkingOpen: false,
   chatAtBottom: true,
   activity: [],
-  debugLogs: []
+  debugLogs: [],
+  externalDebugLogs: []
 };
 
 const app = document.getElementById("app");
@@ -214,6 +222,7 @@ async function initialize() {
   await refreshAccessibleTabsState();
   applyTheme();
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+  chrome.storage.onChanged.addListener(handleStorageChange);
   chrome.tabs.onRemoved.addListener(handleTabRemoved);
   render();
   checkConnector();
@@ -268,7 +277,7 @@ function render(options = {}) {
         ${renderSettingsButton("connector", "Connector")}
         ${renderSettingsButton("privacy", "Privacy")}
         ${renderSettingsButton("activity", `Activity ${state.activity.length}`)}
-        ${renderSettingsButton("logs", `Logs ${state.debugLogs.length}`)}
+        ${renderSettingsButton("logs", `Logs ${getAllDebugLogs().length}`)}
       </nav>
       <section class="settings-panel">
         ${renderSettingsPanel()}
@@ -1035,15 +1044,20 @@ function renderActivitySettings() {
 }
 
 function renderLogsSettings() {
+  const debugLogs = getAllDebugLogs();
   return `
     <div class="button-row">
       <button id="copy-logs" type="button">Copy Logs</button>
       <button id="clear-logs" type="button">Clear Logs</button>
     </div>
     <ol class="debug-log-list">
-      ${state.debugLogs.length ? state.debugLogs.map(renderDebugLog).join("") : "<li>No diagnostic logs yet.</li>"}
+      ${debugLogs.length ? debugLogs.map(renderDebugLog).join("") : "<li>No diagnostic logs yet.</li>"}
     </ol>
   `;
+}
+
+function getAllDebugLogs() {
+  return mergeDebugLogs(state.externalDebugLogs, state.debugLogs);
 }
 
 function renderDebugLog(entry) {
@@ -1353,7 +1367,7 @@ function renderMessageContent(message) {
   if (message.role === "assistant" && message.plannerDraft) {
     return renderPlannerDraftMessage(message);
   }
-  return `<div class="message-body">${renderRichText(message.text)}</div>`;
+  return `<div class="message-body">${renderRichText(message.text, { allowMermaid: true })}</div>`;
 }
 
 function renderPlannerDraftMessage(message) {
@@ -1401,7 +1415,7 @@ function renderMessageThinking(message) {
   return `
     <details class="action-note message-thinking" data-chat-persist-key="${escapeHtml(persistKey)}">
       <summary>Thinking</summary>
-      <div class="message-thinking-body">${renderRichText(message.thinking)}</div>
+      <div class="message-thinking-body">${renderRichText(message.thinking, { allowMermaid: true })}</div>
     </details>
   `;
 }
@@ -1470,80 +1484,6 @@ function renderLiveThinkingSummary(liveThinking) {
     ? `<span class="thinking-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>`
     : "";
   return `Thinking${dots}`;
-}
-
-function renderRichText(text) {
-  const raw = String(text || "");
-  const parts = raw.split(/```mermaid\s*([\s\S]*?)```/i);
-  let html = "";
-
-  for (let index = 0; index < parts.length; index += 1) {
-    if (index % 2 === 1) {
-      html += renderMermaidBlock(parts[index]);
-    } else {
-      html += renderMarkdown(parts[index]);
-    }
-  }
-
-  return html || "<p></p>";
-}
-
-function renderMarkdown(text) {
-  const blocks = normalizeMarkdownInput(text).split(/\n{2,}/);
-
-  return blocks.map((block) => {
-    const trimmed = block.trim();
-    if (!trimmed) return "";
-
-    if (/^```/.test(trimmed)) {
-      return `<pre><code>${escapeHtml(trimmed.replace(/^```[a-z]*\n?/i, "").replace(/```$/i, ""))}</code></pre>`;
-    }
-
-    if (/^#{1,3}\s+/.test(trimmed)) {
-      const level = Math.min(trimmed.match(/^#+/)?.[0].length || 2, 3);
-      return `<h${level + 2}>${renderInlineMarkdown(trimmed.replace(/^#{1,3}\s+/, ""))}</h${level + 2}>`;
-    }
-
-    if (/^[-*]\s+/m.test(trimmed)) {
-      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^[-*]\s+/, ""))}</li>`).join("");
-      return `<ul>${items}</ul>`;
-    }
-
-    if (/^\d+\.\s+/m.test(trimmed)) {
-      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ""))}</li>`).join("");
-      return `<ol>${items}</ol>`;
-    }
-
-    return `<p>${renderInlineMarkdown(trimmed).replace(/\n/g, "<br>")}</p>`;
-  }).join("");
-}
-
-function renderInlineMarkdown(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-}
-
-function normalizeMarkdownInput(text) {
-  return String(text || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/([^\n])\s+(#{1,6}\s+)/g, "$1\n\n$2")
-    .replace(/([^\n])\s+((?:[-*])\s+)/g, "$1\n$2")
-    .replace(/([^\n])\s+((?:\d{1,2}\.)\s+)/g, "$1\n$2")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function renderMermaidBlock(source) {
-  const diagram = encodeURIComponent(source.trim());
-  return `
-    <figure class="mermaid-block">
-      <img alt="Mermaid diagram" src="https://mermaid.ink/svg/${diagram}">
-      <figcaption>Mermaid diagram</figcaption>
-    </figure>
-  `;
 }
 
 function renderActionPreview() {
@@ -7624,14 +7564,16 @@ function redactLocalAndPrivateUrls(text) {
 }
 
 async function copyDebugLogs() {
-  await navigator.clipboard.writeText(JSON.stringify(state.debugLogs, null, 2));
+  await navigator.clipboard.writeText(JSON.stringify(getAllDebugLogs(), null, 2));
   state.activity.unshift("Diagnostic logs copied.");
   render();
 }
 
-function clearDebugLogs() {
+async function clearDebugLogs() {
   state.debugLogs = [];
+  state.externalDebugLogs = [];
   state.activity.unshift("Diagnostic logs cleared.");
+  await clearExternalDebugLogs();
   persistSession();
   render();
 }
@@ -9519,11 +9461,12 @@ function summarizeSearchArtifact(artifact) {
 }
 
 async function restoreSession() {
-  const stored = await chrome.storage.local.get(["browserCompanionSession", "browserCompanionTheme"]);
+  const stored = await chrome.storage.local.get(["browserCompanionSession", "browserCompanionTheme", EXTERNAL_DEBUG_LOGS_KEY]);
   const session = stored.browserCompanionSession;
   const selectedProvider = state.codex.provider;
   const selectedModel = state.codex.model;
   state.theme = stored.browserCompanionTheme || "system";
+  state.externalDebugLogs = normalizeDebugLogs(stored[EXTERNAL_DEBUG_LOGS_KEY] || []);
 
   if (!session?.privacy?.persistSession) {
     state.privacy.persistSession = true;
@@ -9546,7 +9489,7 @@ async function restoreSession() {
   state.taskMemory = normalizeTaskMemory(session.taskMemory);
   state.sessionApprovals = Array.isArray(session.sessionApprovals) ? session.sessionApprovals : [];
   state.activity = session.activity || [];
-  state.debugLogs = session.debugLogs || [];
+  state.debugLogs = normalizeDebugLogs(session.debugLogs || []);
   state.pendingMemoryProposal = session.pendingMemoryProposal || null;
 }
 
@@ -9584,6 +9527,29 @@ async function restoreProviderSettings() {
     ...(settings.selectedModel ? { model: settings.selectedModel } : {})
   };
   state.connector.providers = normalizeProviderStatuses(state.connector.providers);
+}
+
+function handleStorageChange(changes, area) {
+  if (area !== "local") {
+    return;
+  }
+
+  let shouldRender = false;
+
+  if (changes.browserCompanionSession) {
+    const nextSession = changes.browserCompanionSession.newValue || null;
+    state.debugLogs = normalizeDebugLogs(nextSession?.debugLogs || []);
+    shouldRender = true;
+  }
+
+  if (changes[EXTERNAL_DEBUG_LOGS_KEY]) {
+    state.externalDebugLogs = normalizeDebugLogs(changes[EXTERNAL_DEBUG_LOGS_KEY].newValue || []);
+    shouldRender = true;
+  }
+
+  if (shouldRender) {
+    render();
+  }
 }
 
 async function persistProviderSettings() {

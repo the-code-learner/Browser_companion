@@ -1,4 +1,6 @@
 import { MESSAGE_TYPES, makeEnvelope } from "../shared/messages.js";
+import { appendExternalDebugLog } from "../shared/debug-log.js";
+import { renderRichText } from "../shared/markdown.js";
 import { prefixUserMessageWithTimestamp } from "../shared/runtime-log.js";
 import {
   chunkItems,
@@ -63,6 +65,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
 boot().catch((error) => {
   state.loading = false;
   state.error = error.message || "Deep Search could not start.";
+  logDeepSearchEvent("boot.failed", {
+    runId: state.runId,
+    error: state.error
+  }, "Deep Search boot failed.").catch(() => {});
   render();
 });
 
@@ -78,6 +84,13 @@ async function boot() {
 
   state.run = run;
   state.loading = false;
+  await logDeepSearchEvent("boot.ready", {
+    runId: run.id,
+    status: run.status,
+    phase: run.phase,
+    windowId: run.windowId,
+    originTabId: run.originTabId
+  }, "Deep Search report tab loaded.");
   render();
   bindInteractiveControls();
 
@@ -89,6 +102,12 @@ async function boot() {
 
 async function orchestrateRun() {
   let run = state.run;
+  await logDeepSearchEvent("orchestration.start", {
+    runId: run.id,
+    goal: run.goal,
+    provider: run.providerSnapshot?.id || run.provider,
+    model: run.providerSnapshot?.model || run.model
+  }, "Deep Search orchestration started.");
   const userMemory = await loadUserMemory();
   const parentRun = run.parentRunId ? await loadRun(run.parentRunId) : null;
   const loggedGoal = run.userMessageLog || prefixUserMessageWithTimestamp(run.goal, run.createdAt || Date.now(), {
@@ -118,6 +137,10 @@ async function orchestrateRun() {
   }));
 
   if (!planResponse.ok || planResponse.envelope?.payload?.status !== "ok") {
+    await logDeepSearchEvent("planning.failed", {
+      runId: run.id,
+      error: planResponse.error || planResponse.envelope?.payload?.message || "Deep Search planning failed."
+    }, "Deep Search planning failed.");
     await failRun("planning", planResponse.error || planResponse.envelope?.payload?.message || "Deep Search planning failed.");
     return;
   }
@@ -133,6 +156,11 @@ async function orchestrateRun() {
     latestSummary: plan.objective || plan.title,
     notes: appendNote(run.notes, `Planned ${plan.search_queries.length} first-wave ${pluralize("query", plan.search_queries.length)}.`)
   }));
+  await logDeepSearchEvent("planning.completed", {
+    runId: run.id,
+    plannedQueries: plan.search_queries,
+    desiredSections: plan.desired_sections
+  }, `Planned ${plan.search_queries.length} first-wave queries.`);
 
   run = await collectWave(
     run,
@@ -252,6 +280,12 @@ async function orchestrateRun() {
 
   if (!reportResponse.ok || reportResponse.envelope?.payload?.status !== "ok") {
     const fallback = buildFallbackDeepSearchReport(run);
+    await logDeepSearchEvent("report.failed", {
+      runId: run.id,
+      sourceCount: run.fetchedSources.length,
+      digestCount: run.sourceDigests.length,
+      error: reportResponse.error || reportResponse.envelope?.payload?.message || "Final report synthesis failed."
+    }, "Deep Search final synthesis failed; using fallback report.");
     await saveRun(updateDeepSearchRun(run, {
       status: "failed_partial",
       phase: "failed_partial",
@@ -272,23 +306,46 @@ async function orchestrateRun() {
     finalReport: reportResponse.envelope.payload.report,
     notes: appendNote(run.notes, "Deep Search completed successfully.")
   }));
+  await logDeepSearchEvent("report.completed", {
+    runId: run.id,
+    sourceCount: run.fetchedSources.length,
+    digestCount: run.sourceDigests.length,
+    batchSummaryCount: run.batchSummaries.length
+  }, "Deep Search completed successfully.");
 }
 
 async function collectWave(run, queries = [], options = {}) {
   let nextRun = run;
   const waveLabel = String(options.waveLabel || "search wave");
+  await logDeepSearchEvent("wave.started", {
+    runId: nextRun.id,
+    waveLabel,
+    queryCount: queries.length,
+    queries
+  }, `Starting ${waveLabel} with ${queries.length} queries.`);
   nextRun = await saveRun(updateDeepSearchRun(nextRun, {
     phase: "searching",
     notes: appendNote(nextRun.notes, `Starting ${waveLabel} with ${queries.length} ${pluralize("query", queries.length)}.`)
   }));
 
   for (const query of queries) {
+    await logDeepSearchEvent("search.started", {
+      runId: nextRun.id,
+      waveLabel,
+      query
+    }, `Running web search for "${query}".`);
     const searchResponse = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.WEB_SEARCH, {
       query,
       limit: DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT
     }));
 
     if (!searchResponse.ok) {
+      await logDeepSearchEvent("search.failed", {
+        runId: nextRun.id,
+        waveLabel,
+        query,
+        error: searchResponse.error || "Unknown error"
+      }, `Search failed for "${query}".`);
       nextRun = await saveRun(updateDeepSearchRun(nextRun, {
         notes: appendNote(nextRun.notes, `Search failed for "${query}": ${searchResponse.error || "Unknown error"}.`)
       }));
@@ -311,6 +368,12 @@ async function collectWave(run, queries = [], options = {}) {
       latestSummary: payload.message || nextRun.latestSummary,
       notes: appendNote(nextRun.notes, `Collected ${payload.results?.length || 0} ${pluralize("result", payload.results?.length || 0)} for "${query}".`)
     }));
+    await logDeepSearchEvent("search.completed", {
+      runId: nextRun.id,
+      waveLabel,
+      query,
+      resultCount: payload.results?.length || 0
+    }, `Collected ${payload.results?.length || 0} results for "${query}".`);
   }
 
   const usedUrls = new Set(nextRun.fetchedSources.map((source) => source.url));
@@ -323,9 +386,19 @@ async function collectWave(run, queries = [], options = {}) {
     phase: "fetching",
     notes: appendNote(nextRun.notes, `${waveLabel} produced ${candidates.length} fetch candidate ${pluralize("page", candidates.length)} after dedupe.`)
   }));
+  await logDeepSearchEvent("fetch_queue.ready", {
+    runId: nextRun.id,
+    waveLabel,
+    candidateCount: candidates.length
+  }, `${waveLabel} produced ${candidates.length} fetch candidates after dedupe.`);
 
   for (const candidate of candidates) {
     if (nextRun.fetchedSources.length >= DEEP_SEARCH_FETCH_LIMIT) {
+      await logDeepSearchEvent("fetch_queue.capped", {
+        runId: nextRun.id,
+        fetchedSourceCount: nextRun.fetchedSources.length,
+        fetchLimit: DEEP_SEARCH_FETCH_LIMIT
+      }, "Reached the Deep Search fetch cap.");
       break;
     }
 
@@ -335,6 +408,12 @@ async function collectWave(run, queries = [], options = {}) {
     }));
 
     if (!fetchResponse.ok) {
+      await logDeepSearchEvent("fetch.failed", {
+        runId: nextRun.id,
+        url: candidate.url,
+        query: candidate.query,
+        error: fetchResponse.error || "Unknown error"
+      }, `Fetch failed for ${candidate.url}.`);
       nextRun = await saveRun(updateDeepSearchRun(nextRun, {
         notes: appendNote(nextRun.notes, `Fetch failed for ${candidate.url}: ${fetchResponse.error || "Unknown error"}.`)
       }));
@@ -370,6 +449,13 @@ async function collectWave(run, queries = [], options = {}) {
       latestSummary: `Fetched ${fetchedSources.length}/${DEEP_SEARCH_FETCH_LIMIT} sources so far across ${new Set(fetchedSources.map((source) => source.domain).filter(Boolean)).size} domains.`,
       notes: appendNote(nextRun.notes, `Fetched ${payload.statusCode || "?"} from ${candidate.url}.`)
     }));
+    await logDeepSearchEvent("fetch.completed", {
+      runId: nextRun.id,
+      url: payload.finalUrl || payload.url || candidate.url,
+      query: candidate.query,
+      statusCode: payload.statusCode,
+      fetchedSourceCount: fetchedSources.length
+    }, `Fetched ${payload.statusCode || "?"} from ${candidate.url}.`);
   }
 
   return nextRun;
@@ -379,6 +465,11 @@ async function buildSourceDigests(run, loggedGoal) {
   let nextRun = run;
   const batches = chunkItems(nextRun.fetchedSources, DEEP_SEARCH_DIGEST_BATCH_SIZE);
   const collectedDigests = [];
+  await logDeepSearchEvent("digesting.started", {
+    runId: nextRun.id,
+    batchCount: batches.length,
+    sourceCount: nextRun.fetchedSources.length
+  }, `Compressing ${nextRun.fetchedSources.length} fetched sources into digest batches.`);
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
     const batch = batches[batchIndex];
@@ -395,6 +486,11 @@ async function buildSourceDigests(run, loggedGoal) {
     }));
 
     if (!digestResponse.ok || digestResponse.envelope?.payload?.status !== "ok") {
+      await logDeepSearchEvent("digesting.failed", {
+        runId: nextRun.id,
+        batchIndex: batchIndex + 1,
+        error: digestResponse.error || digestResponse.envelope?.payload?.message || "Source digest compression failed."
+      }, `Digest batch ${batchIndex + 1}/${batches.length} failed.`);
       await failRun("digesting", digestResponse.error || digestResponse.envelope?.payload?.message || "Source digest compression failed.");
       return state.run;
     }
@@ -408,6 +504,13 @@ async function buildSourceDigests(run, loggedGoal) {
       latestSummary: `Compressed ${collectedDigests.length}/${nextRun.fetchedSources.length} fetched sources into source digests.`,
       notes: appendNote(nextRun.notes, `Compressed digest batch ${batchIndex + 1}/${batches.length} into ${digests.length} structured ${pluralize("digest", digests.length)}.`)
     }));
+    await logDeepSearchEvent("digesting.completed_batch", {
+      runId: nextRun.id,
+      batchIndex: batchIndex + 1,
+      batchCount: batches.length,
+      digestCount: digests.length,
+      totalDigests: collectedDigests.length
+    }, `Compressed digest batch ${batchIndex + 1}/${batches.length}.`);
   }
 
   return nextRun;
@@ -421,6 +524,11 @@ async function buildBatchSummaries(run, loggedGoal, selectedDigests = []) {
 
   const digestBatches = chunkItems(selectedDigests, DEEP_SEARCH_BATCH_SYNTHESIS_DIGEST_LIMIT);
   const summaries = [];
+  await logDeepSearchEvent("batch_synthesis.started", {
+    runId: nextRun.id,
+    batchCount: digestBatches.length,
+    digestCount: selectedDigests.length
+  }, `Preparing ${digestBatches.length} synthesis batches from ${selectedDigests.length} digests.`);
 
   for (let batchIndex = 0; batchIndex < digestBatches.length; batchIndex += 1) {
     const batch = digestBatches[batchIndex];
@@ -437,6 +545,11 @@ async function buildBatchSummaries(run, loggedGoal, selectedDigests = []) {
     }));
 
     if (!batchResponse.ok || batchResponse.envelope?.payload?.status !== "ok") {
+      await logDeepSearchEvent("batch_synthesis.failed", {
+        runId: nextRun.id,
+        batchIndex: batchIndex + 1,
+        error: batchResponse.error || batchResponse.envelope?.payload?.message || "Batch synthesis failed while preparing the final report."
+      }, `Batch synthesis ${batchIndex + 1}/${digestBatches.length} failed.`);
       await failRun("batch_synthesis", batchResponse.error || batchResponse.envelope?.payload?.message || "Batch synthesis failed while preparing the final report.");
       return state.run;
     }
@@ -451,6 +564,12 @@ async function buildBatchSummaries(run, loggedGoal, selectedDigests = []) {
       latestSummary: `Prepared ${summaries.length}/${digestBatches.length} batch ${pluralize("summary", summaries.length)} for the meta-synthesis.`,
       notes: appendNote(nextRun.notes, `Prepared batch synthesis ${batchIndex + 1}/${digestBatches.length}.`)
     }));
+    await logDeepSearchEvent("batch_synthesis.completed_batch", {
+      runId: nextRun.id,
+      batchIndex: batchIndex + 1,
+      batchCount: digestBatches.length,
+      summaryCount: summaries.length
+    }, `Prepared batch synthesis ${batchIndex + 1}/${digestBatches.length}.`);
   }
 
   return nextRun;
@@ -459,6 +578,11 @@ async function buildBatchSummaries(run, loggedGoal, selectedDigests = []) {
 async function failRun(phase, message) {
   const run = state.run;
   const fallback = buildFallbackDeepSearchReport(run);
+  await logDeepSearchEvent("run.failed_partial", {
+    runId: run?.id || state.runId,
+    phase,
+    error: message || "Deep Search failed."
+  }, `Deep Search entered partial-failure mode during ${phase}.`);
   await saveRun(updateDeepSearchRun(run, {
     status: "failed_partial",
     phase: "failed_partial",
@@ -510,6 +634,19 @@ function appendNote(notes = [], note) {
     return notes || [];
   }
   return [text, ...(Array.isArray(notes) ? notes : [])].slice(0, 24);
+}
+
+async function logDeepSearchEvent(event, data = {}, summary = "") {
+  try {
+    await appendExternalDebugLog(`deep_search.${event}`, {
+      runId: state.run?.id || state.runId,
+      status: state.run?.status || "",
+      phase: state.run?.phase || "",
+      ...data
+    }, summary);
+  } catch {
+    // Best-effort logging only.
+  }
 }
 
 function render() {
@@ -1630,6 +1767,11 @@ async function handleThreadSubmit(event) {
   let run = await saveRun(updateDeepSearchRun(state.run, {
     threadMessages: [...(state.run.threadMessages || []), userMessage]
   }));
+  await logDeepSearchEvent(`thread.${state.threadMode}.submitted`, {
+    runId: run.id,
+    messageId: userMessage.id,
+    text: userMessage.text
+  }, state.threadMode === "refine" ? "Submitted a refine request from the report tab." : "Submitted a Deep Search follow-up question.");
 
   try {
     if (state.threadMode === "refine") {
@@ -1669,6 +1811,12 @@ async function handleThreadSubmit(event) {
     run = await saveRun(updateDeepSearchRun(run, {
       threadMessages: [...(run.threadMessages || []), assistantMessage]
     }));
+    await logDeepSearchEvent(`thread.${state.threadMode}.completed`, {
+      runId: run.id,
+      messageId: assistantMessage.id,
+      status: assistantMessage.status,
+      text: assistantMessage.text
+    }, state.threadMode === "refine" ? "Refine request completed." : "Deep Search follow-up answer received.");
   } finally {
     state.threadBusy = false;
     render();
@@ -1700,6 +1848,11 @@ async function launchRefinedRun(parentRun, feedbackMessage) {
   });
 
   await persistRunPair(updatedParent, childRun);
+  await logDeepSearchEvent("thread.refine.launched_child", {
+    runId: parentRun.id,
+    childRunId: childRun.id,
+    feedback: feedbackMessage.text
+  }, "Started a refined Deep Search child run.");
   window.location.assign(`./index.html?run=${encodeURIComponent(childRun.id)}`);
 }
 
@@ -1789,59 +1942,6 @@ function formatThreadTimestamp(value) {
     hour: "2-digit",
     minute: "2-digit"
   });
-}
-
-function renderRichText(text) {
-  const raw = String(text || "");
-  return renderMarkdown(raw) || "<p></p>";
-}
-
-function renderMarkdown(text) {
-  const blocks = normalizeMarkdownInput(text).split(/\n{2,}/);
-
-  return blocks.map((block) => {
-    const trimmed = block.trim();
-    if (!trimmed) return "";
-
-    if (/^```/.test(trimmed)) {
-      return `<pre><code>${escapeHtml(trimmed.replace(/^```[a-z]*\n?/i, "").replace(/```$/i, ""))}</code></pre>`;
-    }
-
-    if (/^#{1,3}\s+/.test(trimmed)) {
-      const level = Math.min(trimmed.match(/^#+/)?.[0].length || 2, 3);
-      return `<h${level + 2}>${renderInlineMarkdown(trimmed.replace(/^#{1,3}\s+/, ""))}</h${level + 2}>`;
-    }
-
-    if (/^[-*]\s+/m.test(trimmed)) {
-      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^[-*]\s+/, ""))}</li>`).join("");
-      return `<ul>${items}</ul>`;
-    }
-
-    if (/^\d+\.\s+/m.test(trimmed)) {
-      const items = trimmed.split(/\n/).filter(Boolean).map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\.\s+/, ""))}</li>`).join("");
-      return `<ol>${items}</ol>`;
-    }
-
-    return `<p>${renderInlineMarkdown(trimmed).replace(/\n/g, "<br>")}</p>`;
-  }).join("");
-}
-
-function renderInlineMarkdown(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-}
-
-function normalizeMarkdownInput(text) {
-  return String(text || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/([^\n])\s+(#{1,6}\s+)/g, "$1\n\n$2")
-    .replace(/([^\n])\s+((?:[-*])\s+)/g, "$1\n$2")
-    .replace(/([^\n])\s+((?:\d{1,2}\.)\s+)/g, "$1\n$2")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 function buildMethodologyFallback(run) {

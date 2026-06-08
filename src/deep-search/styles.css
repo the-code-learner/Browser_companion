@@ -348,7 +348,12 @@ a {
 .rich-prose p,
 .rich-prose ul,
 .rich-prose ol,
-.rich-prose pre {
+.rich-prose pre,
+.rich-prose h3,
+.rich-prose h4,
+.rich-prose h5,
+.rich-prose blockquote,
+.rich-prose table {
   margin: 0;
 }
 
@@ -357,9 +362,37 @@ a {
   padding-left: 18px;
 }
 
+.rich-prose blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 10px;
+  color: var(--muted);
+}
+
 .rich-prose a {
   color: var(--accent);
   text-decoration: underline;
+}
+
+.rich-prose .markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.rich-prose .markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.rich-prose .markdown-table th,
+.rich-prose .markdown-table td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.rich-prose .markdown-table th {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 78%, var(--line));
 }
 
 .rich-prose code {
@@ -746,7 +779,12 @@ a {
 .thread-message-body p,
 .thread-message-body ul,
 .thread-message-body ol,
-.thread-message-body pre {
+.thread-message-body pre,
+.thread-message-body h3,
+.thread-message-body h4,
+.thread-message-body h5,
+.thread-message-body blockquote,
+.thread-message-body table {
   margin: 0;
 }
 
@@ -755,9 +793,37 @@ a {
   padding-left: 18px;
 }
 
+.thread-message-body blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 10px;
+  color: var(--muted);
+}
+
 .thread-message-body a {
   color: var(--accent);
   text-decoration: underline;
+}
+
+.thread-message-body .markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.thread-message-body .markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.thread-message-body .markdown-table th,
+.thread-message-body .markdown-table td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.thread-message-body .markdown-table th {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 78%, var(--line));
 }
 
 .thread-message-body code {
