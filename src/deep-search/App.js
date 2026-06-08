@@ -21,8 +21,9 @@ const DEEP_SEARCH_GEOCODE_CACHE_KEY = "browserCompanionDeepSearchGeoCache";
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const NOMINATIM_DELAY_MS = 1100;
 let leafletModulePromise = null;
+const initialParams = new URLSearchParams(window.location.search);
 const state = {
-  runId: new URLSearchParams(window.location.search).get("run") || "",
+  runId: initialParams.get("run") || "",
   run: null,
   loading: true,
   orchestrationStarted: false,
@@ -30,8 +31,9 @@ const state = {
   threadDraft: "",
   threadMode: "ask",
   threadBusy: false,
-  selectedView: "auto",
-  mapHydrationToken: ""
+  selectedView: normalizeViewMode(initialParams.get("view") || "auto"),
+  mapHydrationToken: "",
+  layoutMode: initialParams.get("layout") === "print" ? "print" : "default"
 };
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -421,6 +423,16 @@ function render() {
     viewOptions
   };
 
+  if (state.layoutMode === "print") {
+    app.innerHTML = renderPrintLayout({
+      run,
+      report,
+      documentView,
+      media
+    });
+    return;
+  }
+
   app.innerHTML = `
     <section class="report-shell">
       <header class="hero">
@@ -432,7 +444,7 @@ function render() {
         <div class="hero-meta">
           <div class="hero-status-row">
             <span class="status-chip status-${escapeHtml(run.status)}">${escapeHtml(formatStatusLabel(run.status))}</span>
-            ${report?.presentation?.print_ready ? `<button type="button" class="secondary-button" id="print-report-button">Print</button>` : ""}
+            ${report?.presentation?.print_ready ? `<button type="button" class="secondary-button" id="open-print-view-button">Open Print View</button>` : ""}
           </div>
           <dl class="meta-grid">
             <div><dt>Provider</dt><dd>${escapeHtml(run.providerLabel || run.providerSnapshot?.label || run.provider || "Unknown")}</dd></div>
@@ -465,7 +477,6 @@ function render() {
           ${viewOptions.includes("hybrid") ? renderViewButton("hybrid", "Hybrid") : ""}
           ${viewOptions.includes("list") ? renderViewButton("list", "List") : ""}
           ${viewOptions.includes("map") ? renderViewButton("map", "Map") : ""}
-          ${viewOptions.includes("print") ? renderViewButton("print", "Print") : ""}
         </div>
       </section>
 
@@ -574,7 +585,9 @@ function render() {
 function bindInteractiveControls() {
   const form = document.getElementById("thread-form");
   const input = document.getElementById("thread-input");
-  const printButton = document.getElementById("print-report-button");
+  const openPrintViewButton = document.getElementById("open-print-view-button");
+  const printNowButton = document.getElementById("print-now-button");
+  const printBackButton = document.getElementById("print-back-button");
   if (form) {
     form.addEventListener("submit", handleThreadSubmit);
   }
@@ -599,13 +612,32 @@ function bindInteractiveControls() {
   });
   document.querySelectorAll("[data-view-mode]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.selectedView = button.dataset.viewMode || "auto";
+      state.selectedView = normalizeViewMode(button.dataset.viewMode || "auto");
+      syncUrlState();
       render();
       bindInteractiveControls();
     });
   });
-  if (printButton) {
-    printButton.addEventListener("click", () => window.print());
+  if (openPrintViewButton) {
+    openPrintViewButton.addEventListener("click", () => {
+      const printUrl = buildRunUrl(state.runId, {
+        layout: "print",
+        view: "print"
+      });
+      window.open(printUrl, "_blank", "noopener,noreferrer");
+    });
+  }
+  if (printNowButton) {
+    printNowButton.addEventListener("click", () => window.print());
+  }
+  if (printBackButton) {
+    printBackButton.addEventListener("click", () => {
+      state.layoutMode = "default";
+      state.selectedView = "print";
+      syncUrlState();
+      render();
+      bindInteractiveControls();
+    });
   }
   void hydrateMaps();
 }
@@ -788,6 +820,9 @@ function getRenderableViews(report, collections, mapEntries, documentView) {
 }
 
 function resolveActiveView(viewOptions, primaryView) {
+  if (state.layoutMode !== "print" && state.selectedView === "print") {
+    state.selectedView = "auto";
+  }
   const preferred = state.selectedView === "auto"
     ? primaryView
     : state.selectedView;
@@ -970,7 +1005,31 @@ function renderCollectionLinks(links = [], primaryUrl = "") {
   return `<div class="record-links">${deduped.map((link) => `<a href="${escapeAttribute(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.label || link.type || "Link")}</a>`).join("")}</div>`;
 }
 
-function renderPrintDocument(documentView) {
+function renderPrintLayout({ run, report, documentView, media }) {
+  return `
+    <section class="print-layout-shell">
+      <header class="print-layout-toolbar">
+        <div class="print-layout-copy">
+          <span class="eyebrow">Printable Document</span>
+          <h1>${escapeHtml(documentView?.title || report?.title || run.goal || "Deep Search document")}</h1>
+          <p class="muted">${escapeHtml(documentView?.subtitle || report?.objective || run.plan?.objective || "")}</p>
+        </div>
+        <div class="print-layout-actions">
+          <button type="button" class="secondary-button" id="print-back-button">Back to Report</button>
+          <button type="button" class="thread-submit" id="print-now-button">Print / Save PDF</button>
+        </div>
+      </header>
+      <section class="print-layout-document">
+        ${renderPrintDocument(documentView, {
+          standalone: true,
+          media
+        })}
+      </section>
+    </section>
+  `;
+}
+
+function renderPrintDocument(documentView, options = {}) {
   if (!documentView) {
     return `
       <article class="panel">
@@ -980,10 +1039,13 @@ function renderPrintDocument(documentView) {
     `;
   }
 
+  const standalone = Boolean(options.standalone);
+  const media = options.media || documentView.selected_images || [];
+
   return `
-    <article class="panel print-panel">
+    <article class="${standalone ? "print-document" : "panel print-panel"}">
       <div class="print-cover">
-        <span class="eyebrow">Print View</span>
+        <span class="eyebrow">${standalone ? "Ready to Print" : "Print View"}</span>
         <h2>${escapeHtml(documentView.title || "Deep Search document")}</h2>
         ${documentView.subtitle ? `<p class="hero-summary">${escapeHtml(documentView.subtitle)}</p>` : ""}
       </div>
@@ -995,11 +1057,11 @@ function renderPrintDocument(documentView) {
           </ol>
         </section>
       ` : ""}
-      ${documentView.selected_images?.length ? `
+      ${media?.length ? `
         <section class="print-section">
           <h3>Selected Images</h3>
           <div class="media-grid">
-            ${documentView.selected_images.map((item) => `
+            ${media.map((item) => `
               <figure class="print-figure">
                 <img src="${escapeAttribute(item.url)}" alt="${escapeAttribute(item.alt || item.caption || "Selected image")}">
                 ${item.caption ? `<figcaption>${escapeHtml(item.caption)}</figcaption>` : ""}
@@ -1267,6 +1329,33 @@ function loadLeaflet() {
       .then((module) => module && typeof module === "object" ? module : null);
   }
   return leafletModulePromise;
+}
+
+function normalizeViewMode(value) {
+  return ["auto", "report", "hybrid", "list", "map", "print"].includes(String(value || "").trim())
+    ? String(value || "").trim()
+    : "auto";
+}
+
+function buildRunUrl(runId, options = {}) {
+  const params = new URLSearchParams();
+  params.set("run", runId || state.runId || "");
+  const view = normalizeViewMode(options.view || state.selectedView || "auto");
+  if (view && view !== "auto") {
+    params.set("view", view);
+  }
+  if (options.layout === "print" || state.layoutMode === "print") {
+    params.set("layout", "print");
+  }
+  return `./index.html?${params.toString()}`;
+}
+
+function syncUrlState() {
+  const nextUrl = buildRunUrl(state.runId, {
+    view: state.selectedView,
+    layout: state.layoutMode
+  });
+  window.history.replaceState({}, "", nextUrl);
 }
 
 function extractFetchedPageMetadata(payload = {}, candidate = {}) {
