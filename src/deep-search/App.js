@@ -551,7 +551,13 @@ function formatDomain(url) {
 }
 
 function pluralize(noun, count) {
-  return count === 1 ? noun : `${noun}s`;
+  if (count === 1) {
+    return noun;
+  }
+  if (/query$/i.test(noun)) {
+    return noun.replace(/y$/i, "ies");
+  }
+  return `${noun}s`;
 }
 
 function sendRuntimeMessage(message) {

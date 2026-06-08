@@ -123,18 +123,18 @@ export function normalizeDeepSearchReport(report = null) {
   return {
     title: compact(report.title || ""),
     objective: compact(report.objective || ""),
-    executive_summary: compact(report.executive_summary || ""),
+    executive_summary: sanitizePreviewText(report.executive_summary || ""),
     key_findings: Array.isArray(report.key_findings)
       ? report.key_findings.slice(0, 16).map((item) => ({
           title: compact(item?.title || ""),
-          summary: compact(item?.summary || ""),
+          summary: sanitizePreviewText(item?.summary || ""),
           source_urls: normalizeUrlList(item?.source_urls || [], 10)
         }))
       : [],
     sections: Array.isArray(report.sections)
       ? report.sections.slice(0, 18).map((item) => ({
           heading: compact(item?.heading || ""),
-          body: compact(item?.body || ""),
+          body: sanitizePreviewText(item?.body || ""),
           source_urls: normalizeUrlList(item?.source_urls || [], 16)
         }))
       : [],
@@ -157,7 +157,7 @@ export function normalizeSearchArtifacts(artifacts = []) {
       ? artifact.results.slice(0, DEEP_SEARCH_RESULTS_PER_QUERY_LIMIT).map((result) => ({
           title: compact(result?.title || ""),
           url: normalizeUrl(result?.url || result?.href || ""),
-          snippet: compact(result?.snippet || result?.description || ""),
+          snippet: sanitizePreviewText(result?.snippet || result?.description || ""),
           domain: extractDomain(result?.url || result?.href || "")
         }))
       : []
@@ -175,8 +175,8 @@ export function normalizeFetchedSources(sources = []) {
     domain: extractDomain(source?.url || source?.domain || ""),
     status: compact(source?.status || ""),
     statusCode: normalizeOptionalNumber(source?.statusCode),
-    snippet: compact(source?.snippet || ""),
-    bodyPreview: compact(source?.bodyPreview || source?.body || "").slice(0, 12000),
+    snippet: sanitizePreviewText(source?.snippet || ""),
+    bodyPreview: sanitizePreviewText(source?.bodyPreview || source?.body || "").slice(0, 12000),
     fetchedAt: normalizeIsoString(source?.fetchedAt),
     query: compact(source?.query || "")
   }));
@@ -190,7 +190,7 @@ export function normalizeSourceList(sources = []) {
   return sources.slice(0, 40).map((source) => ({
     url: normalizeUrl(source?.url || ""),
     title: compact(source?.title || ""),
-    snippet: compact(source?.snippet || ""),
+    snippet: sanitizePreviewText(source?.snippet || ""),
     statusCode: normalizeOptionalNumber(source?.statusCode)
   }));
 }
@@ -371,6 +371,36 @@ export function buildFallbackDeepSearchReport(run = {}) {
 
 export function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+export function sanitizePreviewText(value) {
+  const raw = String(value || "");
+  if (!raw) {
+    return "";
+  }
+
+  const withoutScripts = raw
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
+  const withoutTags = withoutScripts.replace(/<[^>]+>/g, " ");
+  const decoded = withoutTags
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, digits) => {
+      const codePoint = Number.parseInt(digits, 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : " ";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : " ";
+    });
+
+  return compact(decoded);
 }
 
 function normalizeRunStatus(status) {
