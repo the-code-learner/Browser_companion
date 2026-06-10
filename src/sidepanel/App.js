@@ -237,6 +237,7 @@ async function initialize() {
 }
 
 function render(options = {}) {
+  const chatViewportState = captureChatViewportState();
   const preserveComposer = options.preserveComposer !== false;
   const transientInputState = preserveComposer
     ? captureTransientInputState()
@@ -323,6 +324,7 @@ function render(options = {}) {
     });
   });
   setupChatScrollControls();
+  restoreChatViewportState(chatViewportState);
   const checkConnectorButton = document.getElementById("check-connector");
   if (checkConnectorButton) checkConnectorButton.addEventListener("click", checkConnector);
   const connectCodexButton = document.getElementById("connect-codex");
@@ -1188,6 +1190,14 @@ function getErrorNotePersistKey(message) {
   return `message-error:${message?.id || message?.createdAt || ""}`;
 }
 
+function getMessageTimelineKey(message) {
+  return `message:${message?.id || message?.createdAt || ""}`;
+}
+
+function getActionNoteTimelineKey(note) {
+  return `note:${note?.id || note?.createdAt || note?.summary || ""}`.slice(0, 240);
+}
+
 function captureOpenChatDisclosureState(chatLog) {
   if (!chatLog) {
     return new Set();
@@ -1200,6 +1210,54 @@ function captureOpenChatDisclosureState(chatLog) {
   );
 }
 
+function captureChatViewportState(chatLog = document.getElementById("chat-log")) {
+  if (!chatLog) {
+    return null;
+  }
+
+  const jumpButton = document.getElementById("jump-to-latest");
+  syncChatScrollState(chatLog, jumpButton);
+  const containerTop = chatLog.getBoundingClientRect().top;
+  const candidates = Array.from(chatLog.querySelectorAll("[data-chat-item-key]"));
+  const anchor = candidates.find((item) => item.getBoundingClientRect().bottom > containerTop + 1);
+
+  return {
+    atBottom: state.chatAtBottom,
+    scrollTop: chatLog.scrollTop,
+    anchorKey: String(anchor?.dataset.chatItemKey || "").trim(),
+    anchorOffset: anchor ? anchor.getBoundingClientRect().top - containerTop : 0
+  };
+}
+
+function restoreChatViewportState(viewportState, chatLog = document.getElementById("chat-log"), jumpButton = document.getElementById("jump-to-latest")) {
+  if (!viewportState || !chatLog) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    if (viewportState.atBottom) {
+      scrollChatLogToBottom(chatLog);
+      state.chatAtBottom = true;
+      syncChatScrollState(chatLog, jumpButton);
+      return;
+    }
+
+    const anchor = viewportState.anchorKey
+      ? chatLog.querySelector(`[data-chat-item-key="${escapeSelector(viewportState.anchorKey)}"]`)
+      : null;
+
+    if (anchor) {
+      const containerTop = chatLog.getBoundingClientRect().top;
+      const delta = anchor.getBoundingClientRect().top - containerTop - viewportState.anchorOffset;
+      chatLog.scrollTop += delta;
+    } else {
+      chatLog.scrollTop = viewportState.scrollTop;
+    }
+
+    syncChatScrollState(chatLog, jumpButton);
+  });
+}
+
 function restoreOpenChatDisclosureState(chatLog, openKeys) {
   if (!chatLog || !(openKeys instanceof Set) || !openKeys.size) {
     return;
@@ -1209,6 +1267,14 @@ function restoreOpenChatDisclosureState(chatLog, openKeys) {
     const key = String(item.dataset.chatPersistKey || "").trim();
     item.open = openKeys.has(key);
   });
+}
+
+function escapeSelector(value) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(String(value || ""));
+  }
+
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function syncChatScrollState(chatLog = document.getElementById("chat-log"), jumpButton = document.getElementById("jump-to-latest")) {
@@ -1244,23 +1310,24 @@ function refreshChatLog(options = {}) {
   const jumpButton = document.getElementById("jump-to-latest");
   const preserveScroll = options.preserveScroll !== false;
   const shouldStickToBottom = options.scrollToBottom === true || state.chatAtBottom;
-  const previousScrollTop = chatLog.scrollTop;
+  const viewportState = preserveScroll
+    ? captureChatViewportState(chatLog)
+    : {
+        atBottom: shouldStickToBottom,
+        scrollTop: chatLog.scrollTop,
+        anchorKey: "",
+        anchorOffset: 0
+      };
   const openDetails = captureOpenChatDisclosureState(chatLog);
 
   chatLog.innerHTML = renderChatTimeline();
   restoreOpenChatDisclosureState(chatLog, openDetails);
   bindChatTimelineControls();
 
-  requestAnimationFrame(() => {
-    if (shouldStickToBottom) {
-      scrollChatLogToBottom(chatLog);
-      state.chatAtBottom = true;
-    } else if (preserveScroll) {
-      chatLog.scrollTop = previousScrollTop;
-    }
-
-    syncChatScrollState(chatLog, jumpButton);
-  });
+  restoreChatViewportState({
+    ...viewportState,
+    atBottom: shouldStickToBottom
+  }, chatLog, jumpButton);
 
   return true;
 }
@@ -1304,8 +1371,10 @@ function renderMessage(message) {
 
   const status = getQueuedMessageStatusLabel(message);
   const steerState = getQueuedMessageSteerState(message);
+  const itemKey = getMessageTimelineKey(message);
+  const itemAttr = itemKey ? ` data-chat-item-key="${escapeHtml(itemKey)}"` : "";
   return `
-    <article class="message ${message.role}">
+    <article class="message ${message.role}"${itemAttr}>
       <div class="message-head">
         <span>${message.role === "user" ? "You" : "Companion"}</span>
         <div class="message-tools">
@@ -1324,8 +1393,10 @@ function renderErrorNote(message) {
   const items = details.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
   const persistKey = getErrorNotePersistKey(message);
   const persistAttr = persistKey ? ` data-chat-persist-key="${escapeHtml(persistKey)}"` : "";
+  const itemKey = getMessageTimelineKey(message);
+  const itemAttr = itemKey ? ` data-chat-item-key="${escapeHtml(itemKey)}"` : "";
   return `
-    <div class="message-error-stack">
+    <div class="message-error-stack"${itemAttr}>
       <details class="action-note action-error"${persistAttr}>
         <summary>${escapeHtml(getErrorNoteSummary(message))}</summary>
         <ul>${items}</ul>
@@ -1470,9 +1541,11 @@ function renderActionNote(note) {
   const idAttr = note.id ? ` id="${escapeHtml(note.id)}"` : "";
   const persistKey = getActionNotePersistKey(note);
   const persistAttr = persistKey ? ` data-chat-persist-key="${escapeHtml(persistKey)}"` : "";
+  const itemKey = getActionNoteTimelineKey(note);
+  const itemAttr = itemKey ? ` data-chat-item-key="${escapeHtml(itemKey)}"` : "";
   const summary = note.summaryHtml || escapeHtml(note.summary);
   return `
-    <details${idAttr}${persistAttr} class="action-note${variantClass}"${openAttr}>
+    <details${idAttr}${persistAttr}${itemAttr} class="action-note${variantClass}"${openAttr}>
       <summary>${summary}</summary>
       <ul>${details}</ul>
     </details>
@@ -9534,21 +9607,11 @@ function handleStorageChange(changes, area) {
     return;
   }
 
-  let shouldRender = false;
-
-  if (changes.browserCompanionSession) {
-    const nextSession = changes.browserCompanionSession.newValue || null;
-    state.debugLogs = normalizeDebugLogs(nextSession?.debugLogs || []);
-    shouldRender = true;
-  }
-
   if (changes[EXTERNAL_DEBUG_LOGS_KEY]) {
     state.externalDebugLogs = normalizeDebugLogs(changes[EXTERNAL_DEBUG_LOGS_KEY].newValue || []);
-    shouldRender = true;
-  }
-
-  if (shouldRender) {
-    render();
+    if (state.view === "settings" && state.settingsSection === "logs") {
+      render();
+    }
   }
 }
 
