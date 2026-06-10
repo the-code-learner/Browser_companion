@@ -263,10 +263,10 @@ async function orchestrateRun() {
     model: run.providerSnapshot?.model || run.model,
     httpProvider: run.providerSnapshot?.httpProvider || null,
     plan: run.plan,
-    searchArtifacts: run.searchArtifacts,
+    searchArtifacts: compactSearchArtifactsForSynthesis(run.searchArtifacts),
     sourceDigests: selectedDigests,
     batchSummaries: run.batchSummaries,
-    fetchedSources: run.fetchedSources.slice(0, 6).map((source) => ({
+    fetchedSources: run.fetchedSources.slice(0, 12).map((source) => ({
       url: source.url,
       title: source.title,
       domain: source.domain,
@@ -1950,6 +1950,21 @@ function buildMethodologyFallback(run) {
     `Deduped candidate links before fetching up to ${DEEP_SEARCH_FETCH_LIMIT} public source pages.`,
     `Kept the run in the originating Chrome window ${run.windowId == null ? "?" : run.windowId}.`
   ];
+}
+
+function compactSearchArtifactsForSynthesis(artifacts = []) {
+  return (Array.isArray(artifacts) ? artifacts : []).slice(0, 48).map((artifact) => ({
+    query: artifact.query || "",
+    provider: artifact.provider || "",
+    searchedAt: artifact.searchedAt || "",
+    resultCount: Array.isArray(artifact.results) ? artifact.results.length : 0,
+    topResults: (artifact.results || []).slice(0, 5).map((result) => ({
+      title: result.title || "",
+      url: result.url || "",
+      domain: result.domain || "",
+      snippet: result.snippet || ""
+    }))
+  }));
 }
 
 function buildFindingFallback(run) {

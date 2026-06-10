@@ -3483,7 +3483,7 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     "Task: Plan a web-first Deep Search run for Browser Companion.",
     "Return only one JSON object. Do not wrap it in Markdown.",
     "Do not return browser actions. Do not ask the user for confirmation. Do not write a prose strategy summary.",
-    'JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to 16 focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}',
+    'JSON shape: {"title":"report title","objective":"concise research objective","search_queries":["up to 32 focused web queries"],"desired_sections":["section title"],"evaluation_focus":["what to judge or compare"],"constraints":["important limits"],"stop_early_if_sufficient":true}',
     "",
     "Planning rules:",
     "- Web-first research only.",
@@ -3503,11 +3503,11 @@ function buildDeepSearchPlanningPrompt(payload = {}) {
     payload.responseLanguage || "same language as the user",
     "",
     "Fixed Deep Search caps:",
-    "- Initial queries max: 16",
-    "- Search results retained per query max: 16",
-    "- Total fetched pages max: 40",
-    "- Optional refinement queries per round max: 8",
-    "- Optional refinement rounds max: 3",
+    "- Initial queries max: 32",
+    "- Search results retained per query max: 20",
+    "- Total fetched pages max: 80",
+    "- Optional refinement queries per round max: 16",
+    "- Optional refinement rounds max: 4",
     "",
     "Seed page context JSON:",
     JSON.stringify(seedPage || null, null, 2),
@@ -3538,7 +3538,7 @@ function buildDeepSearchRefinementPrompt(payload = {}) {
   return [
     "Task: Review the first-wave Deep Search evidence and decide whether a second wave is necessary.",
     "Return only one JSON object. Do not wrap it in Markdown.",
-    'JSON shape: {"additional_queries":["up to 8 queries"],"rationale":"short reason","stop_early":false}',
+    'JSON shape: {"additional_queries":["up to 16 queries"],"rationale":"short reason","stop_early":false}',
     "",
     "User goal:",
     payload.goal || "",
@@ -3722,7 +3722,7 @@ function normalizeDeepSearchPlanningResponse(value = {}) {
   return {
     title: compact(value?.title || ""),
     objective: compact(value?.objective || ""),
-    search_queries: normalizeStructuredStringList(value?.search_queries || [], 16),
+    search_queries: normalizeStructuredStringList(value?.search_queries || [], 32),
     desired_sections: normalizeStructuredStringList(value?.desired_sections || [], 18),
     evaluation_focus: normalizeStructuredStringList(value?.evaluation_focus || [], 18),
     constraints: normalizeStructuredStringList(value?.constraints || [], 20),
@@ -3777,7 +3777,7 @@ function normalizeDeepSearchBatchSynthesisResponse(value = {}) {
 
 function normalizeDeepSearchRefinementResponse(value = {}) {
   return {
-    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 8),
+    additional_queries: normalizeStructuredStringList(value?.additional_queries || [], 16),
     rationale: compact(value?.rationale || ""),
     stop_early: Boolean(value?.stop_early)
   };
