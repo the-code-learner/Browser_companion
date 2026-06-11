@@ -1,113 +1,310 @@
 # Browser Companion
 
-Browser Companion is a Chrome MV3 extension scaffold for a chat-first browser agent. The extension observes the active page through constrained tools, keeps risky browser actions behind policy checks and confirmations, and is designed to connect to local subscription-based CLI providers without API keys.
+Browser Companion is a Chrome Manifest V3 extension for chat-first, safety-gated browser assistance.
 
-## Current state
+It combines:
 
-- Side panel chat UI
-- Active-tab page observation
-- Full page dump for smaller pages; outline-plus-retrieval compaction for larger pages
-- DOM, visible text, link, button, form, section, and structured item extraction
-- Attachment registration for local context
-- Local text, CSV, JSON, Markdown, HTML, CSS, JavaScript, TypeScript, PDF, DOCX, XLSX, and image OCR attachment extraction through the native connector
-- Local user memory stored in `USER_MEMORY.md`, with preview-before-save confirmation
-- Native host health, sign-in start, logout/account reset, and local provider request protocol
-- Safe action preview and confirmation for form filling and final submit or accept actions
-- Typed `SUBMIT` confirmation before high-risk submit, accept, send, publish, or finalize clicks
-- Constrained browser action executor for scroll, highlight, focus, fill, select, checkbox, radio, click, viewport screenshot, numbered overlay, wait, and back actions
-- General http/https URL navigation through the `open_url` browser action
-- Safe public HTTP analysis through `http_request` for GET, HEAD, and OPTIONS without browser cookies
-- Public web search through `web_search` for context beyond the active tab
-- Background reading of search-result pages through `http_request` GET for verification and detail
-- Research behavior encourages reading additional sources or refining the search when the first source is weak
-- Post-tool synthesis turns search and HTTP results into an answer instead of dumping raw results in chat
-- Automatic compact-context retry when post-action synthesis hits provider-style failures
-- Markdown rendering in chat, including Mermaid diagram blocks
-- Enter sends the chat message; Shift+Enter inserts a new line
-- Assistant responses follow the user's language unless the user asks otherwise
-- Side panel connector for Codex, Claude Code, and Gemini CLI provider/model selection
-- Experimental Chrome Gemini Nano on-device provider through Chrome's Prompt API when available or downloadable on the device
-- OpenAI-compatible HTTP provider configuration for local or private servers such as llama.cpp, LocalAI, LiteLLM, vLLM, or a custom proxy
-- Streaming support for OpenAI-compatible HTTP providers, including live thinking updates in the side panel
-- Opt-in provider CLI installation buttons; missing CLIs are never installed automatically
-- Expandable one-line action notes inside the chat for approvals, executed actions, and results
-- Top-right settings menu for memory, attachments, current page, connector, privacy, and activity
-- Dedicated diagnostic Logs view with sanitized provider, action, and synthesis traces
-- Sticky chat composer pinned to the bottom of the side panel
-- System-aware light/dark theme with a small manual toggle
-- Shared message, schema, and policy modules
+- a persistent side panel chat UI
+- constrained page observation and browser actions
+- a background service worker that mediates all extension/runtime work
+- a local native host for CLI-based providers such as Codex, Claude Code, and Gemini CLI
+- an asynchronous Deep Search mode for broader web-first research and report generation
 
-## Load locally
+The project is intentionally plain JavaScript and can be loaded directly as an unpacked extension during development.
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Click Load unpacked.
-4. Select this project folder.
-5. Open a normal web page and click the Browser Companion extension icon.
-6. If you change extension files during development, click Reload for the extension in `chrome://extensions`.
-7. When observing a new site, approve the site access prompt for that origin if Chrome shows it. The `Observe` action itself will request site access when needed; Chrome still controls and confirms the permission prompt.
+## What It Does
 
-## Development
+Browser Companion is built around a simple rule: the model can suggest, but the extension validates and executes.
 
-Run a lightweight static check:
+Current capabilities include:
 
-```bash
-npm run check
+- active-tab observation with structured page summaries
+- extraction of visible text, headings, links, buttons, forms, repeated cards/items, and page outline
+- attachment registration plus local extraction for text, PDF, DOCX, XLSX, and OCR-able images
+- local user memory with preview-before-save confirmation
+- safe action planning with policy validation and typed confirmations for risky operations
+- public `web_search` and `http_request` tools for research beyond the current tab
+- post-tool answer synthesis instead of dumping raw search/fetch output into chat
+- multi-provider connector for:
+  - Codex CLI
+  - Claude Code
+  - Gemini CLI
+  - OpenAI-compatible HTTP providers
+  - experimental Chrome Gemini Nano / Prompt API
+- Deep Search report tabs with findings, sources, methodology, list/map/document views, and follow-up chat
+- sanitized diagnostic logs in the side panel
+
+## Product Shape
+
+The extension currently has five main surfaces:
+
+1. **Side panel UI**
+   - main chat surface
+   - settings overlay
+   - attachment and memory management
+   - action approval UI
+   - connector status
+   - logs and activity
+
+2. **Background service worker**
+   - tab routing
+   - content-script injection
+   - native messaging
+   - provider request routing
+   - Deep Search request routing
+   - action-plan policy validation
+
+3. **Content scripts**
+   - `page-probe.js` for safe observation
+   - `actions.js` for constrained browser interaction
+
+4. **Deep Search report tab**
+   - asynchronous research orchestration
+   - web-first source collection
+   - digesting and synthesis pipeline
+   - report/list/map/print-style output
+   - local follow-up thread for `Ask` and `Refine`
+
+5. **Native host**
+   - CLI provider execution
+   - local auth/connect/logout/install flows
+   - HTTP provider probing
+   - local attachment extraction
+
+## Safety Model
+
+Browser Companion does **not** let the model execute arbitrary code in the page.
+
+Instead:
+
+- the model returns structured action plans
+- the extension validates those plans against local policy
+- the content executor resolves targets using constrained logic
+- sensitive actions require confirmation
+
+Examples:
+
+- read-only actions are low risk
+- navigation, field filling, and selection are medium risk
+- submit/delete/publish flows are high risk
+- sensitive form fields and blocked categories require stronger gating or manual handling
+
+File upload is intentionally a user handoff: Browser Companion can focus and highlight the field, but the user completes the browser file picker manually.
+
+## Deep Search
+
+Deep Search is the research-heavy mode.
+
+It launches from the side panel but runs in a dedicated extension tab in the same Chrome window. The side panel stays usable while the run continues in the background.
+
+### Current Deep Search pipeline
+
+1. planning pass
+2. web search collection
+3. public HTTP fetching
+4. source digest compression
+5. batch synthesis
+6. final report synthesis
+
+### Current Deep Search limits
+
+- initial queries: up to `32`
+- refinement rounds: up to `4`
+- refinement queries per round: up to `16`
+- retained search results per query: up to `20`
+- fetched public pages total: up to `80`
+- fetches per domain: up to `8`
+- selected compressed source digests for final synthesis: up to `24`
+
+The collection side is intentionally broader than the final synthesis side. The run can gather a lot of evidence, but the final report consumes compressed digests and compacted search artifacts so prompts stay manageable.
+
+### Deep Search outputs
+
+Depending on the evidence, the report can render as:
+
+- report
+- hybrid report + structured list
+- list/record collection
+- map-backed view
+- print/document view
+
+Each run also keeps a local thread:
+
+- **Ask**: question the existing findings without starting new research
+- **Refine**: create a linked child run using the user’s critique or correction
+
+## Providers and Connector
+
+Browser Companion is designed around local or user-controlled providers rather than embedded API-key forms.
+
+### Supported provider paths
+
+- **Codex CLI**
+- **Claude Code**
+- **Gemini CLI**
+- **OpenAI-compatible HTTP providers**
+- **Chrome Gemini Nano / Prompt API** (experimental, on-device)
+
+### Connector behavior
+
+- opening Connector refreshes provider health and model metadata
+- missing CLIs show explicit install buttons only
+- install and connect are separate actions
+- installed providers also expose logout/reset
+- selected provider/model is persisted in extension settings
+
+### Official install commands
+
+- Codex: `npm install -g @openai/codex`
+- Claude Code: `npm install -g @anthropic-ai/claude-code`
+- Gemini CLI: `npm install -g @google/gemini-cli`
+
+### Notes
+
+- Gemini CLI is exposed with a safe `default` model option unless reliable account-specific model discovery is available
+- HTTP providers are tested through `/v1/models` and used through `/v1/chat/completions`
+- Cloudflare Workers AI is supported through a dedicated preset path
+- streaming HTTP providers surface live progress in the side panel
+
+## UI Notes
+
+The side panel includes:
+
+- top status badge for the currently selected provider
+- current-page strip with explicit `Observe`
+- chat timeline with safe Markdown rendering
+- sticky composer
+- settings overlay for memory, attachments, page, connector, privacy, activity, and logs
+- jump-to-latest affordance when the user scrolls away from the newest messages
+
+The side panel log view is sanitized before display/copy. Long bodies, prompts, obvious secrets, auth fields, emails, phone-like strings, and local paths are redacted or omitted.
+
+## Repository Layout
+
+```text
+.
+|-- manifest.json
+|-- src
+|   |-- background
+|   |   `-- service-worker.js
+|   |-- content
+|   |   |-- actions.js
+|   |   |-- overlay.css
+|   |   `-- page-probe.js
+|   |-- deep-search
+|   |   |-- App.js
+|   |   |-- index.html
+|   |   `-- styles.css
+|   |-- shared
+|   |   |-- debug-log.js
+|   |   |-- deep-search.js
+|   |   |-- markdown.js
+|   |   |-- messages.js
+|   |   |-- policy.js
+|   |   |-- runtime-log.js
+|   |   `-- schemas.js
+|   `-- sidepanel
+|       |-- App.js
+|       |-- index.html
+|       `-- styles.css
+|-- native-host
+|   |-- bridge.js
+|   |-- host-manifest.json
+|   `-- install-windows.ps1
+|-- codex
+|   |-- system-prompt.md
+|   `-- tool-schema.json
+`-- scripts
+    |-- check-extension.mjs
+    |-- test-attachment-extraction.mjs
+    |-- test-deep-search.mjs
+    |-- test-markdown.mjs
+    |-- test-policy.mjs
+    `-- test-user-memory.mjs
 ```
 
-Run policy tests:
+## Load the Extension Locally
 
-```bash
-npm test
-```
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select this repository folder
+5. Open a normal web page
+6. Click the Browser Companion extension icon to open the side panel
 
-## Local connector
+If you change extension files during development, reload the extension from `chrome://extensions`.
 
-Chrome extensions cannot start local processes directly. To connect Browser Companion to local AI CLI tools, register the native messaging host after loading the unpacked extension.
+When observing a new site, Chrome may ask for site access. The explicit `Observe` action is the user-triggered path for that permission.
 
-On Windows:
+## Native Host Setup
+
+Chrome extensions cannot start local processes directly, so CLI providers and local extraction run through a native messaging host.
+
+### Windows
+
+After loading the unpacked extension, register the native host:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File native-host/install-windows.ps1 -ExtensionId YOUR_EXTENSION_ID
 ```
 
-Then use the Connector settings in the side panel. Browser Companion detects these local providers:
+Then open Connector in the side panel and use **Check**, **Install**, **Connect**, or **Logout** as needed.
 
-- Codex: install command `npm install -g @openai/codex`
-- Claude Code: install command `npm install -g @anthropic-ai/claude-code`
-- Gemini CLI: install command `npm install -g @google/gemini-cli`
+If Node/npm is already installed but the native host still cannot find it, reload Chrome after registration. The Windows installer writes a launcher that helps the bridge locate Node/npm even when Chrome starts with a reduced PATH.
 
-Missing providers show an explicit Install button only. Browser Companion does not install Claude Code, Gemini CLI, or Codex just because they are missing. Install opens a visible terminal so the user can see and control the command. Connect is separate from Install and starts the selected provider's local sign-in flow. Installed providers also expose Logout so users can clear local credentials before switching accounts.
+## Development
 
-Codex remains the default path when it is connected. Claude Code and Gemini CLI are used only when installed, signed in through their own local CLI session, and selected in Connector. Opening the Connector settings section refreshes provider status and model metadata automatically; the Check button does the same on demand. The selected provider and model are saved as Connector settings and restored on the next side panel session. Gemini CLI is shown with the provider default model unless the CLI exposes reliable account-specific model discovery.
+### Requirements
 
-Provider auth status is now tracked per provider instead of treating every installed CLI as already connected. Codex uses `codex login status`, Claude Code uses `claude auth status`, and Gemini CLI is treated as ready only when Browser Companion detects cached Gemini auth or supported auth environment variables. Gemini logout clears local cached auth files so the next Connect flow can choose a different account cleanly.
+- Node.js `>= 20`
+- Chrome or Chromium with extension developer mode enabled
 
-Connector status in the side panel reflects the currently selected provider. For HTTP providers, Browser Companion refreshes live health when Connector opens, so an offline local server is shown as offline even if Codex or Gemini CLI are available on the same machine.
+### Scripts
 
-The Connector also checks Chrome's built-in Prompt API for an experimental on-device Gemini Nano provider. If Chrome reports Gemini Nano as available, it can be selected like other ready providers. If Chrome reports it as downloadable, the provider card appears with an explicit Download Model button; Browser Companion does not start that model download automatically. Gemini Nano requests run in the extension context rather than through the native host.
+Run the scaffold and consistency check:
 
-If provider install says Node/npm is missing but Node is already installed, reload Chrome after re-registering the native host. The Windows installer now writes the Node.js directory into `native-host/bridge-launcher.cmd` so the bridge can find `npm.cmd` even when Chrome starts with a reduced PATH.
+```bash
+npm run check
+```
 
-For a local or private OpenAI-compatible server, open Connector and add an HTTP provider with:
+Run the main test suite:
 
-- Base URL, for example `http://192.168.0.10:8080`
-- optional Basic Auth username and password
-- model selected from `GET /v1/models`
+```bash
+npm test
+```
 
-HTTP providers use `POST /v1/chat/completions`. When selected, observed page content, allowed attachment text, and local memory context may be sent to that server.
+Run attachment extraction tests only:
 
-When `Use streaming responses` is enabled for an HTTP provider, Browser Companion sends `stream: true`, reads SSE responses, and shows live thinking progress in the side panel. Requests time out only when streamed activity stops or the user explicitly stops the request.
+```bash
+npm run test:attachments
+```
 
-For smaller observed pages, Browser Companion can send the full page dump to the provider. Larger pages are compacted automatically into a page outline, structured items, focused context, and a smaller text dump so important middle-of-page content is less likely to disappear.
+Run user-memory protocol tests only:
 
-Listing-style cards on SPA sites are observed conservatively. When Browser Companion can deterministically recover a canonical destination URL from the DOM, that destination is preserved and can be used for `open_url_new_tab` instead of falling back to a plain button click.
+```bash
+npm run test:memory
+```
 
-The extension cannot run this PowerShell command before the native host is registered. When the connector is missing, the side panel shows a Copy Command button with the correct extension ID already filled in.
+## Dependencies
 
-Attachment extraction uses local Node dependencies in the native host. Extracted text stays local unless the privacy toggle allows it to be sent in a provider request.
+Runtime dependencies currently used by the native-host / report stack:
 
-`LOCAL_CONTEXT.md` is the local project memory and is intentionally ignored by git.
+- `exceljs`
+- `leaflet`
+- `mammoth`
+- `pdf-parse`
+- `tesseract.js`
+
+The extension UI itself stays dependency-light and framework-free.
+
+## Current Constraints
+
+- MV3 extension architecture, so background logic lives in a service worker
+- no arbitrary DOM execution by the model
+- no built-in API-key UI for OpenAI/Anthropic/Google CLI providers
+- file chooser dialogs still require user activation
+- provider quota/status is mostly reactive except where a provider exposes usable local metadata
+- Deep Search is web-first, not a browser-crawling tab-opener during the run
 
 ## License
 
