@@ -825,6 +825,24 @@ function buildHealthPayload(providers) {
   };
 }
 
+function createCodexUnavailableResponse(health, codexStatus, type = null) {
+  const response = {
+    ...health,
+    connected: false,
+    status: codexStatus?.status || "missing",
+    codexVersion: codexStatus?.version || "",
+    codexPath: codexStatus?.command || codexBin,
+    selectedProvider: "openai-codex",
+    message: codexStatus?.message || "Codex is not connected."
+  };
+
+  if (type) {
+    response.type = type;
+  }
+
+  return response;
+}
+
 function getProviderStatuses() {
   return Object.values(providerDefinitions).map((provider) => applyProviderRuntimeState(getProviderStatus(provider)));
 }
@@ -1366,13 +1384,20 @@ function connectProvider(payload = {}) {
   }
 
   const health = getHealth();
+  const codexStatus = health.providers.find((item) => item.id === "openai-codex");
 
-  if (health.connected) {
-    return health;
+  if (codexStatus?.connected) {
+    return {
+      ...health,
+      connected: true,
+      status: codexStatus.status || "ready",
+      selectedProvider: "openai-codex",
+      message: codexStatus.message || "Codex CLI is installed and signed in."
+    };
   }
 
-  if (health.status === "missing") {
-    return health;
+  if (codexStatus?.status === "missing") {
+    return createCodexUnavailableResponse(health, codexStatus);
   }
 
   const child = spawnLoginProcess();
@@ -1382,6 +1407,7 @@ function connectProvider(payload = {}) {
     ...getHealth(),
     connected: false,
     status: "login_started",
+    selectedProvider: "openai-codex",
     message: "Codex login was started. Complete the ChatGPT sign-in flow, then check the connector again."
   };
 }
@@ -1800,12 +1826,7 @@ function runAgentRequest(payload = {}, options = {}) {
   const codexStatus = health.providers.find((item) => item.id === "openai-codex");
 
   if (!codexStatus?.connected) {
-    return {
-      type: "agent_unavailable",
-      ...health,
-      status: codexStatus?.status || "missing",
-      message: codexStatus?.message || "Codex is not connected."
-    };
+    return createCodexUnavailableResponse(health, codexStatus, "agent_unavailable");
   }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-"));
@@ -4514,25 +4535,125 @@ function quoteCmdArg(value) {
 }
 
 function resolveCodexBin() {
-  if (process.env.CODEX_BIN && fs.existsSync(process.env.CODEX_BIN)) {
-    return process.env.CODEX_BIN;
+  const explicit = String(process.env.CODEX_BIN || "").trim();
+  if (explicit) {
+    if (fs.existsSync(explicit)) {
+      return explicit;
+    }
+
+    if (process.platform !== "win32") {
+      return explicit;
+    }
   }
 
   if (process.platform === "win32") {
-    const candidates = [
-      path.join(process.env.USERPROFILE || "", ".vscode", "extensions"),
-      path.join(process.env.LOCALAPPDATA || "", "Programs")
+    const homeDir = process.env.USERPROFILE || os.homedir() || "";
+    const directCandidates = [
+      path.join(process.env.APPDATA || "", "npm", "codex.cmd"),
+      path.join(process.env.APPDATA || "", "npm", "codex.exe"),
+      path.join(process.env.LOCALAPPDATA || "", "npm", "codex.cmd"),
+      path.join(process.env.LOCALAPPDATA || "", "npm", "codex.exe"),
+      path.join(homeDir, "AppData", "Roaming", "npm", "codex.cmd"),
+      path.join(homeDir, "AppData", "Roaming", "npm", "codex.exe"),
+      path.join(path.dirname(process.execPath || ""), "codex.cmd"),
+      path.join(path.dirname(process.execPath || ""), "codex.exe")
     ];
 
-    for (const base of candidates) {
-      const found = findFile(base, "codex.exe", 4);
+    for (const candidate of directCandidates) {
+      if (candidate && fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+
+    const searchRoots = [
+      path.join(homeDir, ".vscode", "extensions"),
+      path.join(homeDir, ".vscode-insiders", "extensions")
+    ];
+
+    for (const root of searchRoots) {
+      const found = findCodexInVsCodeExtensions(root);
       if (found) return found;
     }
 
-    return "codex.exe";
+    if (explicit && !/[\\/]/.test(explicit)) {
+      const explicitFromPath = resolveWindowsCommandFromPath(explicit);
+      if (explicitFromPath) {
+        return explicitFromPath;
+      }
+    }
+
+    const foundOnPath = resolveWindowsCommandFromPath("codex");
+    if (foundOnPath) {
+      return foundOnPath;
+    }
+
+    if (explicit && /[\\/]/.test(explicit)) {
+      return explicit;
+    }
+
+    return "codex.cmd";
   }
 
   return "codex";
+}
+
+function findCodexInVsCodeExtensions(root) {
+  if (!root || !fs.existsSync(root)) {
+    return null;
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const likelyExtensions = entries
+    .filter((entry) => entry.isDirectory() && /openai|chatgpt|codex/i.test(entry.name))
+    .map((entry) => path.join(root, entry.name));
+
+  const knownRelativePaths = [
+    path.join("bin", "windows-x86_64", "codex.exe"),
+    path.join("bin", "windows-x64", "codex.exe"),
+    path.join("bin", "win32-x64", "codex.exe"),
+    path.join("bin", "codex.exe"),
+    "codex.exe",
+    "codex.cmd"
+  ];
+
+  for (const extensionPath of likelyExtensions) {
+    for (const relativePath of knownRelativePaths) {
+      const candidate = path.join(extensionPath, relativePath);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  for (const extensionPath of likelyExtensions) {
+    for (const fileName of ["codex.exe", "codex.cmd"]) {
+      const found = findFile(extensionPath, fileName, 4);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveWindowsCommandFromPath(command) {
+  if (process.platform !== "win32" || !command) {
+    return "";
+  }
+
+  const result = spawnSync("where.exe", [command], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true
+  });
+  return String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
 }
 
 function resolveNpmBin() {
