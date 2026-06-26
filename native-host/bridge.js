@@ -1831,8 +1831,8 @@ function runAgentRequest(payload = {}, options = {}) {
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-"));
   const outputPath = path.join(tempDir, "codex-response.txt");
-  const prompt = buildAgentPrompt(payload);
-  const schemaPath = path.join(projectRoot, "codex", "tool-schema.json");
+  const prompt = buildCodexAgentPrompt(payload);
+  const schemaPath = path.join(projectRoot, "codex", "tool-schema-codex.json");
 
   const result = runCodex([
     "exec",
@@ -3492,6 +3492,18 @@ function buildAgentPrompt(payload, options = {}) {
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions or memory proposals are needed."
   ].filter((line) => line !== "").join("\n");
+}
+
+function buildCodexAgentPrompt(payload) {
+  return [
+    buildAgentPrompt(payload),
+    "",
+    "Codex output-schema compatibility note:",
+    "The attached output schema requires every declared property to be present.",
+    "For unused memory_title and memory_content, use empty strings.",
+    "Every action must include a tab object. If the action does not target a known tab, use {\"tabId\":null,\"url\":\"\",\"title\":\"\"}.",
+    "Use source.confidence as a number; 0 means no specific source confidence."
+  ].join("\n");
 }
 
 function buildDeepSearchPlanningPrompt(payload = {}) {

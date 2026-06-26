@@ -1,0 +1,237 @@
+{
+  "title": "Browser Companion Agent Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "text",
+    "question",
+    "reason",
+    "goal",
+    "risk_level",
+    "summary_for_user",
+    "needs_clarification",
+    "requires_confirmation",
+    "will_submit",
+    "actions",
+    "uncertain_fields",
+    "memory_title",
+    "memory_content"
+  ],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "natural_response",
+        "ask_user",
+        "stop_for_human",
+        "memory_proposal",
+        "agent_plan"
+      ]
+    },
+    "text": {
+      "type": "string"
+    },
+    "question": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "goal": {
+      "type": "string"
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "sensitive",
+        "blocked"
+      ]
+    },
+    "summary_for_user": {
+      "type": "string"
+    },
+    "needs_clarification": {
+      "type": "boolean"
+    },
+    "requires_confirmation": {
+      "type": "boolean"
+    },
+    "will_submit": {
+      "type": "boolean"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "uncertain_fields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/uncertain_field"
+      }
+    },
+    "memory_title": {
+      "type": "string"
+    },
+    "memory_content": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "uncertain_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "reason"
+      ],
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "role",
+        "name",
+        "selector_candidates"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "selector_candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_id",
+        "confidence"
+      ],
+      "properties": {
+        "file_id": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number"
+        }
+      }
+    },
+    "tab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tabId",
+        "url",
+        "title"
+      ],
+      "properties": {
+        "tabId": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "target",
+        "value",
+        "source",
+        "tab",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "observe_page",
+            "observe_known_tab",
+            "get_visible_text",
+            "get_dom_snapshot",
+            "get_forms",
+            "get_links",
+            "get_buttons",
+            "capture_viewport",
+            "capture_numbered_overlay",
+            "http_request",
+            "web_search",
+            "open_url",
+            "open_url_new_tab",
+            "scroll_to_element",
+            "scroll_by",
+            "wait_for_page_change",
+            "go_back",
+            "focus_element",
+            "highlight_element",
+            "clear_highlights",
+            "fill_field",
+            "select_option",
+            "toggle_checkbox",
+            "set_radio",
+            "upload_file_to_field",
+            "click_element",
+            "click_overlay_number",
+            "ask_user",
+            "request_confirmation",
+            "stop_for_human"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "value": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "tab": {
+          "$ref": "#/$defs/tab"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
