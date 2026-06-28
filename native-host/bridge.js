@@ -1936,7 +1936,13 @@ async function runDeepSearchPlanRequest(payload = {}, options = {}) {
   const prompt = stage === "refine"
     ? buildDeepSearchRefinementPrompt(payload)
     : buildDeepSearchPlanningPrompt(payload);
-  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+  const schemaKind = stage === "refine" ? "refinement" : "planning";
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, {
+    ...options,
+    codexSchema: getDeepSearchCodexOutputSchema(schemaKind),
+    codexPromptSuffix: buildDeepSearchCodexSchemaNote(schemaKind),
+    codexOutputFileName: `deep-search-${schemaKind}.json`
+  });
 
   if (!parsed.ok) {
     return {
@@ -1966,7 +1972,12 @@ async function runDeepSearchPlanRequest(payload = {}, options = {}) {
 
 async function runDeepSearchDigestRequest(payload = {}, options = {}) {
   const prompt = buildDeepSearchDigestPrompt(payload);
-  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, {
+    ...options,
+    codexSchema: getDeepSearchCodexOutputSchema("digest"),
+    codexPromptSuffix: buildDeepSearchCodexSchemaNote("digest"),
+    codexOutputFileName: "deep-search-digest.json"
+  });
 
   if (!parsed.ok) {
     return {
@@ -1985,7 +1996,12 @@ async function runDeepSearchDigestRequest(payload = {}, options = {}) {
 
 async function runDeepSearchBatchSynthesisRequest(payload = {}, options = {}) {
   const prompt = buildDeepSearchBatchSynthesisPrompt(payload);
-  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, {
+    ...options,
+    codexSchema: getDeepSearchCodexOutputSchema("batch_synthesis"),
+    codexPromptSuffix: buildDeepSearchCodexSchemaNote("batch_synthesis"),
+    codexOutputFileName: "deep-search-batch-synthesis.json"
+  });
 
   if (!parsed.ok) {
     return {
@@ -2004,7 +2020,12 @@ async function runDeepSearchBatchSynthesisRequest(payload = {}, options = {}) {
 
 async function runDeepSearchReportRequest(payload = {}, options = {}) {
   const prompt = buildDeepSearchReportPrompt(payload);
-  const parsed = await runStructuredProviderJsonRequest(payload, prompt, options);
+  const parsed = await runStructuredProviderJsonRequest(payload, prompt, {
+    ...options,
+    codexSchema: getDeepSearchCodexOutputSchema("report"),
+    codexPromptSuffix: buildDeepSearchCodexSchemaNote("report"),
+    codexOutputFileName: "deep-search-report.json"
+  });
 
   if (!parsed.ok) {
     return {
@@ -2082,7 +2103,7 @@ async function runDeepSearchChatRequest(payload = {}, options = {}) {
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-deep-search-chat-"));
   const outputPath = path.join(tempDir, "deep-search-chat.txt");
-  const result = runCodex([
+  const result = await runCodexWithActivityTimeout([
     "exec",
     "--model",
     normalizeModel(payload.model),
@@ -2094,7 +2115,7 @@ async function runDeepSearchChatRequest(payload = {}, options = {}) {
     "-"
   ], {
     input: prompt,
-    timeout: 120000
+    abortSignal: options.abortSignal
   });
 
   if (result.error || result.status !== 0) {
@@ -2178,20 +2199,29 @@ async function runStructuredProviderJsonRequest(payload = {}, prompt, options = 
   }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-companion-deep-search-"));
-  const outputPath = path.join(tempDir, "deep-search.json");
-  const result = runCodex([
+  const outputPath = path.join(tempDir, options.codexOutputFileName || "deep-search.json");
+  const schemaPath = options.codexSchema
+    ? writeCodexOutputSchema(tempDir, options.codexOutputFileName || "deep-search.json", options.codexSchema)
+    : "";
+  const codexArgs = [
     "exec",
     "--model",
     normalizeModel(payload.model),
     "--skip-git-repo-check",
     "--sandbox",
-    "read-only",
+    "read-only"
+  ];
+  if (schemaPath) {
+    codexArgs.push("--output-schema", schemaPath);
+  }
+  codexArgs.push(
     "--output-last-message",
     outputPath,
     "-"
-  ], {
-    input: prompt,
-    timeout: 120000
+  );
+  const result = await runCodexWithActivityTimeout(codexArgs, {
+    input: options.codexPromptSuffix ? `${prompt}\n\n${options.codexPromptSuffix}` : prompt,
+    abortSignal: options.abortSignal
   });
 
   if (result.error || result.status !== 0) {
@@ -3506,6 +3536,271 @@ function buildCodexAgentPrompt(payload) {
   ].join("\n");
 }
 
+function getDeepSearchCodexOutputSchema(kind) {
+  if (kind === "planning") {
+    return codexSchemaObject("Browser Companion Deep Search Plan", {
+      title: codexStringSchema(),
+      objective: codexStringSchema(),
+      search_queries: codexStringArraySchema(),
+      desired_sections: codexStringArraySchema(),
+      evaluation_focus: codexStringArraySchema(),
+      constraints: codexStringArraySchema(),
+      stop_early_if_sufficient: { type: "boolean" }
+    });
+  }
+
+  if (kind === "refinement") {
+    return codexSchemaObject("Browser Companion Deep Search Refinement", {
+      additional_queries: codexStringArraySchema(),
+      rationale: codexStringSchema(),
+      stop_early: { type: "boolean" }
+    });
+  }
+
+  if (kind === "digest") {
+    return codexSchemaObject("Browser Companion Deep Search Source Digests", {
+      digests: codexArraySchema(codexSourceDigestSchema())
+    });
+  }
+
+  if (kind === "batch_synthesis") {
+    return codexSchemaObject("Browser Companion Deep Search Batch Synthesis", {
+      title: codexStringSchema(),
+      summary: codexStringSchema(),
+      key_points: codexStringArraySchema(),
+      top_source_urls: codexStringArraySchema()
+    });
+  }
+
+  return codexDeepSearchReportSchema();
+}
+
+function buildDeepSearchCodexSchemaNote(kind) {
+  const lines = [
+    "Codex output-schema compatibility note:",
+    "The attached output schema is strict. Return only one JSON object matching that schema.",
+    "All declared object properties are required. Use empty strings, empty arrays, false, or 0 when a value is unknown.",
+    "For arrays, include only useful items and return [] when a section is not applicable."
+  ];
+
+  if (kind === "digest") {
+    lines.push("For source digests, relevance_score and confidence must be numbers from 0 to 100.");
+  }
+
+  if (kind === "report") {
+    lines.push(
+      "For report sources, use statusCode 0 when the HTTP status is unknown.",
+      "For collection item fields, always include organization, location, address, category, rating, price, hours, and notes; use empty strings for unused keys.",
+      "Use map_data only when real coordinates are known. Otherwise return an empty map_data array."
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function codexDeepSearchReportSchema() {
+  return codexSchemaObject("Browser Companion Deep Search Report", {
+    title: codexStringSchema(),
+    objective: codexStringSchema(),
+    executive_summary: codexStringSchema(),
+    key_findings: codexArraySchema(codexSchemaObject("", {
+      title: codexStringSchema(),
+      summary: codexStringSchema(),
+      source_urls: codexStringArraySchema()
+    })),
+    sections: codexArraySchema(codexSchemaObject("", {
+      heading: codexStringSchema(),
+      body: codexStringSchema(),
+      source_urls: codexStringArraySchema()
+    })),
+    methodology: codexStringArraySchema(),
+    open_questions: codexStringArraySchema(),
+    sources: codexArraySchema(codexReportSourceSchema()),
+    presentation: codexSchemaObject("", {
+      primary_view: codexEnumSchema(["report", "list", "hybrid", "map"]),
+      available_views: codexArraySchema(codexEnumSchema(["report", "list", "map", "print"])),
+      print_ready: { type: "boolean" }
+    }),
+    collections: codexArraySchema(codexCollectionSchema()),
+    document: codexSchemaObject("", {
+      title: codexStringSchema(),
+      subtitle: codexStringSchema(),
+      toc: codexArraySchema(codexSchemaObject("", {
+        id: codexStringSchema(),
+        label: codexStringSchema()
+      })),
+      chapters: codexArraySchema(codexSchemaObject("", {
+        id: codexStringSchema(),
+        heading: codexStringSchema(),
+        summary: codexStringSchema(),
+        body: codexStringSchema(),
+        source_urls: codexStringArraySchema(),
+        image_urls: codexStringArraySchema()
+      })),
+      appendix: codexArraySchema(codexSchemaObject("", {
+        id: codexStringSchema(),
+        heading: codexStringSchema(),
+        body: codexStringSchema()
+      })),
+      selected_images: codexArraySchema(codexMediaSchema())
+    }),
+    map_data: codexArraySchema(codexSchemaObject("", {
+      id: codexStringSchema(),
+      title: codexStringSchema(),
+      description: codexStringSchema(),
+      points: codexArraySchema(codexSchemaObject("", {
+        id: codexStringSchema(),
+        label: codexStringSchema(),
+        note: codexStringSchema(),
+        source_url: codexStringSchema(),
+        primary_url: codexStringSchema(),
+        lat: { type: "number" },
+        lng: { type: "number" },
+        location: codexLocationSchema()
+      })),
+      source_urls: codexStringArraySchema()
+    })),
+    media: codexArraySchema(codexMediaSchema())
+  });
+}
+
+function codexSourceDigestSchema() {
+  return codexSchemaObject("", {
+    url: codexStringSchema(),
+    title: codexStringSchema(),
+    domain: codexStringSchema(),
+    source_type: codexEnumSchema(["official", "directory", "article", "listing", "job", "event", "general"]),
+    relevance_score: { type: "number" },
+    confidence: { type: "number" },
+    summary: codexStringSchema(),
+    key_facts: codexStringArraySchema(),
+    entities: codexStringArraySchema(),
+    dates: codexStringArraySchema(),
+    locations: codexStringArraySchema(),
+    important_links: codexArraySchema(codexLinkSchema()),
+    matches_user_goal: codexStringSchema(),
+    risks_or_gaps: codexStringArraySchema(),
+    query: codexStringSchema(),
+    siteName: codexStringSchema()
+  });
+}
+
+function codexReportSourceSchema() {
+  return codexSchemaObject("", {
+    url: codexStringSchema(),
+    title: codexStringSchema(),
+    snippet: codexStringSchema(),
+    statusCode: { type: "number" },
+    siteName: codexStringSchema(),
+    heroImageUrl: codexStringSchema()
+  });
+}
+
+function codexCollectionSchema() {
+  return codexSchemaObject("", {
+    id: codexStringSchema(),
+    title: codexStringSchema(),
+    description: codexStringSchema(),
+    record_type: codexEnumSchema(["job", "hotel", "event", "listing", "result"]),
+    columns: codexArraySchema(codexSchemaObject("", {
+      key: codexStringSchema(),
+      label: codexStringSchema(),
+      kind: codexEnumSchema(["text", "link", "tag"])
+    })),
+    items: codexArraySchema(codexSchemaObject("", {
+      id: codexStringSchema(),
+      label: codexStringSchema(),
+      title: codexStringSchema(),
+      description: codexStringSchema(),
+      primary_url: codexStringSchema(),
+      evidence_note: codexStringSchema(),
+      tags: codexStringArraySchema(),
+      source_urls: codexStringArraySchema(),
+      fields: codexSchemaObject("", {
+        organization: codexStringSchema(),
+        location: codexStringSchema(),
+        address: codexStringSchema(),
+        category: codexStringSchema(),
+        rating: codexStringSchema(),
+        price: codexStringSchema(),
+        hours: codexStringSchema(),
+        notes: codexStringSchema()
+      }),
+      links: codexArraySchema(codexLinkSchema()),
+      location: codexLocationSchema()
+    })),
+    source_urls: codexStringArraySchema()
+  });
+}
+
+function codexLinkSchema() {
+  return codexSchemaObject("", {
+    label: codexStringSchema(),
+    type: codexStringSchema(),
+    url: codexStringSchema()
+  });
+}
+
+function codexLocationSchema() {
+  return codexSchemaObject("", {
+    label: codexStringSchema(),
+    address: codexStringSchema(),
+    query: codexStringSchema()
+  });
+}
+
+function codexMediaSchema() {
+  return codexSchemaObject("", {
+    id: codexStringSchema(),
+    kind: codexStringSchema(),
+    url: codexStringSchema(),
+    alt: codexStringSchema(),
+    caption: codexStringSchema(),
+    source_url: codexStringSchema()
+  });
+}
+
+function codexSchemaObject(title, properties) {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: Object.keys(properties),
+    properties
+  };
+  if (title) schema.title = title;
+  return schema;
+}
+
+function codexStringSchema() {
+  return { type: "string" };
+}
+
+function codexEnumSchema(values) {
+  return {
+    type: "string",
+    enum: values
+  };
+}
+
+function codexArraySchema(items) {
+  return {
+    type: "array",
+    items
+  };
+}
+
+function codexStringArraySchema() {
+  return codexArraySchema(codexStringSchema());
+}
+
+function writeCodexOutputSchema(tempDir, outputFileName, schema) {
+  const extension = path.extname(outputFileName || "");
+  const baseName = path.basename(outputFileName || "deep-search", extension) || "deep-search";
+  const schemaPath = path.join(tempDir, `${baseName}.schema.json`);
+  fs.writeFileSync(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, "utf8");
+  return schemaPath;
+}
+
 function buildDeepSearchPlanningPrompt(payload = {}) {
   const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
   const seedPage = payload.seedPageContext || payload.observation || null;
@@ -4304,6 +4599,14 @@ function runCodex(args, options = {}) {
   return runCommand(codexBin, args, options);
 }
 
+function runCodexWithActivityTimeout(args, options = {}) {
+  return runCommandWithActivityTimeout(codexBin, args, {
+    input: options.input || "",
+    idleTimeout: CLI_PROVIDER_INACTIVITY_TIMEOUT_MS,
+    abortSignal: options.abortSignal || null
+  });
+}
+
 function runCommand(command, args, options = {}) {
   if (process.platform === "win32" && /\.cmd$/i.test(command) && fs.existsSync(command)) {
     return runWindowsCommandFile(command, args, options);
@@ -4888,6 +5191,8 @@ function tryParseJson(text) {
 
 function summarizeCodexFailure(result) {
   const combined = compact(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`);
+  const raw = compact(`${result.error?.message || ""} ${result.stderr || ""} ${result.stdout || ""}`);
+  const code = String(result?.error?.code || "");
   const schemaMessage = combined.match(/Invalid schema[^"]*|invalid_json_schema[^"]*/i)?.[0];
 
   if (schemaMessage) {
@@ -4898,6 +5203,18 @@ function summarizeCodexFailure(result) {
     return buildUsageLimitMessage({ label: "Codex" }, combined);
   }
 
+  if (code === "ABORT_ERR" || /stopped by the user/i.test(raw)) {
+    return "The Codex request was stopped by the user.";
+  }
+
+  if (code === "ETIMEDOUT" || /inactivity timeout|timed out|etimedout/i.test(raw)) {
+    return "Codex stopped producing output before it completed the response and hit the inactivity timeout. Try again with less context or switch provider.";
+  }
+
+  if (code === "ENOBUFS" || /output buffer limit|ENOBUFS/i.test(raw)) {
+    return "Codex produced more output than the bridge could safely capture. Try again with less context.";
+  }
+
   const errorMessage = combined.match(/ERROR:\s*(\{.*?\})(?=\s*ERROR:|\s*$)/i)?.[1];
   if (errorMessage) {
     try {
@@ -4906,6 +5223,10 @@ function summarizeCodexFailure(result) {
     } catch {
       return compact(errorMessage).slice(0, 500);
     }
+  }
+
+  if (/Return only valid JSON\.?$/i.test(combined)) {
+    return "Codex exited before returning a usable final JSON response. The captured output looked like prompt text rather than final assistant content.";
   }
 
   return combined.slice(-800) || "Codex agent request failed.";
