@@ -201,6 +201,12 @@ const PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT = 5;
 const PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT = 2600;
 const PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT = 1200;
 const PROVIDER_RECENT_REFERENCE_LIMIT = 8;
+const PROVIDER_COMPACT_VISIBLE_TEXT_LIMIT = 2200;
+const PROVIDER_COMPACT_ELEMENT_LIMIT = 8;
+const PROVIDER_COMPACT_FORM_LIMIT = 3;
+const PROVIDER_COMPACT_FIELD_LIMIT = 4;
+const PROVIDER_COMPACT_STRUCTURED_ITEM_LIMIT = 8;
+const PROVIDER_COMPACT_CONTENT_BLOCK_LIMIT = 6;
 const TASK_MEMORY_GOAL_LIMIT = 8;
 const TASK_MEMORY_CONSTRAINT_LIMIT = 10;
 const TASK_MEMORY_EXPLORED_LIMIT = 18;
@@ -3689,6 +3695,7 @@ async function processQueuedMessage(item) {
     return;
   }
   state.pendingMemoryIntent = parseDeferredMemoryIntent(text);
+  maybeResetTaskMemoryForNewGoal(text);
   rememberTaskMemoryGoal(text, { source: "user_message" });
 
   const planContext = item?.planContext || tabToPageContext(await getCurrentActiveTab());
@@ -4166,12 +4173,14 @@ async function getAgentResult(goal, options = {}) {
     const recentReferences = getRecentReferencesForProvider(providerGoal, rawObservation, conversationContext);
     const recentActions = getRecentActionsForProvider();
     const taskMemory = getTaskMemoryForProvider(goal);
-    const observationForRequest = compactObservationForProvider(rawObservation, {
+    const observationContext = {
       goal,
       conversationContext,
       userMemory: state.userMemory.items,
       recentReferences
-    });
+    };
+    const providerContextMode = options.compactProviderContext ? "compact" : "standard";
+    const observationForRequest = compactObservationForProvider(rawObservation, observationContext, providerContextMode);
     const payload = {
       goal: providerGoal,
       responseLanguage,
@@ -4223,6 +4232,26 @@ async function getAgentResult(goal, options = {}) {
         createdAt: options.createdAt,
         omitAttachmentsForProvider: true,
         continuationReason: compact(`${options.continuationReason || ""}\nThe previous provider attempt timed out. Retry with lighter context and no attachments. If the answer still depends on missing material, ask for the rest explicitly.`)
+      });
+    }
+
+    if (
+      response.ok
+      && isProviderContextLimitResult(response.envelope?.payload)
+      && !options.compactProviderContext
+    ) {
+      state.activity.unshift("HTTP provider rejected the context size; retrying once with compact page context.");
+      addDebugLog("provider.agent_request.retry", {
+        reason: "context_limit_compact_retry",
+        compactProviderContext: true,
+        omitAttachmentsForProvider: true
+      }, "Retrying provider request with compact context after context-window rejection.");
+      return getAgentResult(goal, {
+        ...options,
+        createdAt: options.createdAt,
+        compactProviderContext: true,
+        omitAttachmentsForProvider: true,
+        continuationReason: compact(`${options.continuationReason || ""}\nThe previous provider attempt exceeded the model context window. Retry with compact page context and use focused/structured URLs first.`)
       });
     }
 
@@ -4503,6 +4532,89 @@ function mergeTaskMemoryEntries(existing, incoming, limit, buildKey) {
 
 function touchTaskMemory() {
   state.taskMemory.updatedAt = new Date().toISOString();
+}
+
+function maybeResetTaskMemoryForNewGoal(goal) {
+  const text = normalizeTaskMemoryText(goal);
+  if (!text || isRetryLikeGoal(text)) {
+    return false;
+  }
+
+  state.taskMemory = normalizeTaskMemory(state.taskMemory);
+  const previousGoal = state.taskMemory.currentGoal || state.taskMemory.rootGoal || "";
+  if (!previousGoal || areTaskGoalsRelated(previousGoal, text)) {
+    return false;
+  }
+
+  const hadMaterial = Boolean(
+    state.taskMemory.rootGoal
+    || state.taskMemory.currentGoal
+    || state.taskMemory.explored.length
+    || state.taskMemory.findings.length
+    || state.taskMemory.deadEnds.length
+    || state.taskMemory.nextSteps.length
+  );
+  if (!hadMaterial) {
+    return false;
+  }
+
+  addDebugLog("task_memory.reset", {
+    previousGoal,
+    nextGoal: text
+  }, "Reset stale task memory for a new unrelated user goal.");
+  state.taskMemory = createEmptyTaskMemory();
+  return true;
+}
+
+function areTaskGoalsRelated(previousGoal, nextGoal) {
+  const previousTokens = getTaskGoalTokens(previousGoal);
+  const nextTokens = getTaskGoalTokens(nextGoal);
+  if (!previousTokens.size || !nextTokens.size) {
+    return false;
+  }
+
+  for (const token of nextTokens) {
+    if (previousTokens.has(token)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getTaskGoalTokens(text) {
+  const generic = new Set([
+    "cerca",
+    "search",
+    "trova",
+    "find",
+    "online",
+    "apri",
+    "open",
+    "page",
+    "pagina",
+    "tab",
+    "tabs",
+    "nuova",
+    "nuove",
+    "risultati",
+    "results"
+  ]);
+  return new Set(
+    normalizeTextBlock(text || "")
+      .split(" ")
+      .map((token) => token.trim())
+      .map(canonicalTaskGoalToken)
+      .filter((token) => token.length >= 4 && !generic.has(token))
+  );
+}
+
+function canonicalTaskGoalToken(token) {
+  const value = String(token || "").trim();
+  if (value.length > 5 && /[aeio]$/.test(value)) {
+    return value.slice(0, -1);
+  }
+  return value;
 }
 
 function rememberTaskMemoryGoal(goal, options = {}) {
@@ -4945,11 +5057,12 @@ function findAccessibleTabById(tabId) {
   return Object.values(state.accessibleTabs || {}).find((tab) => tab.tabId === tabId) || null;
 }
 
-function compactObservationForProvider(observation, context = {}) {
+function compactObservationForProvider(observation, context = {}, mode = "standard") {
   if (!observation) return null;
 
   const visibleText = String(observation.visible_text || "");
-  const useFullDump = shouldUseFullObservationDump(observation);
+  const compactMode = mode === "compact";
+  const useFullDump = !compactMode && shouldUseFullObservationDump(observation);
   const visibleTextExcerpt = useFullDump
     ? {
         text: visibleText,
@@ -4957,8 +5070,12 @@ function compactObservationForProvider(observation, context = {}) {
         strategy: "full_dump_small_page"
       }
     : buildSegmentAwareVisibleTextExcerpt(observation, context);
-  const elementLimit = useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_ELEMENT_LIMIT;
-  const formLimit = useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_FORM_LIMIT;
+  const elementLimit = useFullDump
+    ? Number.MAX_SAFE_INTEGER
+    : (compactMode ? PROVIDER_COMPACT_ELEMENT_LIMIT : PROVIDER_ELEMENT_LIMIT);
+  const formLimit = useFullDump
+    ? Number.MAX_SAFE_INTEGER
+    : (compactMode ? PROVIDER_COMPACT_FORM_LIMIT : PROVIDER_FORM_LIMIT);
   const counts = {
     headings: observation.headings?.length || 0,
     links: observation.links?.length || 0,
@@ -4968,25 +5085,41 @@ function compactObservationForProvider(observation, context = {}) {
     structured_items: observation.structured_items?.length || 0,
     content_blocks: observation.content_blocks?.length || 0
   };
-  const pageOutline = compactPageOutlineForProvider(observation.page_outline, useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_SECTION_LIMIT);
-  const structuredItems = compactStructuredItemsForProvider(observation.structured_items, context, useFullDump ? Number.MAX_SAFE_INTEGER : PROVIDER_STRUCTURED_ITEM_LIMIT);
+  const pageOutline = compactPageOutlineForProvider(
+    observation.page_outline,
+    useFullDump ? Number.MAX_SAFE_INTEGER : (compactMode ? 5 : PROVIDER_SECTION_LIMIT)
+  );
+  const structuredItems = compactStructuredItemsForProvider(
+    observation.structured_items,
+    context,
+    useFullDump
+      ? Number.MAX_SAFE_INTEGER
+      : (compactMode ? PROVIDER_COMPACT_STRUCTURED_ITEM_LIMIT : PROVIDER_STRUCTURED_ITEM_LIMIT),
+    { mode }
+  );
   const focusedContext = buildFocusedContextForProvider(observation, context, useFullDump ? "full" : "compact");
-  const contentBlocks = compactContentBlocksForProvider(observation.content_blocks, context, useFullDump ? Number.MAX_SAFE_INTEGER : 16);
+  const contentBlocks = compactContentBlocksForProvider(
+    observation.content_blocks,
+    context,
+    useFullDump ? Number.MAX_SAFE_INTEGER : (compactMode ? PROVIDER_COMPACT_CONTENT_BLOCK_LIMIT : 16)
+  );
 
   return {
     type: observation.type || "page_observation",
     tab: compactTabForProvider(observation.tab || {}),
     viewport: observation.viewport || null,
     capturedAt: observation.capturedAt || "",
-    visible_text: visibleTextExcerpt.text,
+    visible_text: compactMode
+      ? String(visibleTextExcerpt.text || "").slice(0, PROVIDER_COMPACT_VISIBLE_TEXT_LIMIT)
+      : visibleTextExcerpt.text,
     visibleTextLength: visibleText.length,
     visibleTextTruncated: visibleTextExcerpt.truncated,
     visibleTextExcerptStrategy: visibleTextExcerpt.strategy,
-    headings: compactElementsForProvider(observation.headings, elementLimit),
-    links: compactElementsForProvider(observation.links, elementLimit),
-    buttons: compactElementsForProvider(observation.buttons, elementLimit),
-    forms: compactFormsForProvider(observation.forms, formLimit),
-    interactive_elements: compactElementsForProvider(observation.interactive_elements, elementLimit),
+    headings: compactElementsForProvider(observation.headings, compactMode ? Math.min(6, elementLimit) : elementLimit, { mode }),
+    links: compactElementsForProvider(observation.links, elementLimit, { mode }),
+    buttons: compactElementsForProvider(observation.buttons, compactMode ? Math.min(6, elementLimit) : elementLimit, { mode }),
+    forms: compactFormsForProvider(observation.forms, formLimit, { mode }),
+    interactive_elements: compactElementsForProvider(observation.interactive_elements, elementLimit, { mode }),
     counts,
     page_outline: pageOutline,
     structured_items: structuredItems,
@@ -4994,6 +5127,8 @@ function compactObservationForProvider(observation, context = {}) {
     content_blocks: contentBlocks,
     note: useFullDump
       ? "Observation kept in full because the page is small enough for the local model context."
+      : compactMode
+        ? "Observation compacted aggressively for provider retry/context-window safety."
       : "Observation compacted with page outline, structured items, and focused context."
   };
 }
@@ -5066,29 +5201,32 @@ function compactPageOutlineForProvider(pageOutline = null, limit = PROVIDER_SECT
   };
 }
 
-function compactStructuredItemsForProvider(items = [], context = {}, limit = PROVIDER_STRUCTURED_ITEM_LIMIT) {
+function compactStructuredItemsForProvider(items = [], context = {}, limit = PROVIDER_STRUCTURED_ITEM_LIMIT, options = {}) {
+  const compactMode = options.mode === "compact";
   const ranked = rankStructuredItems(items, context).slice(0, limit);
   return ranked.map((item) => ({
     item_id: item.item_id || "",
     agent_id: item.agent_id || "",
     role: item.role || "",
-    title: String(item.title || "").slice(0, 220),
-    label: String(item.label || "").slice(0, 220),
-    metadata: String(item.metadata || "").slice(0, 260),
-    text_preview: String(item.text_preview || "").slice(0, 320),
+    title: String(item.title || "").slice(0, compactMode ? 140 : 220),
+    label: String(item.label || "").slice(0, compactMode ? 140 : 220),
+    metadata: String(item.metadata || "").slice(0, compactMode ? 160 : 260),
+    text_preview: String(item.text_preview || "").slice(0, compactMode ? 180 : 320),
     destination_url: item.destination_url || item.href || "",
     link_candidates: Array.isArray(item.link_candidates)
-      ? item.link_candidates.slice(0, 6).map((candidate) => ({
+      ? item.link_candidates.slice(0, compactMode ? 2 : 6).map((candidate) => ({
           href: candidate.href || "",
-          text: String(candidate.text || "").slice(0, 180),
-          aria_label: String(candidate.aria_label || "").slice(0, 120),
-          title: String(candidate.title || "").slice(0, 120)
+          text: String(candidate.text || "").slice(0, compactMode ? 100 : 180),
+          aria_label: String(candidate.aria_label || "").slice(0, compactMode ? 80 : 120),
+          title: String(candidate.title || "").slice(0, compactMode ? 80 : 120)
         }))
       : [],
     href: item.href || "",
     section_id: item.section_id || "",
     section_title: item.section_title || "",
-    selector_candidates: Array.isArray(item.selector_candidates) ? item.selector_candidates.slice(0, PROVIDER_SELECTOR_LIMIT) : [],
+    selector_candidates: compactMode
+      ? []
+      : (Array.isArray(item.selector_candidates) ? item.selector_candidates.slice(0, PROVIDER_SELECTOR_LIMIT) : []),
     source_agent_ids: Array.isArray(item.source_agent_ids) ? item.source_agent_ids.slice(0, 4) : []
   }));
 }
@@ -5396,82 +5534,117 @@ function compactTabForProvider(tab) {
   };
 }
 
-function compactElementsForProvider(elements, limit) {
-  return (Array.isArray(elements) ? elements : []).slice(0, limit).map((element) => ({
-    agent_id: element.agent_id || "",
-    role: element.role || "",
-    tag: element.tag || "",
-    type: element.type || "",
-    name: element.name || element.text || "",
-    text: element.text || "",
-    nearby_text: String(element.nearby_text || "").slice(0, 220),
-    href: element.href || "",
-    destination_url: element.destination_url || "",
-    expandable: Boolean(element.expandable),
-    expanded: typeof element.expanded === "boolean" ? element.expanded : null,
-    popup_role: element.popup_role || "",
-    controlled_region: element.controlled_region
-      ? {
-          id: element.controlled_region.id || "",
-          role: element.controlled_region.role || "",
-          label: String(element.controlled_region.label || "").slice(0, 120),
-          hidden: Boolean(element.controlled_region.hidden),
-          item_count: Number(element.controlled_region.item_count || 0),
-          titles: Array.isArray(element.controlled_region.titles)
-            ? element.controlled_region.titles.slice(0, 6).map((title) => String(title || "").slice(0, 120))
-            : [],
-          actions: Array.isArray(element.controlled_region.actions)
-            ? element.controlled_region.actions.slice(0, 8).map((action) => ({
-                role: action.role || "",
-                label: String(action.label || "").slice(0, 120),
-                href: action.href || "",
-                value: String(action.value || "").slice(0, 120)
-              }))
-            : []
-        }
-      : null,
-    link_candidates: Array.isArray(element.link_candidates)
-      ? element.link_candidates.slice(0, 4).map((candidate) => ({
-          href: candidate.href || "",
-          text: String(candidate.text || "").slice(0, 180),
-          aria_label: String(candidate.aria_label || "").slice(0, 120),
-          title: String(candidate.title || "").slice(0, 120)
-        }))
-      : [],
-    bbox: element.bbox || null,
-    level: element.level || "",
-    nearest_heading: element.nearest_heading || null,
-    selector_candidates: compactSelectorsForProvider(element.selector_candidates)
-  }));
+function compactElementsForProvider(elements, limit, options = {}) {
+  const compactMode = options.mode === "compact";
+  return (Array.isArray(elements) ? elements : []).slice(0, limit).map((element) => {
+    const base = {
+      agent_id: element.agent_id || "",
+      role: element.role || "",
+      tag: element.tag || "",
+      type: element.type || "",
+      name: String(element.name || element.text || "").slice(0, compactMode ? 140 : 260),
+      text: String(element.text || "").slice(0, compactMode ? 140 : 260),
+      nearby_text: String(element.nearby_text || "").slice(0, compactMode ? 120 : 220),
+      href: element.href || "",
+      destination_url: element.destination_url || "",
+      expandable: Boolean(element.expandable),
+      expanded: typeof element.expanded === "boolean" ? element.expanded : null,
+      popup_role: element.popup_role || "",
+      level: element.level || ""
+    };
+
+    if (compactMode) {
+      return {
+        ...base,
+        controlled_region: element.controlled_region
+          ? {
+              role: element.controlled_region.role || "",
+              label: String(element.controlled_region.label || "").slice(0, 100),
+              hidden: Boolean(element.controlled_region.hidden),
+              item_count: Number(element.controlled_region.item_count || 0),
+              titles: Array.isArray(element.controlled_region.titles)
+                ? element.controlled_region.titles.slice(0, 3).map((title) => String(title || "").slice(0, 80))
+                : []
+            }
+          : null,
+        link_candidates: Array.isArray(element.link_candidates)
+          ? element.link_candidates.slice(0, 1).map((candidate) => ({
+              href: candidate.href || "",
+              text: String(candidate.text || "").slice(0, 100)
+            }))
+          : []
+      };
+    }
+
+    return {
+      ...base,
+      controlled_region: element.controlled_region
+        ? {
+            id: element.controlled_region.id || "",
+            role: element.controlled_region.role || "",
+            label: String(element.controlled_region.label || "").slice(0, 120),
+            hidden: Boolean(element.controlled_region.hidden),
+            item_count: Number(element.controlled_region.item_count || 0),
+            titles: Array.isArray(element.controlled_region.titles)
+              ? element.controlled_region.titles.slice(0, 6).map((title) => String(title || "").slice(0, 120))
+              : [],
+            actions: Array.isArray(element.controlled_region.actions)
+              ? element.controlled_region.actions.slice(0, 8).map((action) => ({
+                  role: action.role || "",
+                  label: String(action.label || "").slice(0, 120),
+                  href: action.href || "",
+                  value: String(action.value || "").slice(0, 120)
+                }))
+              : []
+          }
+        : null,
+      link_candidates: Array.isArray(element.link_candidates)
+        ? element.link_candidates.slice(0, 4).map((candidate) => ({
+            href: candidate.href || "",
+            text: String(candidate.text || "").slice(0, 180),
+            aria_label: String(candidate.aria_label || "").slice(0, 120),
+            title: String(candidate.title || "").slice(0, 120)
+          }))
+        : [],
+      bbox: element.bbox || null,
+      nearest_heading: element.nearest_heading || null,
+      selector_candidates: compactSelectorsForProvider(element.selector_candidates)
+    };
+  });
 }
 
-function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT) {
+function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT, options = {}) {
+  const compactMode = options.mode === "compact";
   return (Array.isArray(forms) ? forms : []).slice(0, limit).map((form) => ({
     agent_id: form.agent_id || "",
-    title: form.title || "",
-    bbox: form.bbox || null,
-    fields: (Array.isArray(form.fields) ? form.fields : []).slice(0, PROVIDER_FIELD_LIMIT).map((field) => ({
+    title: String(form.title || "").slice(0, compactMode ? 140 : 260),
+    bbox: compactMode ? null : form.bbox || null,
+    fields: (Array.isArray(form.fields) ? form.fields : [])
+      .slice(0, compactMode ? PROVIDER_COMPACT_FIELD_LIMIT : PROVIDER_FIELD_LIMIT)
+      .map((field) => ({
       agent_id: field.agent_id || "",
       role: field.role || "",
       tag: field.tag || "",
       type: field.type || "",
-      name: field.name || "",
-      value: field.value || "",
+      name: String(field.name || "").slice(0, compactMode ? 120 : 220),
+      value: String(field.value || "").slice(0, compactMode ? 80 : 180),
       disabled: Boolean(field.disabled),
       required: Boolean(field.required),
       expanded: typeof field.expanded === "boolean" ? field.expanded : null,
       popup_role: field.popup_role || "",
-      nearby_text: String(field.nearby_text || "").slice(0, 220),
-      bbox: field.bbox || null,
-      selector_candidates: compactSelectorsForProvider(field.selector_candidates),
-      options: Array.isArray(field.options) ? field.options.slice(0, 12) : [],
+      nearby_text: String(field.nearby_text || "").slice(0, compactMode ? 100 : 220),
+      bbox: compactMode ? null : field.bbox || null,
+      selector_candidates: compactMode ? [] : compactSelectorsForProvider(field.selector_candidates),
+      options: Array.isArray(field.options) ? field.options.slice(0, compactMode ? 6 : 12) : [],
       controlled_region: field.controlled_region
         ? {
             role: field.controlled_region.role || "",
-            label: field.controlled_region.label || "",
+            label: String(field.controlled_region.label || "").slice(0, compactMode ? 100 : 180),
             hidden: Boolean(field.controlled_region.hidden),
             item_count: field.controlled_region.item_count || 0,
-            titles: Array.isArray(field.controlled_region.titles) ? field.controlled_region.titles.slice(0, 8) : []
+            titles: Array.isArray(field.controlled_region.titles)
+              ? field.controlled_region.titles.slice(0, compactMode ? 3 : 8)
+              : []
           }
         : null
     }))
@@ -5945,6 +6118,12 @@ function normalizeEmbeddedAgentPayload(structured, wrapper = {}) {
 function isProviderTimeoutResult(result) {
   const text = `${result?.message || ""} ${result?.error || ""}`;
   return result?.type === "agent_error" && (/\b(?:408|524)\b/.test(text) || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text));
+}
+
+function isProviderContextLimitResult(result) {
+  const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
+  return result?.type === "agent_error"
+    && /exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(text);
 }
 
 function isProviderErrorLikeResult(result) {

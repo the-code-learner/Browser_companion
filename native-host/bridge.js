@@ -4353,17 +4353,19 @@ function compactObservationForPrompt(observation = {}) {
     type: safeObservation.type || "page_observation",
     tab: safeObservation.tab || {},
     viewport: safeObservation.viewport || {},
-    visible_text: String(safeObservation.visible_text || "").slice(0, 6000),
-    headings: (safeObservation.headings || []).slice(0, 20),
-    links: (safeObservation.links || []).slice(0, 80).map(compactElementForPrompt),
-    buttons: (safeObservation.buttons || []).slice(0, 80).map(compactElementForPrompt),
-    forms: (safeObservation.forms || []).slice(0, 10),
-    interactive_elements: (safeObservation.interactive_elements || []).slice(0, 120).map(compactElementForPrompt),
+    visible_text: String(safeObservation.visible_text || "").slice(0, 3000),
+    visibleTextLength: safeObservation.visibleTextLength || 0,
+    visibleTextTruncated: Boolean(safeObservation.visibleTextTruncated),
+    headings: (safeObservation.headings || []).slice(0, 8).map(compactElementForPrompt),
+    links: (safeObservation.links || []).slice(0, 12).map(compactElementForPrompt),
+    buttons: (safeObservation.buttons || []).slice(0, 8).map(compactElementForPrompt),
+    forms: (safeObservation.forms || []).slice(0, 4).map(compactFormForPrompt),
+    interactive_elements: (safeObservation.interactive_elements || []).slice(0, 10).map(compactElementForPrompt),
     counts: safeObservation.counts || null,
     page_outline: compactPageOutlineForPrompt(safeObservation.page_outline || null),
-    structured_items: (safeObservation.structured_items || []).slice(0, 24).map(compactStructuredItemForPrompt),
-    focused_context: (safeObservation.focused_context || []).slice(0, 12).map(compactFocusedContextForPrompt),
-    content_blocks: (safeObservation.content_blocks || []).slice(0, 16).map(compactFocusedContextForPrompt),
+    structured_items: (safeObservation.structured_items || []).slice(0, 10).map(compactStructuredItemForPrompt),
+    focused_context: (safeObservation.focused_context || []).slice(0, 6).map(compactFocusedContextForPrompt),
+    content_blocks: (safeObservation.content_blocks || []).slice(0, 6).map(compactFocusedContextForPrompt),
     note: safeObservation.note || "",
     capturedAt: safeObservation.capturedAt || ""
   };
@@ -4390,24 +4392,41 @@ function compactElementForPrompt(element = {}) {
             ? element.controlled_region.titles.slice(0, 6).map((title) => String(title || "").slice(0, 120))
             : [],
           actions: Array.isArray(element.controlled_region.actions)
-            ? element.controlled_region.actions.slice(0, 8).map((action) => ({
+            ? element.controlled_region.actions.slice(0, 3).map((action) => ({
                 role: action.role || "",
-                label: String(action.label || "").slice(0, 120),
+                label: String(action.label || "").slice(0, 100),
                 href: action.href || "",
-                value: String(action.value || "").slice(0, 120)
+                value: String(action.value || "").slice(0, 100)
               }))
             : []
         }
       : null,
-    link_candidates: (element.link_candidates || []).slice(0, 4).map((candidate) => ({
+    link_candidates: (element.link_candidates || []).slice(0, 1).map((candidate) => ({
       href: candidate.href || "",
-      text: String(candidate.text || "").slice(0, 180),
-      aria_label: String(candidate.aria_label || "").slice(0, 120),
-      title: String(candidate.title || "").slice(0, 120)
+      text: String(candidate.text || "").slice(0, 100),
+      aria_label: String(candidate.aria_label || "").slice(0, 80),
+      title: String(candidate.title || "").slice(0, 80)
     })),
-    nearest_heading: element.nearest_heading || null,
-    type: element.type || "",
-    selector_candidates: (element.selector_candidates || []).slice(0, 3)
+    type: element.type || ""
+  };
+}
+
+function compactFormForPrompt(form = {}) {
+  return {
+    agent_id: form.agent_id || "",
+    title: String(form.title || "").slice(0, 160),
+    fields: (form.fields || []).slice(0, 5).map((field) => ({
+      agent_id: field.agent_id || "",
+      role: field.role || "",
+      type: field.type || "",
+      name: String(field.name || "").slice(0, 120),
+      value: String(field.value || "").slice(0, 80),
+      required: Boolean(field.required),
+      expanded: typeof field.expanded === "boolean" ? field.expanded : null,
+      popup_role: field.popup_role || "",
+      nearby_text: String(field.nearby_text || "").slice(0, 100),
+      options: Array.isArray(field.options) ? field.options.slice(0, 6) : []
+    }))
   };
 }
 
@@ -4420,7 +4439,7 @@ function compactPageOutlineForPrompt(pageOutline = null) {
     page_type: pageOutline.page_type || "general",
     repeated_item_summary: String(pageOutline.repeated_item_summary || "").slice(0, 300),
     counts: pageOutline.counts || null,
-    sections: (pageOutline.sections || []).slice(0, 10).map((section) => ({
+    sections: (pageOutline.sections || []).slice(0, 6).map((section) => ({
       section_id: section.section_id || "",
       title: section.title || "",
       preview: String(section.preview || "").slice(0, 220),
@@ -4435,21 +4454,20 @@ function compactStructuredItemForPrompt(item = {}) {
     item_id: item.item_id || "",
     agent_id: item.agent_id || "",
     role: item.role || "",
-    title: String(item.title || "").slice(0, 220),
-    label: String(item.label || "").slice(0, 220),
-    metadata: String(item.metadata || "").slice(0, 260),
-    text_preview: String(item.text_preview || "").slice(0, 320),
+    title: String(item.title || "").slice(0, 160),
+    label: String(item.label || "").slice(0, 160),
+    metadata: String(item.metadata || "").slice(0, 180),
+    text_preview: String(item.text_preview || "").slice(0, 220),
     destination_url: item.destination_url || item.href || "",
-    link_candidates: (item.link_candidates || []).slice(0, 6).map((candidate) => ({
+    link_candidates: (item.link_candidates || []).slice(0, 2).map((candidate) => ({
       href: candidate.href || "",
-      text: String(candidate.text || "").slice(0, 180),
-      aria_label: String(candidate.aria_label || "").slice(0, 120),
-      title: String(candidate.title || "").slice(0, 120)
+      text: String(candidate.text || "").slice(0, 100),
+      aria_label: String(candidate.aria_label || "").slice(0, 80),
+      title: String(candidate.title || "").slice(0, 80)
     })),
     href: item.href || "",
     section_id: item.section_id || "",
-    section_title: item.section_title || "",
-    selector_candidates: (item.selector_candidates || []).slice(0, 3),
+    section_title: String(item.section_title || "").slice(0, 120),
     source_agent_ids: (item.source_agent_ids || []).slice(0, 4)
   };
 }
