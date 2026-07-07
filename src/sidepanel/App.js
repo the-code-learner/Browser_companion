@@ -1409,6 +1409,10 @@ function renderErrorNote(message) {
 function getErrorNoteSummary(message) {
   const raw = String(message?.text || "").trim();
 
+  if (/exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(raw)) {
+    return "Provider context limit";
+  }
+
   if (/\b524\b/.test(raw) || /timeout|timed out|aborted due to timeout/i.test(raw)) {
     return "Provider request timed out";
   }
@@ -2499,7 +2503,7 @@ async function checkConnector() {
       providers
     };
     ensureSelectedProviderAvailable();
-    const httpHealthRefreshed = await refreshSelectedHttpProviderHealth();
+    const httpHealthRefreshed = await refreshAllHttpProviderHealth();
     if (httpHealthRefreshed) {
       providers = normalizeProviderStatuses(status.providers || []);
       state.connector.providers = providers;
@@ -2700,6 +2704,45 @@ async function refreshSelectedHttpProviderHealth() {
     return false;
   }
 
+  return refreshHttpProviderHealth(provider, {
+    preserveSelectedModel: true
+  });
+}
+
+async function refreshAllHttpProviderHealth() {
+  const providers = [];
+  const seen = new Set();
+  for (const provider of state.httpProviders) {
+    if (!provider?.id || !provider.baseUrl || seen.has(provider.id)) {
+      continue;
+    }
+    providers.push(provider);
+    seen.add(provider.id);
+  }
+
+  if (
+    state.httpProviderDraft.id
+    && state.httpProviderDraft.baseUrl
+    && !seen.has(state.httpProviderDraft.id)
+  ) {
+    providers.push(state.httpProviderDraft);
+  }
+
+  let touched = false;
+  for (const provider of providers) {
+    touched = await refreshHttpProviderHealth(provider, {
+      preserveSelectedModel: state.codex.provider === `http:${provider.id}`
+    }) || touched;
+  }
+
+  return touched;
+}
+
+async function refreshHttpProviderHealth(provider, options = {}) {
+  if (!provider?.baseUrl) {
+    return false;
+  }
+
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.HTTP_PROVIDER_TEST, provider));
   addDebugLog("connector.http_health", {
     providerId: provider.id,
@@ -2710,20 +2753,32 @@ async function refreshSelectedHttpProviderHealth() {
   }, response.ok
     ? (response.envelope?.payload?.message || "HTTP provider health checked.")
     : (response.error || "HTTP provider health check failed."));
+  const payload = response.envelope?.payload || {};
+  const models = Array.isArray(payload.models) ? payload.models : [];
+  const loadedModels = Array.isArray(payload.loadedModels) ? payload.loadedModels : [];
   const targetId = provider.id;
   const updateProvider = (item) => (item.id === targetId ? {
     ...item,
     ...provider,
-    ...(response.ok ? {
-      model: (response.envelope?.payload?.models || []).includes(state.codex.model)
+    ...(response.ok && payload.status !== "error" ? {
+      model: models.includes(state.codex.model) && options.preserveSelectedModel
         ? state.codex.model
-        : (response.envelope?.payload?.models?.[0] || item.model || provider.model),
-      models: response.envelope?.payload?.models || item.models || [],
-      loadedModels: response.envelope?.payload?.loadedModels || [],
-      lastStatus: response.envelope?.payload?.status || "ready",
-      lastMessage: response.envelope?.payload?.message || "HTTP provider test completed.",
-      errorKind: response.envelope?.payload?.errorKind || "",
-      lastDetail: response.envelope?.payload?.detail || ""
+        : (models.includes(item.model || provider.model)
+            ? (item.model || provider.model)
+            : (models[0] || item.model || provider.model)),
+      models: models.length ? models : item.models || [],
+      loadedModels,
+      lastStatus: payload.status || "ready",
+      lastMessage: payload.message || "HTTP provider test completed.",
+      errorKind: payload.errorKind || "",
+      lastDetail: payload.detail || ""
+    } : response.ok ? {
+      models,
+      loadedModels,
+      lastStatus: payload.status || "error",
+      lastMessage: payload.message || "HTTP provider test failed.",
+      errorKind: payload.errorKind || "http_error",
+      lastDetail: payload.detail || ""
     } : {
       lastStatus: "error",
       lastMessage: response.error || "HTTP provider test failed.",
@@ -3668,7 +3723,7 @@ function handleRuntimeMessage(message) {
 
   state.liveThinking = {
     requestId: payload.requestId || "",
-    text: thinking,
+    text: compactThinkingForDisplay(thinking),
     streaming: true,
     createdAt: state.liveThinking?.createdAt || Date.now(),
     updatedAt: Date.now()
@@ -4414,6 +4469,7 @@ function normalizeTaskMemoryEntry(entry) {
     query: normalizeTaskMemoryText(safe.query || ""),
     url: String(safe.url || "").slice(0, 500),
     title: normalizeTaskMemoryText(safe.title || ""),
+    results: compactWebSearchResultsForProvider(safe.results, 6),
     status: normalizeTaskMemoryText(safe.status || ""),
     reason: normalizeTaskMemoryText(safe.reason || ""),
     source: normalizeTaskMemoryText(safe.source || ""),
@@ -4578,6 +4634,7 @@ function rememberTaskMemoryActionResults(plan, results) {
         kind: "web_search",
         label: normalizeTaskMemoryText(artifact.query || action?.value || ""),
         query: normalizeTaskMemoryText(artifact.query || action?.value || ""),
+        results: compactWebSearchResultsForProvider(artifact.results, 6),
         status: `${resultCount} results`,
         source: action?.id || result?.action_id || "",
         at: result?.createdAt || new Date().toISOString()
@@ -5895,6 +5952,8 @@ function isProviderErrorLikeResult(result) {
   return /\b(?:408|524)\b/.test(text)
     || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text)
     || /stream stalled|terminated/i.test(text)
+    || /exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(text)
+    || /upstream error page/i.test(text)
     || /HTTP provider returned \d+/i.test(text)
     || /<!doctype html>|<html\b|cloudflare/i.test(text);
 }
@@ -5954,10 +6013,10 @@ function extractProviderErrorMeta(result) {
     kind = "timeout";
   } else if (/stream stalled|terminated/i.test(text)) {
     kind = "stalled";
+  } else if (/exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(text)) {
+    kind = "context_limit";
   } else if (/<!doctype html>|<html\b|cloudflare/i.test(text)) {
     kind = "upstream_html";
-  } else if (/exceeds the available context size|exceed_context_size_error/i.test(text)) {
-    kind = "context_limit";
   } else if (/HTTP provider returned \d+/i.test(text)) {
     kind = "http_error";
   }
@@ -6016,12 +6075,12 @@ function formatProviderAgentErrorMessage(result) {
     return "The HTTP provider started streaming thinking, but then stopped making real progress before producing a final answer.";
   }
 
-  if (/HTTP provider returned \d+/i.test(raw) || /<!doctype html>|<html\b|cloudflare/i.test(raw)) {
-    return "The HTTP provider returned an upstream error page instead of a usable model response.";
+  if (/exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(raw)) {
+    return "The HTTP provider rejected the request because the supplied context exceeds the model's available context window.";
   }
 
-  if (/exceeds the available context size|exceed_context_size_error/i.test(raw)) {
-    return "The HTTP provider rejected the request because the supplied context exceeds the model's available context window.";
+  if (/HTTP provider returned \d+/i.test(raw) || /<!doctype html>|<html\b|cloudflare/i.test(raw)) {
+    return "The HTTP provider returned an upstream error page instead of a usable model response.";
   }
 
   return raw || "The selected local provider is not ready, so I used only local page context.";
@@ -6076,7 +6135,24 @@ function getAgentDisplayThinking(result) {
     || ""
   );
 
-  return extractNestedReasoningText(text);
+  return compactThinkingForDisplay(extractNestedReasoningText(text));
+}
+
+function compactThinkingForDisplay(text) {
+  const raw = String(text || "").trim();
+  if (!raw || raw.length <= DISPLAY_THINKING_MAX_CHARS) {
+    return raw;
+  }
+
+  const headLength = Math.floor(DISPLAY_THINKING_MAX_CHARS * 0.65);
+  const tailLength = DISPLAY_THINKING_MAX_CHARS - headLength;
+  return [
+    raw.slice(0, headLength).trimEnd(),
+    "",
+    `[thinking truncated: ${raw.length - DISPLAY_THINKING_MAX_CHARS} characters omitted]`,
+    "",
+    raw.slice(-tailLength).trimStart()
+  ].join("\n");
 }
 
 function extractNestedNaturalText(text) {
@@ -6506,7 +6582,36 @@ function shouldContinueAfterActionPlan(plan, results, synthesized, options = {})
   }
 
   return results.some((result) => ACTION_CONTINUATION_ARTIFACT_KINDS.has(result.artifact?.kind))
-    || actions.some((action) => POST_ACTION_OBSERVATION_ACTION_TYPES.has(action?.type));
+    || actions.some((action) => POST_ACTION_OBSERVATION_ACTION_TYPES.has(action?.type))
+    || shouldContinueAfterNavigationAction(plan, results);
+}
+
+function shouldContinueAfterNavigationAction(plan, results) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const hasSuccessfulNavigation = actions.some((action) => action?.type === "open_url")
+    && results.some((result) => result?.status === "success" && result?.page_changed);
+
+  if (!hasSuccessfulNavigation) {
+    return false;
+  }
+
+  const goalText = [
+    plan?.goal || "",
+    plan?.summary_for_user || "",
+    plan?.text || "",
+    actions.map((action) => [
+      action?.type || "",
+      action?.value || "",
+      action?.target?.name || "",
+      action?.reason || ""
+    ].join(" ")).join(" ")
+  ].join(" ");
+
+  const needsMoreThanNavigation = /\b(trova|find|cerca|search|ricerca|offerte|annunci|jobs?|risultati|results?|fonti|sources?|almeno\s+\d+|at least\s+\d+|apri\s+(?:ogni|tutte|tutti)|open\s+(?:each|all)|nuov[ae]\s+schede?|new\s+tabs?)\b/i.test(goalText);
+  const openedSearchPage = actions.some((action) => action?.type === "open_url"
+    && /(?:\/search\?|[?&]q=|search_results|risultati|\bsearch\b|\bcerca\b)/i.test(`${action?.value || ""} ${action?.target?.name || ""} ${action?.reason || ""}`));
+
+  return needsMoreThanNavigation || openedSearchPage;
 }
 
 function buildPostActionContinuationReason(plan, results, synthesized) {
@@ -6518,6 +6623,10 @@ function buildPostActionContinuationReason(plan, results, synthesized) {
       return `${result.action_id || "action"}: ${result.status}${detail ? ` - ${detail}` : ""}`;
     })
     .join(" | ");
+  const searchResultSummary = buildSearchResultsContinuationSummary(results);
+  const navigationNote = (plan?.actions || []).some((action) => action?.type === "open_url")
+    ? "A successful open_url can be only an intermediate navigation. If the user's goal requires reading results or opening multiple destinations, use the latest observation or request the next necessary page-read/open-tab action instead of stopping."
+    : "";
   const fallbackNote = synthesized
     ? `The intermediate answer was not sufficient yet: "${compact(synthesized).slice(0, 240)}".`
     : "No final answer is available yet from the last action batch.";
@@ -6526,9 +6635,38 @@ function buildPostActionContinuationReason(plan, results, synthesized) {
     "A browser action batch has just completed. Use the newest context to either answer directly or choose the next necessary action plan.",
     latestObservation ? `Latest observed page after the actions: ${formatObservationForContinuation(latestObservation)}.` : "",
     actionSummary ? `Recent action results: ${actionSummary}.` : "",
+    searchResultSummary,
+    navigationNote,
     fallbackNote,
+    "If web_search results include URLs, treat those URLs as available evidence and use them directly for http_request or open_url_new_tab actions. Do not repeat the same search only to recover links already listed here.",
     "Do not stop only because the previous action batch finished. If the user's goal still needs more context, return the next best action plan."
   ].filter(Boolean).join("\n");
+}
+
+function buildSearchResultsContinuationSummary(results) {
+  const searchArtifacts = (Array.isArray(results) ? results : [])
+    .map((result) => result?.artifact)
+    .filter((artifact) => artifact?.kind === "web_search");
+
+  if (!searchArtifacts.length) {
+    return "";
+  }
+
+  const lines = [];
+  for (const artifact of searchArtifacts.slice(0, 4)) {
+    const items = compactWebSearchResultsForProvider(artifact.results, 8);
+    if (!items.length) {
+      lines.push(`Search "${artifact.query || ""}" returned no listed URLs.`);
+      continue;
+    }
+
+    lines.push(`Search "${artifact.query || ""}" URLs:`);
+    items.forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.title || "Untitled"} - ${item.url}${item.snippet ? ` - ${item.snippet}` : ""}`);
+    });
+  }
+
+  return lines.join("\n");
 }
 
 function getLatestObservationFromResults(results) {
@@ -7031,7 +7169,8 @@ function summarizeRecentActionArtifact(artifact) {
     return {
       kind: artifact.kind,
       query: artifact.query || "",
-      resultCount: Array.isArray(artifact.results) ? artifact.results.length : 0
+      resultCount: Array.isArray(artifact.results) ? artifact.results.length : 0,
+      results: compactWebSearchResultsForProvider(artifact.results, 10)
     };
   }
 
@@ -7040,6 +7179,17 @@ function summarizeRecentActionArtifact(artifact) {
     url: artifact.url || "",
     title: artifact.title || ""
   };
+}
+
+function compactWebSearchResultsForProvider(results, limit = 8) {
+  return (Array.isArray(results) ? results : [])
+    .slice(0, limit)
+    .map((result) => ({
+      title: compact(result?.title || "").slice(0, 180),
+      url: String(result?.url || "").slice(0, 600),
+      snippet: compact(result?.snippet || "").slice(0, 280)
+    }))
+    .filter((result) => result.url || result.title || result.snippet);
 }
 
 function dedupeRecentActions(entries) {
@@ -7907,7 +8057,7 @@ function shouldRememberAfterResearch(text) {
 
 async function maybeSaveResearchMemory(plan, results, answerText) {
   const goal = state.pendingMemoryIntent?.goal || plan?.goal || [...state.messages].reverse().find((message) => message.role === "user")?.text || "";
-  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "screenshot", "numbered_overlay"].includes(result.artifact?.kind));
+  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "screenshot", "numbered_overlay", "tab_opened"].includes(result.artifact?.kind));
 
   if (!shouldRememberAfterResearch(goal) || !hasResearchArtifact || !answerText || /^No browser actions/.test(answerText)) {
     return false;
@@ -7988,12 +8138,14 @@ const ACTION_CONTINUATION_ARTIFACT_KINDS = new Set([
   "page_observation",
   "web_search",
   "http_response",
+  "tab_opened",
   "screenshot",
   "numbered_overlay"
 ]);
 
 const MAX_READ_ONLY_CONTINUATIONS = 4;
 const MAX_ACTION_CONTINUATIONS = 4;
+const DISPLAY_THINKING_MAX_CHARS = 2400;
 
 function proposeMemorySave(item, responseLanguage = "en", sourceGoal = "") {
   const memoryItem = sanitizeMemoryItem(item, { goal: sourceGoal || item?.title || "" });
@@ -8891,7 +9043,7 @@ function formatHttpBodyPreview(artifact) {
 }
 
 async function maybeSynthesizeResults(plan, results) {
-  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "numbered_overlay"].includes(result.artifact?.kind));
+  const hasResearchArtifact = results.some((result) => ["web_search", "http_response", "page_observation", "numbered_overlay", "tab_opened"].includes(result.artifact?.kind));
 
   if (!hasResearchArtifact || !isSelectedProviderConnected()) {
     addDebugLog("provider.synthesis.skipped", {
@@ -9302,7 +9454,7 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
     return {
       kind: "web_search",
       query: artifact.query || "",
-      results: Array.isArray(artifact.results) ? artifact.results.slice(0, mode === "compact" ? 3 : 5) : []
+      results: compactWebSearchResultsForProvider(artifact.results, mode === "compact" ? 3 : 8)
     };
   }
 
@@ -9518,6 +9670,26 @@ function getExecutionSummary(results) {
     const firstFailure = compact(failures[0]?.log_message || "");
     const detail = firstFailure ? ` First issue: ${firstFailure}` : "";
     return `${total - failedCount} of ${total} action${total === 1 ? "" : "s"} completed. ${failedCount} need${failedCount === 1 ? "s" : ""} attention; see the expandable action details above.${detail}`;
+  }
+
+  const openedTabs = results
+    .map((result) => result?.artifact)
+    .filter((artifact) => artifact?.kind === "tab_opened" && artifact.url);
+  if (openedTabs.length) {
+    const lines = openedTabs.slice(0, 30).map((artifact, index) => {
+      const title = compact(artifact.title || "").slice(0, 120);
+      return `${index + 1}. ${title ? `${title} - ` : ""}${artifact.url}`;
+    });
+    const omitted = openedTabs.length > lines.length
+      ? `\n...and ${openedTabs.length - lines.length} more.`
+      : "";
+    return `Opened ${openedTabs.length} tab${openedTabs.length === 1 ? "" : "s"}:\n${lines.join("\n")}${omitted}`;
+  }
+
+  const navigations = results.filter((result) => result?.page_changed && /^Opened\s+/i.test(result?.log_message || ""));
+  if (navigations.length) {
+    const lines = navigations.slice(0, 10).map((result, index) => `${index + 1}. ${compact(result.log_message || "")}`);
+    return `Opened ${navigations.length} page${navigations.length === 1 ? "" : "s"}:\n${lines.join("\n")}`;
   }
 
   return "The browser actions were completed.";
