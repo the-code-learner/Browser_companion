@@ -222,6 +222,9 @@
         "value": {
           "type": "string"
         },
+        "url_ref": {
+          "type": "string"
+        },
         "source": {
           "$ref": "#/$defs/source"
         },

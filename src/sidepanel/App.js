@@ -110,6 +110,12 @@ const state = {
   recentActions: [],
   accessibleTabs: {},
   taskMemory: createEmptyTaskMemory(),
+  linkReferences: {
+    nextId: 1,
+    byUrl: {},
+    byRef: {},
+    updatedAt: ""
+  },
   pendingPlan: null,
   pendingPlanContext: null,
   pendingPolicy: null,
@@ -215,6 +221,9 @@ const TASK_MEMORY_DEAD_END_LIMIT = 8;
 const TASK_MEMORY_NEXT_STEP_LIMIT = 8;
 const TASK_MEMORY_TEXT_LIMIT = 360;
 const TASK_MEMORY_BRIEF_SECTION_LIMIT = 4;
+const LINK_REFERENCE_LIMIT = 160;
+const LINK_REFERENCE_PROVIDER_LIMIT = 80;
+const LINK_REFERENCE_TEXT_URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
 const systemThemeMediaQuery = typeof window?.matchMedia === "function"
   ? window.matchMedia("(prefers-color-scheme: dark)")
   : null;
@@ -3987,6 +3996,271 @@ async function requestSelectedProviderSynthesis(payload) {
   return sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.SYNTHESIS_REQUEST, payload));
 }
 
+function applyLinkReferencesForProvider(value, options = {}) {
+  return applyLinkReferencesDeep(value, {
+    path: [],
+    skipUrlFields: Boolean(options.skipUrlFields)
+  });
+}
+
+function applyLinkReferencesDeep(value, context) {
+  if (typeof value === "string") {
+    return context.skipUrlFields ? value : replaceUrlsInProviderText(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => applyLinkReferencesDeep(item, context));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...context.path, key];
+    const lowerKey = key.toLowerCase();
+    const skipUrlField = shouldKeepFullUrlForProviderPath(childPath, value);
+
+    if (typeof child === "string" && isProviderUrlField(lowerKey) && isHttpUrl(child) && !skipUrlField) {
+      const ref = registerLinkReference(child, inferLinkReferenceMetadata(value));
+      output[key] = ref.ref;
+      output[`${key}_ref`] = ref.ref;
+      output[`${key}_host`] = ref.host;
+      output[`${key}_hint`] = ref.hint;
+      continue;
+    }
+
+    output[key] = applyLinkReferencesDeep(child, {
+      path: childPath,
+      skipUrlFields: skipUrlField
+    });
+  }
+
+  return output;
+}
+
+function isProviderUrlField(key) {
+  return [
+    "url",
+    "href",
+    "destination_url",
+    "finalurl",
+    "final_url",
+    "source_url",
+    "primary_url"
+  ].includes(String(key || "").toLowerCase());
+}
+
+function shouldKeepFullUrlForProviderPath(path, parent = {}) {
+  const key = String(path[path.length - 1] || "").toLowerCase();
+  if (!isProviderUrlField(key)) {
+    return false;
+  }
+
+  if (parent && typeof parent === "object" && "baseUrl" in parent) {
+    return true;
+  }
+
+  return false;
+}
+
+function inferLinkReferenceMetadata(source = {}) {
+  if (!source || typeof source !== "object") {
+    return {};
+  }
+
+  return {
+    title: source.title || source.label || source.name || source.text || source.section_title || "",
+    snippet: source.snippet || source.metadata || source.text_preview || source.nearby_text || "",
+    source: source.item_id || source.agent_id || source.block_id || ""
+  };
+}
+
+function replaceUrlsInProviderText(text) {
+  const raw = String(text || "");
+  if (!raw || !raw.match(LINK_REFERENCE_TEXT_URL_PATTERN)) {
+    return raw;
+  }
+
+  LINK_REFERENCE_TEXT_URL_PATTERN.lastIndex = 0;
+  return raw.replace(LINK_REFERENCE_TEXT_URL_PATTERN, (match) => {
+    const trailing = match.match(/[),.;:!?]+$/)?.[0] || "";
+    const candidate = trailing ? match.slice(0, -trailing.length) : match;
+    if (!isHttpUrl(candidate)) {
+      return match;
+    }
+    const ref = registerLinkReference(candidate);
+    return `${ref.ref}${trailing}`;
+  });
+}
+
+function registerLinkReference(url, metadata = {}) {
+  const normalized = normalizeLinkReferenceUrl(url);
+  if (!normalized) {
+    return {
+      ref: "",
+      url: "",
+      host: "",
+      hint: ""
+    };
+  }
+
+  state.linkReferences = normalizeLinkReferenceRegistry(state.linkReferences);
+  const existingRef = state.linkReferences.byUrl[normalized];
+  if (existingRef && state.linkReferences.byRef[existingRef]) {
+    const existing = state.linkReferences.byRef[existingRef];
+    mergeLinkReferenceMetadata(existing, metadata);
+    state.linkReferences.updatedAt = new Date().toISOString();
+    return existing;
+  }
+
+  pruneLinkReferenceRegistry();
+  const ref = `L${state.linkReferences.nextId++}`;
+  const parsed = parseUrlSafe(normalized);
+  const createdAt = new Date().toISOString();
+  const entry = {
+    ref,
+    url: normalized,
+    host: parsed?.hostname || "",
+    hint: formatLinkReferenceHint(parsed, normalized),
+    title: compact(metadata.title || "").slice(0, 120),
+    snippet: compact(metadata.snippet || "").slice(0, 180),
+    source: compact(metadata.source || "").slice(0, 80),
+    createdAt
+  };
+
+  state.linkReferences.byUrl[normalized] = ref;
+  state.linkReferences.byRef[ref] = entry;
+  state.linkReferences.updatedAt = createdAt;
+  return entry;
+}
+
+function mergeLinkReferenceMetadata(entry, metadata = {}) {
+  if (!entry || !metadata) {
+    return;
+  }
+
+  if (!entry.title && metadata.title) {
+    entry.title = compact(metadata.title).slice(0, 120);
+  }
+  if (!entry.snippet && metadata.snippet) {
+    entry.snippet = compact(metadata.snippet).slice(0, 180);
+  }
+  if (!entry.source && metadata.source) {
+    entry.source = compact(metadata.source).slice(0, 80);
+  }
+}
+
+function normalizeLinkReferenceRegistry(registry) {
+  const safe = registry && typeof registry === "object" ? registry : {};
+  return {
+    nextId: Math.max(1, Number.parseInt(String(safe.nextId || 1), 10) || 1),
+    byUrl: safe.byUrl && typeof safe.byUrl === "object" ? safe.byUrl : {},
+    byRef: safe.byRef && typeof safe.byRef === "object" ? safe.byRef : {},
+    updatedAt: String(safe.updatedAt || "")
+  };
+}
+
+function pruneLinkReferenceRegistry() {
+  state.linkReferences = normalizeLinkReferenceRegistry(state.linkReferences);
+  const entries = Object.values(state.linkReferences.byRef || {});
+  if (entries.length < LINK_REFERENCE_LIMIT) {
+    return;
+  }
+
+  const keep = entries
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(0, Math.max(20, LINK_REFERENCE_LIMIT - 20));
+  state.linkReferences.byRef = {};
+  state.linkReferences.byUrl = {};
+  for (const entry of keep) {
+    state.linkReferences.byRef[entry.ref] = entry;
+    state.linkReferences.byUrl[entry.url] = entry.ref;
+  }
+}
+
+function resetLinkReferenceRegistry() {
+  state.linkReferences = {
+    nextId: 1,
+    byUrl: {},
+    byRef: {},
+    updatedAt: ""
+  };
+}
+
+function getLinkReferencesForProvider(limit = LINK_REFERENCE_PROVIDER_LIMIT) {
+  state.linkReferences = normalizeLinkReferenceRegistry(state.linkReferences);
+  return Object.values(state.linkReferences.byRef || {})
+    .sort((a, b) => Number.parseInt(a.ref.slice(1), 10) - Number.parseInt(b.ref.slice(1), 10))
+    .slice(-limit)
+    .map((entry) => ({
+      ref: entry.ref,
+      host: entry.host || "",
+      hint: entry.hint || "",
+      title: entry.title || "",
+      snippet: entry.snippet || "",
+      source: entry.source || ""
+    }));
+}
+
+function resolveLinkReference(ref) {
+  const normalized = normalizeLinkReferenceToken(ref);
+  if (!normalized) {
+    return null;
+  }
+
+  state.linkReferences = normalizeLinkReferenceRegistry(state.linkReferences);
+  return state.linkReferences.byRef[normalized] || null;
+}
+
+function normalizeLinkReferenceToken(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(?:ref:)?(L\d+)$/i);
+  return match ? match[1].toUpperCase() : "";
+}
+
+function isHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return ["http:", "https:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLinkReferenceUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return "";
+    }
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function parseUrlSafe(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+function formatLinkReferenceHint(parsed, fallbackUrl = "") {
+  if (!parsed) {
+    return String(fallbackUrl || "").slice(0, 120);
+  }
+
+  const path = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "/";
+  const queryKeys = [...parsed.searchParams.keys()].slice(0, 3);
+  const queryHint = queryKeys.length ? `?${queryKeys.join("&")}` : "";
+  return `${parsed.hostname}${path}${queryHint}`.slice(0, 140);
+}
+
 async function runGeminiNanoAgentRequest(payload = {}) {
   const ready = await ensureGeminiNanoReady();
   if (!ready.ok) {
@@ -4095,6 +4369,7 @@ function buildGeminiNanoAgentPrompt(payload = {}) {
     "For memory_proposal, include memory_title and memory_content.",
     "For agent_plan, use only Browser Companion action types and never invent arbitrary JavaScript. Prefer read-only actions before write actions.",
     "Action objects must include id, type, target, value, source, and reason. If a field does not apply, use empty strings, empty arrays, or confidence 0.",
+    "If payload URLs are represented by short refs like L1, use the action field url_ref with that exact ref. Browser Companion will resolve it before policy and execution. Never invent refs.",
     "Browser Companion will validate policy and require confirmation before executing actions.",
     "Reply in the user's language.",
     "",
@@ -4181,12 +4456,7 @@ async function getAgentResult(goal, options = {}) {
     };
     const providerContextMode = options.compactProviderContext ? "compact" : "standard";
     const observationForRequest = compactObservationForProvider(rawObservation, observationContext, providerContextMode);
-    const payload = {
-      goal: providerGoal,
-      responseLanguage,
-      provider: state.codex.provider,
-      model: state.codex.model,
-      httpProvider: selectedHttpProvider,
+    const providerContext = applyLinkReferencesForProvider({
       runtimeContext,
       conversationContext,
       recentReferences,
@@ -4207,6 +4477,15 @@ async function getAgentResult(goal, options = {}) {
         status: file.status,
         text: state.privacy.sendAttachmentsToCodex ? file.text : ""
       }))
+    });
+    const payload = {
+      goal: providerGoal,
+      responseLanguage,
+      provider: state.codex.provider,
+      model: state.codex.model,
+      httpProvider: selectedHttpProvider,
+      ...providerContext,
+      linkReferences: getLinkReferencesForProvider()
     };
     addDebugLog("provider.agent_request.start", payload, `${state.codex.provider} / ${state.codex.model}`);
     const response = await requestSelectedProviderAgent(payload);
@@ -4563,6 +4842,7 @@ function maybeResetTaskMemoryForNewGoal(goal) {
     nextGoal: text
   }, "Reset stale task memory for a new unrelated user goal.");
   state.taskMemory = createEmptyTaskMemory();
+  resetLinkReferenceRegistry();
   return true;
 }
 
@@ -5757,6 +6037,22 @@ async function handleAgentResult(result, options = {}) {
   addDebugLog("agent.result", { result }, result?.type || "unknown result");
 
   if (result?.type === "agent_plan") {
+    const resolvedPlan = resolvePlanLinkReferences(result);
+    if (resolvedPlan.unresolved.length) {
+      addDebugLog("link_ref.unresolved", {
+        refs: resolvedPlan.unresolved,
+        plan: result
+      }, "Agent returned link refs that are not available in the current registry.");
+      state.messages.push({
+        role: "assistant",
+        text: `The model referenced link ${resolvedPlan.unresolved.join(", ")}, but that link reference is no longer available. Retry the request so I can rebuild the current link map.`,
+        variant: "error",
+        createdAt: Date.now()
+      });
+      render();
+      return;
+    }
+    result = resolvedPlan.plan;
     rememberTaskMemoryPlannedActions(result);
     const hasPageBoundActions = (result.actions || []).some(isPageBoundAction);
     const planContext = hasPageBoundActions ? (createPlanPageContext(result) || options.planContext || null) : null;
@@ -6419,7 +6715,23 @@ async function confirmPendingPlan(options = {}) {
 }
 
 async function executeActionPlan(plan, options = {}) {
-  const normalizedPlan = normalizePlan(plan);
+  const resolvedPlan = resolvePlanLinkReferences(plan);
+  if (resolvedPlan.unresolved.length) {
+    state.messages.push({
+      role: "assistant",
+      text: `I could not execute the plan because link reference ${resolvedPlan.unresolved.join(", ")} is no longer available. Retry the request so I can rebuild the current link map.`,
+      variant: "error",
+      createdAt: Date.now()
+    });
+    state.activity.unshift("Execution blocked because a link reference could not be resolved.");
+    addDebugLog("link_ref.execution_blocked", {
+      refs: resolvedPlan.unresolved,
+      plan
+    }, "Blocked action execution with unresolved link references.");
+    render();
+    return;
+  }
+  const normalizedPlan = normalizePlan(resolvedPlan.plan);
   const actions = normalizedPlan?.actions || [];
   const pageMatch = await verifyActionPlanPageContext(actions, options.planContext);
 
@@ -7662,6 +7974,62 @@ function normalizePlan(plan) {
     ...plan,
     actions: Array.isArray(plan.actions) ? plan.actions : [],
     uncertain_fields: Array.isArray(plan.uncertain_fields) ? plan.uncertain_fields : []
+  };
+}
+
+function resolvePlanLinkReferences(plan) {
+  const normalized = normalizePlan(plan);
+  if (!normalized) {
+    return {
+      plan,
+      unresolved: []
+    };
+  }
+
+  const unresolved = [];
+  const actions = normalized.actions.map((action) => {
+    const resolved = { ...action };
+    const actionRef = normalizeLinkReferenceToken(action?.url_ref || action?.urlRef || action?.value || action?.url || "");
+
+    if (actionRef) {
+      const entry = resolveLinkReference(actionRef);
+      if (entry?.url) {
+        resolved.url_ref = actionRef;
+        resolved.value = entry.url;
+        if ("url" in resolved) {
+          resolved.url = entry.url;
+        }
+        resolved.source = {
+          ...(resolved.source || {}),
+          file_id: resolved.source?.file_id || actionRef
+        };
+      } else if (["open_url", "open_url_new_tab", "http_request"].includes(action?.type)) {
+        unresolved.push(actionRef);
+      }
+    }
+
+    const tabRef = normalizeLinkReferenceToken(action?.tab?.url || "");
+    if (tabRef) {
+      const tabEntry = resolveLinkReference(tabRef);
+      if (tabEntry?.url) {
+        resolved.tab = {
+          ...resolved.tab,
+          url: tabEntry.url
+        };
+      } else {
+        unresolved.push(tabRef);
+      }
+    }
+
+    return resolved;
+  });
+
+  return {
+    plan: {
+      ...normalized,
+      actions
+    },
+    unresolved: [...new Set(unresolved)]
   };
 }
 
@@ -9261,26 +9629,33 @@ async function maybeSynthesizeResults(plan, results) {
       lastActionLog: tab.lastActionLog || ""
     }));
   const recentActions = getRecentActionsForProvider();
-  const buildPayload = (mode = "full") => ({
-    goal: loggedLastUserMessage,
-    responseLanguage: detectUserLanguage(lastUserMessage),
-    provider: state.codex.provider,
-    model: state.codex.model,
-    httpProvider: selectedHttpProvider,
-    conversationContext,
-    recentReferences,
-    accessibleTabs,
-    recentActions,
-    taskMemory,
-    observation: compactObservationForSynthesis(latestObservation, mode, {
-      goal: loggedLastUserMessage,
+  const buildPayload = (mode = "full") => {
+    const contextPayload = applyLinkReferencesForProvider({
       conversationContext,
-      userMemory: state.userMemory.items,
-      recentReferences
-    }),
-    userMemory: getUserMemoryForSynthesis(mode),
-    results: compactResultsForSynthesis(results, mode)
-  });
+      recentReferences,
+      accessibleTabs,
+      recentActions,
+      taskMemory,
+      observation: compactObservationForSynthesis(latestObservation, mode, {
+        goal: loggedLastUserMessage,
+        conversationContext,
+        userMemory: state.userMemory.items,
+        recentReferences
+      }),
+      userMemory: getUserMemoryForSynthesis(mode),
+      results: compactResultsForSynthesis(results, mode)
+    });
+
+    return {
+      goal: loggedLastUserMessage,
+      responseLanguage: detectUserLanguage(lastUserMessage),
+      provider: state.codex.provider,
+      model: state.codex.model,
+      httpProvider: selectedHttpProvider,
+      ...contextPayload,
+      linkReferences: getLinkReferencesForProvider()
+    };
+  };
 
   const runSynthesisAttempt = async (mode = "full") => {
     const payload = buildPayload(mode);
@@ -10053,6 +10428,7 @@ function clearSession() {
   state.actionNotes = [];
   state.recentActions = [];
   state.taskMemory = createEmptyTaskMemory();
+  resetLinkReferenceRegistry();
   state.debugLogs = [];
   state.activity = ["Local session cleared."];
   chrome.storage.local.remove("browserCompanionSession");
