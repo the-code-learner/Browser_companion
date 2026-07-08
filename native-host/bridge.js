@@ -2600,13 +2600,16 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
   const useStreaming = Boolean(provider.useStreaming);
   const initialMaxTokens = getHttpProviderPositiveInt(provider.maxTokens, 24576, 1);
   const retryMaxTokens = getHttpProviderPositiveInt(provider.retryMaxTokens, 49152, 1);
+  const plannerJsonInstruction = provider.plannerEnabled && wantsJson
+    ? "\n\nPlanner mode finalization rule: make only a brief private plan, then immediately emit the final Browser Companion JSON. Do not continue hidden self-correction once a valid next action, answer, ask_user, or stop_for_human choice is available."
+    : "";
   const requestBody = {
     model: provider.model,
     messages: [
       {
         role: "user",
         content: wantsJson
-          ? `${prompt}\n\nReturn only valid JSON in the final assistant content. If you use hidden reasoning, continue until the final content contains only the JSON object.`
+          ? `${prompt}\n\nReturn only valid JSON in the final assistant content. If you use hidden reasoning, continue until the final content contains only the JSON object.${plannerJsonInstruction}`
           : `${prompt}\n\nIf you use hidden reasoning, continue until you emit the final user-facing answer in assistant content.`
       }
     ],
@@ -2624,6 +2627,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
     baseUrl,
     wantsJson,
     useStreaming,
+    plannerEnabled: Boolean(provider.plannerEnabled),
     model: provider.model,
     timeoutMs: getHttpProviderTimeoutMs(provider.timeoutMs, HTTP_PROVIDER_DEFAULT_TIMEOUT_MS),
     maxTokens: initialMaxTokens,
@@ -3478,8 +3482,11 @@ function buildAgentPrompt(payload, options = {}) {
     includeSchema ? "Do not ask for approval or confirmation in prose such as 'Does this approach work?' or 'If so, I will proceed.' Browser Companion handles confirmation itself when required." : "",
     includeSchema ? "Do not output narrative sections such as 'Strategy Summary', 'Proposed Plan', or fenced Markdown plans when browser actions are needed. If you have enough information to act, return an agent_plan JSON object immediately. Use ask_user only when a specific missing detail genuinely blocks the next safe step." : "",
     plannerModeEnabled ? "HTTP provider planner mode is enabled for this request." : "",
-    plannerModeEnabled ? "Before choosing actions, maintain a brief internal plan with the objective, known facts, completed steps, blockers, and the single next useful step. Use Task memory JSON and Recent browser action results to avoid repeating read-only actions, searches, or tab inspections that already succeeded or failed." : "",
-    plannerModeEnabled ? "Still return only the normal Browser Companion JSON object. Do not output the internal plan, do not ask for prose approval, and do not return another read-only action plan when recent context is already enough to act or answer." : "",
+    plannerModeEnabled ? "Before choosing actions, maintain a brief internal plan with the objective, known facts, completed steps, blockers, and the single next useful step. Keep that plan private and short." : "",
+    plannerModeEnabled ? "Planner mode hard rules: if Recent browser action results contain a successful page_observation, use its visible_text, links, structured_items, focused_context, and counts as the available page evidence. Do not claim you cannot see the results just because they are in an artifact summary." : "",
+    plannerModeEnabled ? "Do not repeat observe_page, observe_known_tab, get_visible_text, get_links, get_buttons, get_forms, get_dom_snapshot, or the same web_search for the same tab/query after a recent successful result, unless the page changed after that result or the prior result failed. Choose a concrete next non-duplicate action, answer with the evidence you have, or ask/stop with the exact missing evidence." : "",
+    plannerModeEnabled ? "For large operational goals, make incremental concrete progress: use trustworthy URLs already present in link references, page observations, web_search artifacts, or task memory; open or fetch those candidates before rereading the same page. If fewer than the requested number are available, say how many are available and what distinct search/source you will try next." : "",
+    plannerModeEnabled ? "Still return only the normal Browser Companion JSON object. Do not output the internal plan, do not ask for prose approval, and emit the final JSON as soon as you have selected the next step. Avoid long hidden self-correction loops." : "",
     plannerModeEnabled ? "Planner mode JSON:" : "",
     plannerModeEnabled ? JSON.stringify(plannerMode, null, 2) : "",
     includeSchema ? "" : "",

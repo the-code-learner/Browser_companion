@@ -201,6 +201,9 @@ const PROVIDER_VISIBLE_TEXT_HEAD_RATIO = 0.65;
 const PROVIDER_CONVERSATION_CONTEXT_LIMIT = 8;
 const PROVIDER_CONVERSATION_TEXT_LIMIT = 1200;
 const PROVIDER_RECENT_ACTION_LIMIT = 8;
+const PROVIDER_RECENT_OBSERVATION_TEXT_LIMIT = 1600;
+const PROVIDER_RECENT_OBSERVATION_LINK_LIMIT = 10;
+const PROVIDER_RECENT_OBSERVATION_ITEM_LIMIT = 6;
 const PROVIDER_RECENT_TAB_LIMIT = 8;
 const PROVIDER_SECTION_LIMIT = 8;
 const PROVIDER_STRUCTURED_ITEM_LIMIT = 18;
@@ -3371,8 +3374,14 @@ function getHttpProviderPlannerMode(provider) {
   return {
     enabled: true,
     strategy: "plan_then_execute",
-    loopAvoidance: true
+    loopAvoidance: true,
+    readOnlyRepeatPolicy: "do_not_repeat_successful_read_only_actions_for_the_same_tab_or_query",
+    evidencePolicy: "use_recent_action_artifacts_before_requesting_more_observation"
   };
+}
+
+function isSelectedHttpProviderPlannerEnabled() {
+  return Boolean(getSelectedHttpProvider()?.plannerEnabled);
 }
 
 async function maybeOfferHttpModelUnload(previousModel, nextModel, providerOverride = null) {
@@ -6966,6 +6975,10 @@ function shouldCapturePostActionObservation(plan, results) {
 }
 
 function shouldAutoContinueAfterReadOnlyAction(plan, results, options = {}) {
+  if (isSelectedHttpProviderPlannerEnabled()) {
+    return false;
+  }
+
   if ((options.continuationDepth || 0) >= MAX_READ_ONLY_CONTINUATIONS) {
     return false;
   }
@@ -7025,7 +7038,9 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
   const followUpResult = await getAgentResult(goal, {
     continuationDepth: options.continuationDepth || 0,
     continuationReason: appendSteeredContinuationReason(
-      "Context gathering is complete. Answer the user's original request directly now using the latest page observation. Do not return another read-only action plan. If something is still missing, explain exactly what is missing.",
+      isSelectedHttpProviderPlannerEnabled()
+        ? "Planner mode context gathering is complete. Recent browser action results include compact page observation text, links, structured items, and focused context when available. Use that evidence now to answer or return the next non-read-only action plan, such as opening trustworthy destinations. Do not return another observe_page, observe_known_tab, get_visible_text, get_links, get_buttons, get_forms, or get_dom_snapshot plan for the same tab. If something essential is still missing, explain exactly what evidence is missing instead of repeating the read-only action."
+        : "Context gathering is complete. Answer the user's original request directly now using the latest page observation. Do not return another read-only action plan. If something is still missing, explain exactly what is missing.",
       options.steeredQueueItem
     ),
     planContext
@@ -7611,8 +7626,11 @@ function rememberRecentActionResults(plan, results) {
       .filter((action) => action?.id)
       .map((action) => [action.id, action])
   );
+  const summaryOptions = {
+    includeObservationContext: isSelectedHttpProviderPlannerEnabled()
+  };
   const summarized = (Array.isArray(results) ? results : [])
-    .map((result) => summarizeRecentActionResult(result, actionIndex.get(result?.action_id)))
+    .map((result) => summarizeRecentActionResult(result, actionIndex.get(result?.action_id), summaryOptions))
     .filter(Boolean);
 
   if (!summarized.length) {
@@ -7626,12 +7644,12 @@ function rememberRecentActionResults(plan, results) {
   ]).slice(0, 24);
 }
 
-function summarizeRecentActionResult(result, action = null) {
+function summarizeRecentActionResult(result, action = null, options = {}) {
   if (!result) {
     return null;
   }
 
-  const artifact = summarizeRecentActionArtifact(result.artifact);
+  const artifact = summarizeRecentActionArtifact(result.artifact, options);
   const logMessage = String(result.log_message || "").trim();
   if (!logMessage && !artifact && !result.action_id) {
     return null;
@@ -7649,7 +7667,7 @@ function summarizeRecentActionResult(result, action = null) {
   };
 }
 
-function summarizeRecentActionArtifact(artifact) {
+function summarizeRecentActionArtifact(artifact, options = {}) {
   if (!artifact || typeof artifact !== "object") {
     return null;
   }
@@ -7666,10 +7684,35 @@ function summarizeRecentActionArtifact(artifact) {
   }
 
   if (artifact.kind === "page_observation") {
+    if (!options.includeObservationContext) {
+      return {
+        kind: artifact.kind,
+        url: artifact.observation?.tab?.url || "",
+        title: artifact.observation?.tab?.title || ""
+      };
+    }
+
+    const observation = artifact.observation || {};
+    const compacted = compactObservationForProvider(observation, {}, "compact") || {};
     return {
       kind: artifact.kind,
-      url: artifact.observation?.tab?.url || "",
-      title: artifact.observation?.tab?.title || ""
+      url: observation.tab?.url || "",
+      title: observation.tab?.title || "",
+      capturedAt: observation.capturedAt || "",
+      visibleTextLength: compacted.visibleTextLength || String(observation.visible_text || "").length,
+      visibleTextTruncated: Boolean(compacted.visibleTextTruncated),
+      visible_text: String(compacted.visible_text || "").slice(0, PROVIDER_RECENT_OBSERVATION_TEXT_LIMIT),
+      counts: compacted.counts || null,
+      page_outline: compacted.page_outline || null,
+      links: Array.isArray(compacted.links)
+        ? compacted.links.slice(0, PROVIDER_RECENT_OBSERVATION_LINK_LIMIT)
+        : [],
+      structured_items: Array.isArray(compacted.structured_items)
+        ? compacted.structured_items.slice(0, PROVIDER_RECENT_OBSERVATION_ITEM_LIMIT)
+        : [],
+      focused_context: Array.isArray(compacted.focused_context)
+        ? compacted.focused_context.slice(0, PROVIDER_RECENT_OBSERVATION_ITEM_LIMIT)
+        : []
     };
   }
 
