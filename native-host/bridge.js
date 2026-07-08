@@ -3462,6 +3462,10 @@ function buildAgentPrompt(payload, options = {}) {
     ? (compactContext ? compactObservationForPrompt(payload.observation) : payload.observation)
     : null;
   const attachments = compactContext ? compactAttachmentsForPrompt(payload.attachments) : payload.attachments || [];
+  const plannerMode = payload.plannerMode && typeof payload.plannerMode === "object"
+    ? payload.plannerMode
+    : null;
+  const plannerModeEnabled = plannerMode?.enabled === true;
 
   return [
     systemPrompt,
@@ -3473,6 +3477,11 @@ function buildAgentPrompt(payload, options = {}) {
     includeSchema ? "For memory saves, return a top-level memory_proposal JSON object with memory_title and memory_content, not an agent_plan action." : "",
     includeSchema ? "Do not ask for approval or confirmation in prose such as 'Does this approach work?' or 'If so, I will proceed.' Browser Companion handles confirmation itself when required." : "",
     includeSchema ? "Do not output narrative sections such as 'Strategy Summary', 'Proposed Plan', or fenced Markdown plans when browser actions are needed. If you have enough information to act, return an agent_plan JSON object immediately. Use ask_user only when a specific missing detail genuinely blocks the next safe step." : "",
+    plannerModeEnabled ? "HTTP provider planner mode is enabled for this request." : "",
+    plannerModeEnabled ? "Before choosing actions, maintain a brief internal plan with the objective, known facts, completed steps, blockers, and the single next useful step. Use Task memory JSON and Recent browser action results to avoid repeating read-only actions, searches, or tab inspections that already succeeded or failed." : "",
+    plannerModeEnabled ? "Still return only the normal Browser Companion JSON object. Do not output the internal plan, do not ask for prose approval, and do not return another read-only action plan when recent context is already enough to act or answer." : "",
+    plannerModeEnabled ? "Planner mode JSON:" : "",
+    plannerModeEnabled ? JSON.stringify(plannerMode, null, 2) : "",
     includeSchema ? "" : "",
     "User goal:",
     payload.goal || "",

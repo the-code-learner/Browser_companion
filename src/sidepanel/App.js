@@ -17,6 +17,7 @@ import {
 const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
 const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
 const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
+const HTTP_PROVIDER_DEFAULT_PLANNER_ENABLED = false;
 const HTTP_PROVIDER_LEGACY_TIMEOUT_MS = 360000;
 const HTTP_PROVIDER_KIND_OPENAI = "openai-compatible";
 const HTTP_PROVIDER_KIND_CLOUDFLARE = "cloudflare-workers-ai";
@@ -144,6 +145,7 @@ const state = {
     password: "",
     model: "",
     useStreaming: false,
+    plannerEnabled: HTTP_PROVIDER_DEFAULT_PLANNER_ENABLED,
     maxTokens: HTTP_PROVIDER_DEFAULT_MAX_TOKENS,
     retryMaxTokens: HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS,
     timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
@@ -878,6 +880,10 @@ function renderHttpProviderSettings() {
           <input id="http-provider-use-streaming" type="checkbox" ${state.httpProviderDraft.useStreaming ? "checked" : ""}>
           <span>Use streaming responses when the server supports them</span>
         </label>
+        <label class="toggle-row">
+          <input id="http-provider-planner-enabled" type="checkbox" ${state.httpProviderDraft.plannerEnabled ? "checked" : ""}>
+          <span>Use planner mode for this provider</span>
+        </label>
         <div class="button-row">
           <button id="test-http-provider" type="button">Refresh Models</button>
           <button type="submit">${state.httpProviderDraft.id ? "Save Changes" : "Save HTTP Provider"}</button>
@@ -931,6 +937,7 @@ function renderHttpProviderItem(provider) {
   const extras = [
     provider.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : "OpenAI-compatible",
     provider.useStreaming ? "streaming on" : "",
+    provider.plannerEnabled ? "planner on" : "",
     provider.maxTokens ? `max ${provider.maxTokens}` : "",
     provider.retryMaxTokens ? `retry ${provider.retryMaxTokens}` : "",
     provider.timeoutMs > 0 ? `${provider.timeoutMs} ms inactivity timeout` : "no timeout"
@@ -961,6 +968,7 @@ function makeDefaultHttpProviderDraft() {
     password: "",
     model: "",
     useStreaming: false,
+    plannerEnabled: HTTP_PROVIDER_DEFAULT_PLANNER_ENABLED,
     maxTokens: HTTP_PROVIDER_DEFAULT_MAX_TOKENS,
     retryMaxTokens: HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS,
     timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
@@ -3225,6 +3233,7 @@ function readHttpProviderDraft() {
     : (state.httpProviderDraft.token || "");
   const model = document.getElementById("http-provider-model")?.value.trim() || state.httpProviderDraft.model || "";
   const useStreaming = Boolean(document.getElementById("http-provider-use-streaming")?.checked);
+  const plannerEnabled = Boolean(document.getElementById("http-provider-planner-enabled")?.checked);
   const maxTokens = sanitizePositiveInteger(
     document.getElementById("http-provider-max-tokens")?.value,
     state.httpProviderDraft.maxTokens,
@@ -3253,6 +3262,7 @@ function readHttpProviderDraft() {
     password,
     model,
     useStreaming,
+    plannerEnabled,
     maxTokens,
     retryMaxTokens,
     timeoutMs,
@@ -3314,6 +3324,7 @@ function editHttpProvider(id) {
     ...provider,
     maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
     retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
+    plannerEnabled: Boolean(provider.plannerEnabled),
     timeoutMs: normalizeStoredTimeoutMs(provider)
   };
   render();
@@ -3349,6 +3360,18 @@ function getSelectedHttpProvider() {
   return {
     ...provider,
     model: state.codex.model || provider.model
+  };
+}
+
+function getHttpProviderPlannerMode(provider) {
+  if (!provider?.plannerEnabled) {
+    return null;
+  }
+
+  return {
+    enabled: true,
+    strategy: "plan_then_execute",
+    loopAvoidance: true
   };
 }
 
@@ -4442,6 +4465,7 @@ async function getAgentResult(goal, options = {}) {
     }
 
     const selectedHttpProvider = getSelectedHttpProvider();
+    const plannerMode = getHttpProviderPlannerMode(selectedHttpProvider);
     const runtimeContext = await buildRuntimeContext(goal, options);
     const accessibleTabs = await getAccessibleTabsForProvider();
     const conversationContext = getRecentConversationForProvider(goal);
@@ -4484,6 +4508,7 @@ async function getAgentResult(goal, options = {}) {
       provider: state.codex.provider,
       model: state.codex.model,
       httpProvider: selectedHttpProvider,
+      ...(plannerMode ? { plannerMode } : {}),
       ...providerContext,
       linkReferences: getLinkReferencesForProvider()
     };
@@ -10310,6 +10335,7 @@ async function restoreProviderSettings() {
             : (provider.authType || ((provider.username || provider.password) ? "basic" : (provider.token ? "bearer" : "none")))
         ),
         useStreaming: Boolean(provider.useStreaming),
+        plannerEnabled: Boolean(provider.plannerEnabled),
         maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
         retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
         timeoutMs: normalizeStoredTimeoutMs(provider),
