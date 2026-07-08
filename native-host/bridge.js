@@ -3470,6 +3470,10 @@ function buildAgentPrompt(payload, options = {}) {
     ? payload.plannerMode
     : null;
   const plannerModeEnabled = plannerMode?.enabled === true;
+  const repairContext = payload.repairContext && typeof payload.repairContext === "object"
+    ? payload.repairContext
+    : null;
+  const repairModeEnabled = Boolean(repairContext);
 
   return [
     systemPrompt,
@@ -3481,6 +3485,10 @@ function buildAgentPrompt(payload, options = {}) {
     includeSchema ? "For memory saves, return a top-level memory_proposal JSON object with memory_title and memory_content, not an agent_plan action." : "",
     includeSchema ? "Do not ask for approval or confirmation in prose such as 'Does this approach work?' or 'If so, I will proceed.' Browser Companion handles confirmation itself when required." : "",
     includeSchema ? "Do not output narrative sections such as 'Strategy Summary', 'Proposed Plan', or fenced Markdown plans when browser actions are needed. If you have enough information to act, return an agent_plan JSON object immediately. Use ask_user only when a specific missing detail genuinely blocks the next safe step." : "",
+    repairModeEnabled ? "Malformed output repair mode is enabled." : "",
+    repairModeEnabled ? "You are not solving the browsing task again. Convert only the malformed provider output in Malformed output repair JSON into one valid Browser Companion JSON object." : "",
+    repairModeEnabled ? "Repair rules: never put agent_plan inside actions; keep only concrete action types inside actions; preserve existing ids, url_ref values, action values, target labels, and the user-facing summary when present; do not invent new links or new task context." : "",
+    repairModeEnabled ? "If the output cannot be repaired safely from the repair JSON and Link reference registry, return a valid stop_for_human JSON object with empty actions and a concise reason." : "",
     plannerModeEnabled ? "HTTP provider planner mode is enabled for this request." : "",
     plannerModeEnabled ? "Before choosing actions, maintain a brief internal plan with the objective, known facts, completed steps, blockers, and the single next useful step. Keep that plan private and short." : "",
     plannerModeEnabled ? "Planner mode hard rules: if Recent browser action results contain a successful page_observation, use its visible_text, links, structured_items, focused_context, and counts as the available page evidence. Do not claim you cannot see the results just because they are in an artifact summary." : "",
@@ -3489,6 +3497,8 @@ function buildAgentPrompt(payload, options = {}) {
     plannerModeEnabled ? "Still return only the normal Browser Companion JSON object. Do not output the internal plan, do not ask for prose approval, and emit the final JSON as soon as you have selected the next step. Avoid long hidden self-correction loops." : "",
     plannerModeEnabled ? "Planner mode JSON:" : "",
     plannerModeEnabled ? JSON.stringify(plannerMode, null, 2) : "",
+    repairModeEnabled ? "Malformed output repair JSON:" : "",
+    repairModeEnabled ? JSON.stringify(repairContext, null, 2) : "",
     includeSchema ? "" : "",
     "User goal:",
     payload.goal || "",

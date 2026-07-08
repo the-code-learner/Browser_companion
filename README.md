@@ -165,6 +165,7 @@ Browser Companion is designed around local or user-controlled providers rather t
 - HTTP providers are tested through `/v1/models` and used through `/v1/chat/completions`
 - Cloudflare Workers AI is supported through a dedicated preset path
 - streaming HTTP providers surface live progress in the side panel
+- HTTP providers can opt into planner mode, which gives smaller/local models stricter loop-avoidance guidance and richer recent-observation summaries; malformed structured planner drafts are retried once with compact repair-only context before falling back to a non-executed draft
 
 ## UI Notes
 

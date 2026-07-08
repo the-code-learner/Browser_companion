@@ -6207,6 +6207,16 @@ async function handleAgentResult(result, options = {}) {
 
   const responseText = getAgentDisplayText(result) || "I could not produce a safe browser action from that request yet.";
   const plannerDraft = extractPlannerDraftFromText(responseText);
+  if (shouldAttemptPlannerDraftRepair(plannerDraft, options)) {
+    const repairedResult = await repairMalformedPlannerDraft(responseText, plannerDraft, result, options);
+    if (repairedResult) {
+      await handleAgentResult(repairedResult, {
+        ...options,
+        repairAttempted: true
+      });
+      return;
+    }
+  }
   const memoryProposal = await maybeSaveDeferredMemory(responseText);
   rememberTaskMemoryFinding(plannerDraft?.summaryForUser || responseText, "assistant_response");
   state.messages.push({
@@ -6228,6 +6238,99 @@ async function handleAgentResult(result, options = {}) {
     queueConnectorRefresh();
   }
   render();
+}
+
+function shouldAttemptPlannerDraftRepair(plannerDraft, options = {}) {
+  return Boolean(
+    plannerDraft
+    && !options.repairAttempted
+    && plannerDraft.draftKind === "structured_json"
+    && plannerDraft.actionCount > 0
+    && isSelectedProviderConnected()
+  );
+}
+
+async function repairMalformedPlannerDraft(responseText, plannerDraft, originalResult, options = {}) {
+  const repairPayload = buildPlannerDraftRepairPayload(responseText, plannerDraft);
+  state.activity.unshift("Repairing malformed provider plan with compact context.");
+  addDebugLog("agent.planner_repair.start", {
+    draft: plannerDraft,
+    repairPayload
+  }, "Requesting compact repair for malformed structured provider output.");
+  render();
+
+  const response = await requestSelectedProviderAgent(repairPayload);
+  addDebugLog("agent.planner_repair.end", {
+    ok: response.ok,
+    error: response.error || "",
+    result: response.envelope?.payload || null
+  }, response.ok ? "Planner repair response received." : response.error);
+
+  if (!response.ok) {
+    state.activity.unshift(`Planner repair failed: ${response.error || "provider request failed"}.`);
+    return null;
+  }
+
+  const repaired = normalizeAgentControlFlow(response.envelope?.payload || null);
+  if (repaired?.type === "agent_plan" && Array.isArray(repaired.actions) && repaired.actions.length) {
+    state.activity.unshift("Malformed provider plan repaired.");
+    return {
+      ...repaired,
+      thinking: getAgentDisplayThinking(originalResult) || getAgentDisplayThinking(repaired)
+    };
+  }
+
+  if (["ask_user", "stop_for_human"].includes(repaired?.type)) {
+    state.activity.unshift("Planner repair returned a safe control-flow response.");
+    return repaired;
+  }
+
+  addDebugLog("agent.planner_repair.rejected", {
+    repaired,
+    originalType: originalResult?.type || "",
+    planContext: options.planContext || null
+  }, "Planner repair did not produce an executable action plan.");
+  state.activity.unshift("Planner repair did not produce an executable action plan.");
+  return null;
+}
+
+function buildPlannerDraftRepairPayload(responseText, plannerDraft) {
+  const selectedHttpProvider = getSelectedHttpProvider();
+  const goal = getLastUserMessageText() || plannerDraft.summaryForUser || "Repair malformed Browser Companion provider output.";
+
+  return {
+    goal: "Repair malformed Browser Companion action-plan output into one valid JSON object. Do not solve the browsing task again.",
+    responseLanguage: detectUserLanguage(goal),
+    provider: state.codex.provider,
+    model: state.codex.model,
+    httpProvider: selectedHttpProvider,
+    runtimeContext: "Repair mode: use only Malformed output repair JSON plus Link reference registry JSON. Do not use page, memory, attachment, conversation, or task context for new reasoning.",
+    conversationContext: [],
+    recentReferences: {},
+    accessibleTabs: [],
+    recentActions: [],
+    taskMemory: null,
+    observation: null,
+    userMemory: [],
+    attachments: [],
+    linkReferences: getLinkReferencesForProvider(),
+    repairContext: {
+      task: "malformed_agent_plan_repair",
+      originalUserGoal: goal,
+      detectedSummaryForUser: plannerDraft.summaryForUser || "",
+      detectedActionSummaries: plannerDraft.actionSummaries || [],
+      malformedOutput: String(responseText || plannerDraft.raw || "").slice(0, 12000),
+      requirements: [
+        "Return exactly one valid Browser Companion JSON object.",
+        "Use top-level type agent_plan when the malformed output intended browser actions.",
+        "Do not put agent_plan inside actions; actions must contain only concrete Browser Companion action types.",
+        "Preserve the intended actions, ids, url_ref values, values, target labels, and user-facing summary when present.",
+        "For short URL refs such as L19, set both value and url_ref to the same ref unless a full URL is already present.",
+        "If a required field is missing, fill it with an empty string, empty array, false, or source confidence 0 as required by the schema.",
+        "If the malformed output cannot be repaired safely from this data alone, return stop_for_human with a concise reason."
+      ]
+    }
+  };
 }
 
 function normalizeAgentControlFlow(result) {
