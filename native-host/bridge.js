@@ -3457,10 +3457,17 @@ function parseProviderErrorMessage(text) {
 }
 
 function buildAgentPrompt(payload, options = {}) {
-  const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
   const includeSchema = Boolean(options.includeSchema);
   const compactContext = Boolean(options.compactContext);
   const toolSchema = includeSchema ? fs.readFileSync(path.join(projectRoot, "codex", "tool-schema.json"), "utf8") : "";
+  const repairContext = payload.repairContext && typeof payload.repairContext === "object"
+    ? payload.repairContext
+    : null;
+  if (repairContext) {
+    return buildMalformedOutputRepairPrompt(payload, repairContext, toolSchema);
+  }
+
+  const systemPrompt = fs.readFileSync(path.join(projectRoot, "codex", "system-prompt.md"), "utf8");
   const hasObservation = Boolean(payload.observation);
   const observation = hasObservation
     ? (compactContext ? compactObservationForPrompt(payload.observation) : payload.observation)
@@ -3470,10 +3477,6 @@ function buildAgentPrompt(payload, options = {}) {
     ? payload.plannerMode
     : null;
   const plannerModeEnabled = plannerMode?.enabled === true;
-  const repairContext = payload.repairContext && typeof payload.repairContext === "object"
-    ? payload.repairContext
-    : null;
-  const repairModeEnabled = Boolean(repairContext);
 
   return [
     systemPrompt,
@@ -3485,10 +3488,6 @@ function buildAgentPrompt(payload, options = {}) {
     includeSchema ? "For memory saves, return a top-level memory_proposal JSON object with memory_title and memory_content, not an agent_plan action." : "",
     includeSchema ? "Do not ask for approval or confirmation in prose such as 'Does this approach work?' or 'If so, I will proceed.' Browser Companion handles confirmation itself when required." : "",
     includeSchema ? "Do not output narrative sections such as 'Strategy Summary', 'Proposed Plan', or fenced Markdown plans when browser actions are needed. If you have enough information to act, return an agent_plan JSON object immediately. Use ask_user only when a specific missing detail genuinely blocks the next safe step." : "",
-    repairModeEnabled ? "Malformed output repair mode is enabled." : "",
-    repairModeEnabled ? "You are not solving the browsing task again. Convert only the malformed provider output in Malformed output repair JSON into one valid Browser Companion JSON object." : "",
-    repairModeEnabled ? "Repair rules: never put agent_plan inside actions; keep only concrete action types inside actions; preserve existing ids, url_ref values, action values, target labels, and the user-facing summary when present; do not invent new links or new task context." : "",
-    repairModeEnabled ? "If the output cannot be repaired safely from the repair JSON and Link reference registry, return a valid stop_for_human JSON object with empty actions and a concise reason." : "",
     plannerModeEnabled ? "HTTP provider planner mode is enabled for this request." : "",
     plannerModeEnabled ? "Before choosing actions, maintain a brief internal plan with the objective, known facts, completed steps, blockers, and the single next useful step. Keep that plan private and short." : "",
     plannerModeEnabled ? "Planner mode hard rules: if Recent browser action results contain a successful page_observation, use its visible_text, links, structured_items, focused_context, and counts as the available page evidence. Do not claim you cannot see the results just because they are in an artifact summary." : "",
@@ -3497,8 +3496,6 @@ function buildAgentPrompt(payload, options = {}) {
     plannerModeEnabled ? "Still return only the normal Browser Companion JSON object. Do not output the internal plan, do not ask for prose approval, and emit the final JSON as soon as you have selected the next step. Avoid long hidden self-correction loops." : "",
     plannerModeEnabled ? "Planner mode JSON:" : "",
     plannerModeEnabled ? JSON.stringify(plannerMode, null, 2) : "",
-    repairModeEnabled ? "Malformed output repair JSON:" : "",
-    repairModeEnabled ? JSON.stringify(repairContext, null, 2) : "",
     includeSchema ? "" : "",
     "User goal:",
     payload.goal || "",
@@ -3553,6 +3550,43 @@ function buildAgentPrompt(payload, options = {}) {
     "If the user refers to previously mentioned items and the exact destination still cannot be resolved safely, you may return ask_user. Prefer narrow clarification such as exact title, ordinal position, organization/company, section, visible metadata, or whether opening in the current tab is acceptable.",
     "",
     "Return only a JSON object that matches the Browser Companion tool schema when actions or memory proposals are needed."
+  ].filter((line) => line !== "").join("\n");
+}
+
+function buildMalformedOutputRepairPrompt(payload, repairContext, toolSchema = "") {
+  const malformedOutput = String(repairContext.malformedOutput || "").trim();
+  return [
+    "Browser Companion malformed output repair.",
+    "You are repairing a previous provider response. Do not solve the browsing task again.",
+    "Return exactly one valid Browser Companion JSON object. Do not wrap it in Markdown. Do not add prose outside JSON.",
+    "The malformed output to repair is present below between MALFORMED_OUTPUT_START and MALFORMED_OUTPUT_END. Do not ask the user to provide it.",
+    "If the malformed output is truncated, repair every complete action object and complete field that is present. Only return stop_for_human if no safe action data can be recovered from the malformed output.",
+    "If the malformed output intended browser actions, return a top-level agent_plan. Never put agent_plan inside actions.",
+    "Actions must contain only concrete Browser Companion action types such as open_url_new_tab, open_url, web_search, observe_page, get_links, click_element, fill_field, and similar schema action types.",
+    "Preserve existing action ids, url_ref values, values, target labels, target agent_ids, and the user-facing summary when present.",
+    "For short URL refs such as L19, set both value and url_ref to the same ref unless a full URL is already present.",
+    "If a required field is missing, fill it with an empty string, empty array, false, {\"file_id\":\"\",\"confidence\":0}, or {\"tabId\":null,\"url\":\"\",\"title\":\"\"} as required by the schema.",
+    "",
+    "MALFORMED_OUTPUT_START",
+    malformedOutput || "(empty)",
+    "MALFORMED_OUTPUT_END",
+    "",
+    "Detected repair metadata JSON:",
+    JSON.stringify({
+      task: repairContext.task || "",
+      originalUserGoal: repairContext.originalUserGoal || "",
+      detectedSummaryForUser: repairContext.detectedSummaryForUser || "",
+      detectedActionSummaries: repairContext.detectedActionSummaries || [],
+      requirements: repairContext.requirements || []
+    }, null, 2),
+    "",
+    "Link reference registry JSON:",
+    JSON.stringify(payload.linkReferences || [], null, 2),
+    "",
+    toolSchema ? "Browser Companion strict response JSON schema:" : "",
+    toolSchema,
+    "",
+    "Final answer: return only the repaired JSON object."
   ].filter((line) => line !== "").join("\n");
 }
 

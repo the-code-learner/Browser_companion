@@ -204,6 +204,7 @@ const PROVIDER_RECENT_ACTION_LIMIT = 8;
 const PROVIDER_RECENT_OBSERVATION_TEXT_LIMIT = 1600;
 const PROVIDER_RECENT_OBSERVATION_LINK_LIMIT = 10;
 const PROVIDER_RECENT_OBSERVATION_ITEM_LIMIT = 6;
+const PLANNER_REPAIR_MALFORMED_OUTPUT_LIMIT = 24000;
 const PROVIDER_RECENT_TAB_LIMIT = 8;
 const PROVIDER_SECTION_LIMIT = 8;
 const PROVIDER_STRUCTURED_ITEM_LIMIT = 18;
@@ -6319,7 +6320,7 @@ function buildPlannerDraftRepairPayload(responseText, plannerDraft) {
       originalUserGoal: goal,
       detectedSummaryForUser: plannerDraft.summaryForUser || "",
       detectedActionSummaries: plannerDraft.actionSummaries || [],
-      malformedOutput: String(responseText || plannerDraft.raw || "").slice(0, 12000),
+      malformedOutput: String(responseText || plannerDraft.raw || "").slice(0, PLANNER_REPAIR_MALFORMED_OUTPUT_LIMIT),
       requirements: [
         "Return exactly one valid Browser Companion JSON object.",
         "Use top-level type agent_plan when the malformed output intended browser actions.",
