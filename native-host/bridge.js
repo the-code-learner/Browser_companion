@@ -2543,12 +2543,26 @@ function extractLoadedModels(json) {
 function runHttpProviderAgentRequest(provider, payload = {}, options = {}) {
   const prompt = buildAgentPrompt(payload, { includeSchema: true, compactContext: true });
   return runHttpProviderCompletion(provider, prompt, true, options)
-    .then(({ text, thinking }) => {
+    .then(async ({ text, thinking }) => {
       const output = compactProviderOutput(text);
-      const parsed = parseAgentJsonOrNaturalResponse(output);
+      let parsed = parseAgentJsonOrNaturalResponse(output);
       if (thinking && parsed && typeof parsed === "object" && !parsed.thinking) {
         parsed.thinking = thinking;
       }
+
+      if (shouldRetryHttpProviderAgentFinalization(provider, parsed, output, thinking)) {
+        const retryPrompt = buildHttpProviderAgentFinalizationRetryPrompt(prompt, output);
+        const retry = await runHttpProviderCompletion(provider, retryPrompt, true, options);
+        const retryOutput = compactProviderOutput(retry.text);
+        parsed = parseAgentJsonOrNaturalResponse(retryOutput);
+        if (retry.thinking && parsed && typeof parsed === "object" && !parsed.thinking) {
+          parsed.thinking = retry.thinking;
+        }
+        if (parsed && typeof parsed === "object") {
+          parsed.finalizationRetry = true;
+        }
+      }
+
       return parsed;
     })
     .catch((error) => {
@@ -2566,6 +2580,33 @@ function runHttpProviderAgentRequest(provider, payload = {}, options = {}) {
         diagnostics: extractHttpProviderErrorDiagnostics(error)
       };
     });
+}
+
+function shouldRetryHttpProviderAgentFinalization(provider = {}, parsed = null, output = "", thinking = "") {
+  if (!provider.plannerEnabled || !parsed || parsed.type !== "natural_response") return false;
+  if (Array.isArray(parsed.actions) && parsed.actions.length > 0) return false;
+
+  const finalText = compactProviderOutput(output || parsed.text || "");
+  const weakFinal = !finalText
+    || finalText.length <= 240
+    || /^(?:no browser actions were returned|browser actions completed|action completed|ok|done|fatto|completato)\.?$/i.test(finalText);
+  if (!weakFinal) return false;
+
+  return /\b(agent_plan|open_url_new_tab|open_url|scroll_by|web_search|get_links|get_visible_text|get_dom_snapshot|click_element|actions?\s*:|action batch|i will open|i will use|aprir|apro)\b/i.test(String(thinking || ""));
+}
+
+function buildHttpProviderAgentFinalizationRetryPrompt(prompt, previousOutput = "") {
+  return [
+    prompt,
+    "",
+    "Final JSON correction:",
+    "The previous attempt returned a natural_response or empty actions in final assistant content, even though this request is in Browser Companion action mode.",
+    "Re-evaluate the same context above and return exactly one valid Browser Companion JSON object.",
+    "If a safe browser action is available, use top-level type \"agent_plan\" with a non-empty actions array.",
+    "Do not describe the plan in prose. Do not leave the selected actions only in hidden reasoning. The final assistant content must start with { and end with }.",
+    "If no action can be safely produced, return ask_user or stop_for_human with the exact missing evidence.",
+    previousOutput ? `Previous final assistant content: ${JSON.stringify(String(previousOutput).slice(0, 500))}` : ""
+  ].filter(Boolean).join("\n");
 }
 
 function runHttpProviderSynthesisRequest(provider, payload = {}, options = {}) {
@@ -2601,7 +2642,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
   const initialMaxTokens = getHttpProviderPositiveInt(provider.maxTokens, 24576, 1);
   const retryMaxTokens = getHttpProviderPositiveInt(provider.retryMaxTokens, 49152, 1);
   const plannerJsonInstruction = provider.plannerEnabled && wantsJson
-    ? "\n\nPlanner mode finalization rule: make only a brief private plan, then immediately emit the final Browser Companion JSON. Do not continue hidden self-correction once a valid next action, answer, ask_user, or stop_for_human choice is available."
+    ? "\n\nPlanner mode finalization rule: make only a brief private plan, then immediately emit the final Browser Companion JSON. If you selected browser actions in hidden reasoning, those same actions must appear in the final JSON as top-level type \"agent_plan\" with a non-empty actions array. Do not leave the plan only in reasoning_content. Do not continue hidden self-correction once a valid next action, answer, ask_user, or stop_for_human choice is available."
     : "";
   const requestBody = {
     model: provider.model,
