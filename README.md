@@ -12,6 +12,10 @@ It combines:
 
 The project is intentionally plain JavaScript and can be loaded directly as an unpacked extension during development.
 
+## Technical Reports
+
+- [Context synthesis architecture](docs/context-synthesis-architecture.md): reusable patterns for compacting large browser/research context with synthesis agents, link refs, task memory, compact/minimal retries, resume checkpoints, and future grep-style external retrieval.
+
 ## What It Does
 
 Browser Companion is built around a simple rule: the model can suggest, but the extension validates and executes.
