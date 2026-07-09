@@ -166,6 +166,7 @@ Browser Companion is designed around local or user-controlled providers rather t
 - Cloudflare Workers AI is supported through a dedicated preset path
 - streaming HTTP providers surface live progress in the side panel
 - HTTP providers can opt into planner mode, which gives smaller/local models stricter loop-avoidance guidance and richer recent-observation summaries; context-window failures retry through compact and then minimal payloads, while malformed structured drafts, weak actionless final responses, and detected read-only/hidden-reasoning loops are retried once with compact recovery instructions before falling back to a non-executed draft or a precise user question
+- recoverable provider failures can expose a `Resume` action that retries the interrupted task with minimal context, no attachments, compact task memory, recent action results, accessible tabs, and short link references instead of resending the full transcript
 
 ## UI Notes
 

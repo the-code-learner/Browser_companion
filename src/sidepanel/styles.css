@@ -523,6 +523,29 @@ h2 {
   font-size: 11px;
 }
 
+.resume-card {
+  display: grid;
+  gap: 8px;
+  max-width: 92%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent) 8%);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.resume-card p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.resume-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .mermaid-block {
   display: grid;
   gap: 4px;

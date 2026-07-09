@@ -122,6 +122,7 @@ const state = {
   pendingPolicy: null,
   pendingActionSelection: [],
   pendingPermissionRequest: null,
+  pendingResume: null,
   confirmationText: "",
   sessionApprovals: [],
   privacy: {
@@ -1210,6 +1211,14 @@ function bindChatTimelineControls() {
   document.querySelectorAll("[data-steer-message]").forEach((button) => {
     button.addEventListener("click", () => steerQueuedMessage(button.dataset.steerMessage));
   });
+
+  document.querySelectorAll("[data-resume-request]").forEach((button) => {
+    button.addEventListener("click", () => resumePendingRequest(button.dataset.resumeRequest));
+  });
+
+  document.querySelectorAll("[data-dismiss-resume]").forEach((button) => {
+    button.addEventListener("click", () => dismissPendingResume(button.dataset.dismissResume));
+  });
 }
 
 function getActionNotePersistKey(note) {
@@ -1442,6 +1451,7 @@ function renderErrorNote(message) {
         <ul>${items}</ul>
       </details>
       ${renderMessageThinking(message)}
+      ${renderResumeControl(message)}
     </div>
   `;
 }
@@ -1479,10 +1489,47 @@ function buildErrorNoteDetails(message) {
 }
 
 function renderMessageContent(message) {
+  const resumeControl = renderResumeControl(message);
   if (message.role === "assistant" && message.plannerDraft) {
-    return renderPlannerDraftMessage(message);
+    return `${renderPlannerDraftMessage(message)}${resumeControl}`;
   }
-  return `<div class="message-body">${renderRichText(message.text, { allowMermaid: true })}</div>`;
+  return `<div class="message-body">${renderRichText(message.text, { allowMermaid: true })}</div>${resumeControl}`;
+}
+
+function renderResumeControl(message) {
+  const resume = getResumeRequestForMessage(message);
+  if (!resume) {
+    return "";
+  }
+
+  const disabled = state.isProcessingQueue ? "disabled" : "";
+  const details = [
+    resume.detail || "Resume the interrupted task with minimal context.",
+    resume.resultSummaries?.length ? `Saved evidence: ${resume.resultSummaries.length} compact item(s).` : "",
+    "The next request will use the task index, recent action results, accessible tabs, and link refs instead of the full transcript."
+  ].filter(Boolean);
+
+  return `
+    <section class="resume-card">
+      <div>
+        <strong>Resume available</strong>
+        <p>${escapeHtml(details.join(" "))}</p>
+      </div>
+      <div class="resume-actions">
+        <button type="button" data-dismiss-resume="${escapeHtml(resume.id)}" ${disabled}>Dismiss</button>
+        <button type="button" class="primary-action" data-resume-request="${escapeHtml(resume.id)}" ${disabled}>Resume</button>
+      </div>
+    </section>
+  `;
+}
+
+function getResumeRequestForMessage(message) {
+  const resumeId = String(message?.resumeRequestId || "").trim();
+  if (!resumeId || !state.pendingResume || state.pendingResume.id !== resumeId) {
+    return null;
+  }
+
+  return normalizePendingResumeRequest(state.pendingResume);
 }
 
 function renderPlannerDraftMessage(message) {
@@ -1546,9 +1593,14 @@ function renderSteerButton(message, steerState) {
 }
 
 function renderChatTimeline() {
+  const pendingResume = normalizePendingResumeRequest(state.pendingResume);
+  const resumeHasMessage = pendingResume
+    ? state.messages.some((message) => message.resumeRequestId === pendingResume.id)
+    : false;
   const items = [
     ...state.messages.map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
     ...getQueuedMessageTimelineEntries().map((item) => ({ kind: "message", createdAt: item.createdAt || 0, item })),
+    ...(pendingResume && !resumeHasMessage ? [{ kind: "resume", createdAt: pendingResume.createdAt || Date.now(), item: pendingResume }] : []),
     ...(state.liveThinking?.text ? [{
       kind: "note",
       createdAt: state.liveThinking.createdAt || Date.now(),
@@ -1563,7 +1615,20 @@ function renderChatTimeline() {
     ...state.actionNotes.map((item) => ({ kind: "note", createdAt: item.createdAt || 0, item }))
   ].sort((a, b) => a.createdAt - b.createdAt);
 
-  return items.map((entry) => entry.kind === "message" ? renderMessage(entry.item) : renderActionNote(entry.item)).join("");
+  return items.map((entry) => {
+    if (entry.kind === "message") return renderMessage(entry.item);
+    if (entry.kind === "resume") return renderStandaloneResume(entry.item);
+    return renderActionNote(entry.item);
+  }).join("");
+}
+
+function renderStandaloneResume(resume) {
+  const itemKey = `resume:${resume.id}`;
+  return `
+    <div class="message-error-stack" data-chat-item-key="${escapeHtml(itemKey)}">
+      ${renderResumeControl({ role: "assistant", resumeRequestId: resume.id })}
+    </div>
+  `;
 }
 
 function getQueuedMessageTimelineEntries() {
@@ -3555,6 +3620,7 @@ async function handleChatSubmit(event) {
     return;
   }
 
+  state.pendingResume = null;
   const questionTab = await getCurrentActiveTab();
   const questionContext = tabToPageContext(questionTab);
   rememberSidebarContextFromTab(questionTab);
@@ -3770,6 +3836,266 @@ async function processQueuedMessage(item) {
   return {
     stopped: isUserStoppedResult(agentResult)
   };
+}
+
+function normalizePendingResumeRequest(request = null) {
+  if (!request || typeof request !== "object") {
+    return null;
+  }
+
+  const goal = compact(request.goal || "");
+  const id = String(request.id || "").trim();
+  if (!id || !goal) {
+    return null;
+  }
+
+  return {
+    id,
+    reason: String(request.reason || "provider_error").slice(0, 80),
+    goal,
+    detail: compact(request.detail || "Resume the interrupted task with minimal context.").slice(0, 360),
+    continuationReason: compact(request.continuationReason || "").slice(0, 6000),
+    planContext: getLatestPlanContext(request.planContext),
+    resultSummaries: Array.isArray(request.resultSummaries)
+      ? request.resultSummaries.map((item) => compact(item || "").slice(0, 260)).filter(Boolean).slice(0, 8)
+      : [],
+    createdAt: Number.isFinite(request.createdAt) ? request.createdAt : Date.now()
+  };
+}
+
+function createPendingResumeRequest(reason, context = {}) {
+  const goal = compact(context.goal || context.plan?.goal || getLastUserMessageText() || "");
+  if (!goal) {
+    return null;
+  }
+
+  const errorMessage = compact(
+    context.error?.message
+    || context.result?.message
+    || context.result?.error
+    || context.message
+    || ""
+  );
+  const resultSummaries = summarizeResumeResults(context.results);
+  const request = normalizePendingResumeRequest({
+    id: crypto.randomUUID(),
+    reason,
+    goal,
+    detail: buildResumeDetail(reason, errorMessage),
+    continuationReason: buildResumeContinuationReason(reason, {
+      ...context,
+      goal,
+      errorMessage,
+      resultSummaries
+    }),
+    planContext: getLatestPlanContext(context.planContext),
+    resultSummaries,
+    createdAt: Date.now()
+  });
+
+  state.pendingResume = request;
+  persistSession();
+  return request;
+}
+
+function buildProviderErrorResumeRequest(error, options = {}) {
+  const reason = getRecoverableResumeReason(error);
+  if (!reason) {
+    return null;
+  }
+
+  return createPendingResumeRequest(reason, {
+    error,
+    result: error,
+    planContext: options.planContext,
+    goal: options.goal || getLastUserMessageText()
+  });
+}
+
+function getRecoverableResumeReason(error = {}) {
+  if (isProviderQuotaExhaustedResult(error)) {
+    return "";
+  }
+
+  const text = `${error?.message || ""} ${error?.error || ""} ${error?.text || ""}`.trim();
+  if (!text) {
+    return "";
+  }
+
+  if (/exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(text)) {
+    return "context_limit";
+  }
+
+  if (/hidden reasoning|no assistant content|final assistant content|token limit before returning|stream stalled|stopped making real progress/i.test(text)) {
+    return "hidden_reasoning";
+  }
+
+  if (/\b(?:408|524)\b/.test(text) || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text)) {
+    return "timeout";
+  }
+
+  if (/upstream error page|HTTP provider returned \d+|<!doctype html>|<html\b|cloudflare/i.test(text)) {
+    return "provider_error";
+  }
+
+  return isProviderErrorLikeResult(error) ? "provider_error" : "";
+}
+
+function buildResumeDetail(reason, errorMessage = "") {
+  const suffix = errorMessage ? ` Last error: ${errorMessage.slice(0, 220)}` : "";
+  if (reason === "context_limit") {
+    return `The provider ran out of context. Resume will retry with the smallest task index and no attachments.${suffix}`;
+  }
+  if (reason === "hidden_reasoning") {
+    return `The model spent its budget reasoning without final output. Resume will ask for one concrete next step.${suffix}`;
+  }
+  if (reason === "timeout") {
+    return `The provider timed out. Resume will retry with a lighter prompt and current evidence only.${suffix}`;
+  }
+  if (reason === "read_only_loop") {
+    return "The model repeated a read-only step. Resume will forbid that duplicate path and ask for the next useful action or answer.";
+  }
+  if (reason === "post_action_synthesis") {
+    return `The action finished but answer synthesis failed. Resume will continue from compact action results.${suffix}`;
+  }
+  return `The provider stopped before a useful answer. Resume will retry with compact recovery instructions.${suffix}`;
+}
+
+function buildResumeContinuationReason(reason, context = {}) {
+  const resultSummaries = Array.isArray(context.resultSummaries)
+    ? context.resultSummaries
+    : summarizeResumeResults(context.results);
+  const lines = [
+    "Manual resume controller:",
+    "Continue the interrupted user task. Do not restart from the beginning and do not repeat the provider request that just failed.",
+    "Use the compact external evidence index Browser Companion sends now: taskMemory.brief, recentActions, accessibleTabs, linkReferences, and the newest minimal observation. Treat missing full transcript/page text as intentionally omitted.",
+    "If a needed detail is only referenced in the external index but not present in the minimal prompt, return ask_user with one exact missing blocker or a single focused read action. Do not guess and do not loop.",
+    "Prefer one concrete non-duplicate agent_plan when another browser action is needed. If the evidence is sufficient, return natural_response. Keep final assistant content short and complete.",
+    reason === "context_limit" ? "The previous request exceeded the model context window. Do not ask for the full prior transcript, attachments, complete link registry, or full page text." : "",
+    reason === "hidden_reasoning" ? "The previous request ended in hidden reasoning/no final content. Do not continue that reasoning chain; rewrite the task internally into one precise next step and emit the normal Browser Companion JSON." : "",
+    reason === "read_only_loop" ? "The previous attempt repeated a read-only context action. Do not return observe/get_visible_text/get_links/get_buttons/get_forms/get_dom_snapshot/capture_viewport/capture_numbered_overlay/scroll actions for the same page unless it is the single focused read explicitly needed." : "",
+    reason === "post_action_synthesis" ? "Browser actions already completed. Continue from the completed action/result index instead of free-form synthesis over the full artifacts." : "",
+    context.plan?.summary_for_user ? `Interrupted plan summary: ${compact(context.plan.summary_for_user).slice(0, 400)}` : "",
+    resultSummaries.length ? `Completed action/result index:\n- ${resultSummaries.join("\n- ")}` : "",
+    context.errorMessage ? `Failure to avoid repeating: ${context.errorMessage.slice(0, 500)}` : ""
+  ];
+
+  return lines.filter(Boolean).join("\n");
+}
+
+function summarizeResumeResults(results = []) {
+  return (Array.isArray(results) ? results : [])
+    .slice(-8)
+    .map((result) => {
+      const parts = [
+        result?.action_id || result?.type || "action",
+        result?.status || "",
+        compact(result?.log_message || "").slice(0, 150),
+        summarizeResumeArtifact(result?.artifact)
+      ].filter(Boolean);
+      return compact(parts.join(" - ")).slice(0, 260);
+    })
+    .filter(Boolean);
+}
+
+function summarizeResumeArtifact(artifact = null) {
+  if (!artifact || typeof artifact !== "object") {
+    return "";
+  }
+
+  if (artifact.kind === "web_search") {
+    const count = artifact.resultCount || (Array.isArray(artifact.results) ? artifact.results.length : 0);
+    return `web_search "${String(artifact.query || "").slice(0, 100)}" (${count} result(s))`;
+  }
+
+  if (artifact.kind === "http_response") {
+    return `http ${artifact.statusCode || "?"} ${String(artifact.finalUrl || artifact.url || "").slice(0, 160)}`;
+  }
+
+  if (artifact.kind === "page_observation") {
+    const observation = artifact.observation || artifact;
+    return `page "${String(observation.tab?.title || observation.title || "").slice(0, 100)}" (${observation.visibleTextLength || String(observation.visible_text || "").length || 0} chars)`;
+  }
+
+  if (artifact.kind === "tab_opened") {
+    return `tab_opened ${String(artifact.title || artifact.url || "").slice(0, 140)}`;
+  }
+
+  return artifact.kind || "";
+}
+
+async function resumePendingRequest(resumeId) {
+  const pending = normalizePendingResumeRequest(state.pendingResume);
+  if (!pending || pending.id !== String(resumeId || "").trim() || state.isProcessingQueue) {
+    return;
+  }
+
+  state.pendingResume = null;
+  state.isProcessingQueue = true;
+  state.stopProcessingRequested = false;
+  state.stopRequestInFlight = false;
+  state.liveThinking = null;
+  state.liveThinkingOpen = false;
+  state.activity.unshift("Resuming interrupted task with minimal provider context.");
+  addActionNote("Resumed interrupted task", [
+    pending.detail,
+    "Provider context mode: minimal. Attachments omitted; task memory, recent action results, accessible tabs, and link references kept as a compact index."
+  ]);
+  persistSession();
+  render();
+
+  try {
+    const result = await getAgentResult(pending.goal, {
+      planContext: pending.planContext,
+      createdAt: Date.now(),
+      compactProviderContext: true,
+      minimalProviderContext: true,
+      omitAttachmentsForProvider: true,
+      resumeAttempted: true,
+      continuationReason: pending.continuationReason
+    });
+
+    if (state.liveThinking) {
+      state.liveThinking.streaming = false;
+      if (!refreshChatLog()) {
+        render();
+      }
+    }
+
+    await handleAgentResult(result, {
+      planContext: pending.planContext,
+      continuationDepth: 0,
+      resumeAttempted: true
+    });
+  } catch (error) {
+    state.messages.push({
+      role: "assistant",
+      text: error.message || "The resume attempt could not be completed.",
+      variant: "error",
+      createdAt: Date.now()
+    });
+    state.activity.unshift(`Resume failed: ${error.message || "Unexpected error."}`);
+  } finally {
+    state.isProcessingQueue = false;
+    state.stopProcessingRequested = false;
+    state.stopRequestInFlight = false;
+    state.liveThinking = null;
+    state.liveThinkingOpen = false;
+    persistSession();
+    render();
+  }
+}
+
+function dismissPendingResume(resumeId) {
+  const pending = normalizePendingResumeRequest(state.pendingResume);
+  if (!pending || pending.id !== String(resumeId || "").trim()) {
+    return;
+  }
+
+  state.pendingResume = null;
+  state.activity.unshift("Resume option dismissed.");
+  persistSession();
+  render();
 }
 
 function handleRuntimeMessage(message) {
@@ -6390,11 +6716,13 @@ async function handleAgentResult(result, options = {}) {
 
     const provider = getSelectedProviderStatus();
     logProviderError("provider.error", result, `${provider?.label || "Selected provider"} error`);
+    const resumeRequest = buildProviderErrorResumeRequest(result, options);
     state.messages.push({
       role: "assistant",
       text: formatProviderAgentErrorMessage(result),
       thinking: getAgentDisplayThinking(result),
       variant: "error",
+      ...(resumeRequest ? { resumeRequestId: resumeRequest.id } : {}),
       createdAt: Date.now()
     });
     state.activity.unshift(`${provider?.label || "Selected provider"} was unavailable.`);
@@ -7292,7 +7620,12 @@ async function executeActionPlan(plan, options = {}) {
     if (recovered) {
       return;
     }
-    pushPostActionSynthesisError(synthesized.error);
+    pushPostActionSynthesisError(synthesized.error, {
+      goal: normalizedPlan.goal || getLastUserMessageText() || "",
+      plan: normalizedPlan,
+      results: completionResults,
+      planContext: getLatestPlanContext(options.planContext)
+    });
     await refreshPageAfterAction();
     return;
   }
@@ -7491,7 +7824,12 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
 
   const synthesized = await maybeSynthesizeResults({ ...plan, goal }, completionResults);
   if (synthesized.error) {
-    pushPostActionSynthesisError(synthesized.error);
+    pushPostActionSynthesisError(synthesized.error, {
+      goal,
+      plan,
+      results: completionResults,
+      planContext
+    });
     return true;
   }
   if (synthesized.text && !isActionOnlyCompletionText(synthesized.text)) {
@@ -7533,9 +7871,17 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
     const fallbackText = responseLanguage === "it"
       ? "Ho raccolto il contesto disponibile e ho provato una recovery del loop, ma il modello ha continuato a chiedere la stessa lettura. Per proseguire senza girare a vuoto mi serve un vincolo più preciso: quale pagina, tab o fonte devo usare come prossimo punto di partenza?"
       : "I gathered the available context and tried a loop recovery pass, but the model kept asking for the same read-only step. To continue without spinning, I need one precise constraint: which page, tab, or source should I use as the next starting point?";
+    const resumeRequest = createPendingResumeRequest("read_only_loop", {
+      goal,
+      plan,
+      results: completionResults,
+      planContext,
+      result: followUpResult
+    });
     state.messages.push({
       role: "assistant",
       text: fallbackText,
+      ...(resumeRequest ? { resumeRequestId: resumeRequest.id } : {}),
       createdAt: Date.now()
     });
     addDebugLog("agent.read_only_finalize.loop_blocked", {
@@ -10240,17 +10586,44 @@ async function maybeSynthesizeResults(plan, results) {
     }));
   const recentActions = getRecentActionsForProvider();
   const buildPayload = (mode = "full") => {
+    const minimalMode = mode === "minimal";
+    const synthesisConversationContext = minimalMode
+      ? compactConversationContextForProvider(conversationContext, "minimal")
+      : conversationContext;
+    const synthesisRecentReferences = minimalMode
+      ? compactRecentReferencesForProvider(recentReferences, "minimal")
+      : recentReferences;
+    const synthesisRecentActions = minimalMode
+      ? getRecentActionsForProvider("minimal")
+      : recentActions;
+    const synthesisTaskMemory = minimalMode
+      ? getTaskMemoryForProvider(lastUserMessage, "minimal")
+      : taskMemory;
+    const synthesisAccessibleTabs = minimalMode
+      ? accessibleTabs.slice(0, PROVIDER_MINIMAL_RECENT_TAB_LIMIT).map((tab) => ({
+          tabId: tab.tabId || null,
+          title: String(tab.title || "").slice(0, 100),
+          url: tab.url || "",
+          isCurrent: Boolean(tab.isCurrent),
+          accessStatus: tab.accessStatus || "unknown",
+          lastObservedAt: tab.lastObservedAt || "",
+          lastActiveAt: tab.lastActiveAt || "",
+          visibleTextLength: tab.visibleTextLength || 0,
+          links: tab.links || 0,
+          buttons: tab.buttons || 0
+        }))
+      : accessibleTabs;
     const contextPayload = applyLinkReferencesForProvider({
-      conversationContext,
-      recentReferences,
-      accessibleTabs,
-      recentActions,
-      taskMemory,
+      conversationContext: synthesisConversationContext,
+      recentReferences: synthesisRecentReferences,
+      accessibleTabs: synthesisAccessibleTabs,
+      recentActions: synthesisRecentActions,
+      taskMemory: synthesisTaskMemory,
       observation: compactObservationForSynthesis(latestObservation, mode, {
         goal: loggedLastUserMessage,
-        conversationContext,
+        conversationContext: synthesisConversationContext,
         userMemory: state.userMemory.items,
-        recentReferences
+        recentReferences: synthesisRecentReferences
       }),
       userMemory: getUserMemoryForSynthesis(mode),
       results: compactResultsForSynthesis(results, mode)
@@ -10263,20 +10636,21 @@ async function maybeSynthesizeResults(plan, results) {
       model: state.codex.model,
       httpProvider: selectedHttpProvider,
       ...contextPayload,
-      linkReferences: getLinkReferencesForProvider()
+      linkReferences: getLinkReferencesForProvider(undefined, minimalMode ? "minimal" : "standard")
     };
   };
 
   const runSynthesisAttempt = async (mode = "full") => {
     const payload = buildPayload(mode);
-    addDebugLog("provider.synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}${mode === "compact" ? " (compact retry)" : ""}`);
+    const modeLabel = mode === "compact" ? " (compact retry)" : (mode === "minimal" ? " (minimal retry)" : "");
+    addDebugLog("provider.synthesis.start", payload, `${state.codex.provider} / ${state.codex.model}${modeLabel}`);
     const response = await requestSelectedProviderSynthesis(payload);
     addDebugLog("provider.synthesis.end", {
       ok: response.ok,
       error: response.error || "",
       result: response.envelope?.payload || null,
       mode
-    }, response.ok ? `Synthesis response received${mode === "compact" ? " after compact retry" : ""}.` : response.error);
+    }, response.ok ? `Synthesis response received${mode === "compact" ? " after compact retry" : (mode === "minimal" ? " after minimal retry" : "")}.` : response.error);
 
     if (!response.ok) {
       return {
@@ -10334,6 +10708,24 @@ async function maybeSynthesizeResults(plan, results) {
     reason: "provider_error_compact_retry"
   }, "Retrying synthesis with compact context.");
   const compactAttempt = await runSynthesisAttempt("compact");
+  if (!compactAttempt.error) {
+    return compactAttempt;
+  }
+
+  if (getRecoverableResumeReason(compactAttempt.error)) {
+    state.activity.unshift("Synthesis still hit a provider error; retrying with minimal context.");
+    addDebugLog("provider.synthesis.retry", {
+      error: compactAttempt.error,
+      reason: "provider_error_minimal_retry"
+    }, "Retrying synthesis with minimal context.");
+    const minimalAttempt = await runSynthesisAttempt("minimal");
+    if (!minimalAttempt.error) {
+      return minimalAttempt;
+    }
+    state.activity.unshift(`Synthesis failed: ${minimalAttempt.error.message}`);
+    return minimalAttempt;
+  }
+
   if (compactAttempt.error) {
     state.activity.unshift(`Synthesis failed: ${compactAttempt.error.message}`);
   }
@@ -10344,13 +10736,14 @@ function getUserMemoryForSynthesis(mode = "full") {
   return state.userMemory.items.map((item) => ({
       id: item.id,
       title: item.title,
-      content: mode === "compact" ? "" : item.content,
+      content: mode === "full" ? item.content : "",
       updatedAt: item.updatedAt
     }));
 }
 
 function compactObservationForSynthesis(observation, mode = "full", context = {}) {
-  const compacted = compactObservationForProvider(observation, context);
+  const providerMode = mode === "minimal" ? "minimal" : (mode === "compact" ? "compact" : "standard");
+  const compacted = compactObservationForProvider(observation, context, providerMode);
   if (!compacted) {
     return compacted;
   }
@@ -10363,6 +10756,31 @@ function compactObservationForSynthesis(observation, mode = "full", context = {}
       ? `Observation compacted for synthesis; removed ${dedupedVisibleText.removedCount} near-duplicate text block${dedupedVisibleText.removedCount === 1 ? "" : "s"}.`
       : compacted.note
   };
+
+  if (mode === "minimal") {
+    return {
+      type: baseObservation.type,
+      tab: baseObservation.tab,
+      capturedAt: baseObservation.capturedAt,
+      visible_text: String(baseObservation.visible_text || "").slice(0, 700),
+      visibleTextLength: baseObservation.visibleTextLength,
+      visibleTextTruncated: true,
+      headings: Array.isArray(baseObservation.headings) ? baseObservation.headings.slice(0, 3) : [],
+      links: [],
+      buttons: [],
+      forms: [],
+      counts: baseObservation.counts,
+      page_outline: compactPageOutlineForProvider(baseObservation.page_outline, 3),
+      structured_items: compactStructuredItemsForProvider(baseObservation.structured_items, context, 3, { mode: "minimal" }),
+      focused_context: Array.isArray(baseObservation.focused_context)
+        ? baseObservation.focused_context.slice(0, PROVIDER_MINIMAL_FOCUSED_CONTEXT_LIMIT).map((item) => ({
+            ...item,
+            text: String(item.text || item.snippet || "").slice(0, PROVIDER_MINIMAL_FOCUSED_CONTEXT_TEXT_LIMIT)
+          }))
+        : [],
+      note: "Observation minimized for synthesis context-window recovery."
+    };
+  }
 
   if (mode !== "compact") {
     return baseObservation;
@@ -10511,7 +10929,7 @@ function areTextBlocksVerySimilar(a, b) {
 function compactResultsForSynthesis(results, mode = "full") {
   const items = Array.isArray(results) ? results : [];
   const latestObservation = getLatestObservationFromResults(items);
-  const limit = mode === "compact" ? 10 : 16;
+  const limit = mode === "minimal" ? 5 : (mode === "compact" ? 10 : 16);
   const summarized = items
     .slice(0, limit)
     .map((result) => summarizeResultForSynthesis(result, latestObservation, mode))
@@ -10594,6 +11012,16 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
       };
     }
 
+    if (mode === "minimal") {
+      return {
+        kind: "page_observation",
+        title: String(observation.tab?.title || "").slice(0, 100),
+        url: observation.tab?.url || "",
+        visibleTextLength: observation.visibleTextLength || String(observation.visible_text || "").length,
+        counts: observation.counts || null
+      };
+    }
+
     return {
       kind: "page_observation",
       title: observation.tab?.title || "",
@@ -10610,7 +11038,7 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
       kind: "http_response",
       statusCode: artifact.statusCode || null,
       finalUrl: artifact.finalUrl || artifact.url || "",
-      bodyPreview: formatHttpBodyPreview(artifact).slice(0, mode === "compact" ? 700 : 1200)
+      bodyPreview: formatHttpBodyPreview(artifact).slice(0, mode === "minimal" ? 320 : (mode === "compact" ? 700 : 1200))
     };
   }
 
@@ -10618,14 +11046,14 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
     return {
       kind: "web_search",
       query: artifact.query || "",
-      results: compactWebSearchResultsForProvider(artifact.results, mode === "compact" ? 3 : 8)
+      results: compactWebSearchResultsForProvider(artifact.results, mode === "minimal" ? 2 : (mode === "compact" ? 3 : 8), mode === "minimal" ? "minimal" : "standard")
     };
   }
 
   if (artifact.kind === "screenshot") {
     return {
       kind: "screenshot",
-      ocrText: String(artifact.ocrText || "").slice(0, mode === "compact" ? 700 : 1200)
+      ocrText: String(artifact.ocrText || "").slice(0, mode === "minimal" ? 280 : (mode === "compact" ? 700 : 1200))
     };
   }
 
@@ -10633,9 +11061,9 @@ function summarizeArtifactForSynthesis(artifact, latestObservation = null, mode 
     return {
       kind: "numbered_overlay",
       screenshotAvailable: Boolean(artifact.dataUrl),
-      captureError: String(artifact.captureError || "").slice(0, mode === "compact" ? 300 : 600),
+      captureError: String(artifact.captureError || "").slice(0, mode === "minimal" ? 180 : (mode === "compact" ? 300 : 600)),
       overlayMap: Array.isArray(artifact.overlayMap)
-        ? artifact.overlayMap.slice(0, mode === "compact" ? 10 : 18)
+        ? artifact.overlayMap.slice(0, mode === "minimal" ? 4 : (mode === "compact" ? 10 : 18))
         : []
     };
   }
@@ -10711,13 +11139,19 @@ function stripLargeArtifactsForSynthesis(result) {
   return result;
 }
 
-function pushPostActionSynthesisError(error = {}) {
+function pushPostActionSynthesisError(error = {}, context = {}) {
   logProviderError("provider.synthesis.error", error, "Post-action synthesis failed.");
+  const resumeReason = getRecoverableResumeReason(error) || "post_action_synthesis";
+  const resumeRequest = createPendingResumeRequest(resumeReason, {
+    ...context,
+    error
+  });
   state.messages.push({
     role: "assistant",
     text: "The browser action completed, but the HTTP provider failed while preparing the final answer. " + (error.message || "The provider did not return a usable response."),
     thinking: String(error.thinking || "").trim(),
     variant: "error",
+    ...(resumeRequest ? { resumeRequestId: resumeRequest.id } : {}),
     createdAt: Date.now()
   });
   state.activity.unshift("Post-action answer synthesis failed.");
@@ -10900,6 +11334,7 @@ async function restoreSession() {
   state.activity = session.activity || [];
   state.debugLogs = normalizeDebugLogs(session.debugLogs || []);
   state.pendingMemoryProposal = session.pendingMemoryProposal || null;
+  state.pendingResume = normalizePendingResumeRequest(session.pendingResume);
 }
 
 async function restoreProviderSettings() {
@@ -10999,7 +11434,8 @@ function persistSession() {
       sessionApprovals: state.sessionApprovals.slice(-60),
       activity: state.activity.slice(0, 80),
       debugLogs: state.debugLogs.slice(0, 200),
-      pendingMemoryProposal: state.pendingMemoryProposal
+      pendingMemoryProposal: state.pendingMemoryProposal,
+      pendingResume: normalizePendingResumeRequest(state.pendingResume)
     }
   });
 }
@@ -11032,6 +11468,7 @@ function clearSession() {
   state.pendingPlanContext = null;
   state.pendingPolicy = null;
   state.pendingPermissionRequest = null;
+  state.pendingResume = null;
   state.pendingMemoryProposal = null;
   state.pendingMemoryIntent = null;
   state.sessionApprovals = [];
