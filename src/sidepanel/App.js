@@ -219,6 +219,19 @@ const PROVIDER_COMPACT_FORM_LIMIT = 3;
 const PROVIDER_COMPACT_FIELD_LIMIT = 4;
 const PROVIDER_COMPACT_STRUCTURED_ITEM_LIMIT = 8;
 const PROVIDER_COMPACT_CONTENT_BLOCK_LIMIT = 6;
+const PROVIDER_MINIMAL_VISIBLE_TEXT_LIMIT = 900;
+const PROVIDER_MINIMAL_ELEMENT_LIMIT = 3;
+const PROVIDER_MINIMAL_FORM_LIMIT = 1;
+const PROVIDER_MINIMAL_FIELD_LIMIT = 2;
+const PROVIDER_MINIMAL_STRUCTURED_ITEM_LIMIT = 3;
+const PROVIDER_MINIMAL_CONTENT_BLOCK_LIMIT = 2;
+const PROVIDER_MINIMAL_FOCUSED_CONTEXT_LIMIT = 3;
+const PROVIDER_MINIMAL_FOCUSED_CONTEXT_TEXT_LIMIT = 600;
+const PROVIDER_MINIMAL_RECENT_ACTION_LIMIT = 3;
+const PROVIDER_MINIMAL_RECENT_TAB_LIMIT = 3;
+const PROVIDER_MINIMAL_CONVERSATION_CONTEXT_LIMIT = 3;
+const PROVIDER_MINIMAL_CONVERSATION_TEXT_LIMIT = 500;
+const PROVIDER_MINIMAL_LINK_REFERENCE_LIMIT = 24;
 const TASK_MEMORY_GOAL_LIMIT = 8;
 const TASK_MEMORY_CONSTRAINT_LIMIT = 10;
 const TASK_MEMORY_EXPLORED_LIMIT = 18;
@@ -4222,18 +4235,20 @@ function resetLinkReferenceRegistry() {
   };
 }
 
-function getLinkReferencesForProvider(limit = LINK_REFERENCE_PROVIDER_LIMIT) {
+function getLinkReferencesForProvider(limit = LINK_REFERENCE_PROVIDER_LIMIT, mode = "standard") {
   state.linkReferences = normalizeLinkReferenceRegistry(state.linkReferences);
+  const minimalMode = mode === "minimal";
+  const effectiveLimit = minimalMode ? Math.min(limit, PROVIDER_MINIMAL_LINK_REFERENCE_LIMIT) : limit;
   return Object.values(state.linkReferences.byRef || {})
     .sort((a, b) => Number.parseInt(a.ref.slice(1), 10) - Number.parseInt(b.ref.slice(1), 10))
-    .slice(-limit)
+    .slice(-effectiveLimit)
     .map((entry) => ({
       ref: entry.ref,
       host: entry.host || "",
       hint: entry.hint || "",
-      title: entry.title || "",
-      snippet: entry.snippet || "",
-      source: entry.source || ""
+      title: String(entry.title || "").slice(0, minimalMode ? 80 : 200),
+      snippet: String(entry.snippet || "").slice(0, minimalMode ? 80 : 240),
+      source: minimalMode ? "" : (entry.source || "")
     }));
 }
 
@@ -4477,18 +4492,22 @@ async function getAgentResult(goal, options = {}) {
     const selectedHttpProvider = getSelectedHttpProvider();
     const plannerMode = getHttpProviderPlannerMode(selectedHttpProvider);
     const runtimeContext = await buildRuntimeContext(goal, options);
-    const accessibleTabs = await getAccessibleTabsForProvider();
-    const conversationContext = getRecentConversationForProvider(goal);
-    const recentReferences = getRecentReferencesForProvider(providerGoal, rawObservation, conversationContext);
-    const recentActions = getRecentActionsForProvider();
-    const taskMemory = getTaskMemoryForProvider(goal);
+    const providerContextMode = getProviderContextMode(options);
+    const rawConversationContext = getRecentConversationForProvider(goal);
+    const conversationContext = compactConversationContextForProvider(rawConversationContext, providerContextMode);
+    const recentReferences = compactRecentReferencesForProvider(
+      getRecentReferencesForProvider(providerGoal, rawObservation, rawConversationContext),
+      providerContextMode
+    );
+    const accessibleTabs = await getAccessibleTabsForProvider(providerContextMode);
+    const recentActions = getRecentActionsForProvider(providerContextMode);
+    const taskMemory = getTaskMemoryForProvider(goal, providerContextMode);
     const observationContext = {
       goal,
       conversationContext,
       userMemory: state.userMemory.items,
       recentReferences
     };
-    const providerContextMode = options.compactProviderContext ? "compact" : "standard";
     const observationForRequest = compactObservationForProvider(rawObservation, observationContext, providerContextMode);
     const providerContext = applyLinkReferencesForProvider({
       runtimeContext,
@@ -4501,7 +4520,7 @@ async function getAgentResult(goal, options = {}) {
       userMemory: state.userMemory.items.map((item) => ({
         id: item.id,
         title: item.title,
-        content: item.content,
+        content: providerContextMode === "minimal" ? "" : item.content,
         updatedAt: item.updatedAt
       })),
       attachments: (options.omitAttachmentsForProvider ? [] : state.attachments).map((file) => ({
@@ -4520,7 +4539,7 @@ async function getAgentResult(goal, options = {}) {
       httpProvider: selectedHttpProvider,
       ...(plannerMode ? { plannerMode } : {}),
       ...providerContext,
-      linkReferences: getLinkReferencesForProvider()
+      linkReferences: getLinkReferencesForProvider(undefined, providerContextMode)
     };
     addDebugLog("provider.agent_request.start", payload, `${state.codex.provider} / ${state.codex.model}`);
     const response = await requestSelectedProviderAgent(payload);
@@ -4566,6 +4585,29 @@ async function getAgentResult(goal, options = {}) {
         compactProviderContext: true,
         omitAttachmentsForProvider: true,
         continuationReason: compact(`${options.continuationReason || ""}\nThe previous provider attempt exceeded the model context window. Retry with compact page context and use focused/structured URLs first.`)
+      });
+    }
+
+    if (
+      response.ok
+      && isProviderContextLimitResult(response.envelope?.payload)
+      && options.compactProviderContext
+      && !options.minimalProviderContext
+    ) {
+      state.activity.unshift("HTTP provider still exceeded the context size; retrying once with minimal context.");
+      addDebugLog("provider.agent_request.retry", {
+        reason: "context_limit_minimal_retry",
+        compactProviderContext: true,
+        minimalProviderContext: true,
+        omitAttachmentsForProvider: true
+      }, "Retrying provider request with minimal context after compact retry still exceeded the context window.");
+      return getAgentResult(goal, {
+        ...options,
+        createdAt: options.createdAt,
+        compactProviderContext: true,
+        minimalProviderContext: true,
+        omitAttachmentsForProvider: true,
+        continuationReason: compact(`${options.continuationReason || ""}\nThe compact retry still exceeded the model context window. Retry with minimal context: use only the newest evidence, top link references, compact task memory, and the next concrete action.`)
       });
     }
 
@@ -4700,6 +4742,53 @@ function getProviderConversationMessageText(message = {}) {
   return getProviderLoggedUserText(text, message?.createdAt || Date.now());
 }
 
+function getProviderContextMode(options = {}) {
+  if (options.minimalProviderContext) {
+    return "minimal";
+  }
+  if (options.compactProviderContext) {
+    return "compact";
+  }
+  return "standard";
+}
+
+function compactConversationContextForProvider(messages = [], mode = "standard") {
+  const list = Array.isArray(messages) ? messages : [];
+  if (mode !== "minimal") {
+    return list;
+  }
+
+  return list
+    .slice(-PROVIDER_MINIMAL_CONVERSATION_CONTEXT_LIMIT)
+    .map((message) => ({
+      role: message.role || "assistant",
+      text: String(message.text || "").slice(0, PROVIDER_MINIMAL_CONVERSATION_TEXT_LIMIT),
+      createdAt: message.createdAt || 0
+    }));
+}
+
+function compactRecentReferencesForProvider(references = {}, mode = "standard") {
+  if (mode !== "minimal") {
+    return references;
+  }
+
+  return {
+    mentioned_items: (Array.isArray(references.mentioned_items) ? references.mentioned_items : [])
+      .slice(0, 3)
+      .map((item) => ({
+        item_id: item.item_id || "",
+        title: String(item.title || "").slice(0, 120),
+        metadata: String(item.metadata || "").slice(0, 140),
+        section_title: String(item.section_title || "").slice(0, 100),
+        destination_url: item.destination_url || "",
+        matched_message_at: item.matched_message_at || 0
+      })),
+    unresolved_references: (Array.isArray(references.unresolved_references) ? references.unresolved_references : [])
+      .slice(0, 1)
+      .map((item) => String(item || "").slice(0, 160))
+  };
+}
+
 function getProviderLoggedUserText(text, createdAt = Date.now()) {
   return prefixUserMessageWithTimestamp(text, createdAt, {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
@@ -4750,19 +4839,78 @@ function getRecentReferencesForProvider(currentGoal, observation, conversationCo
   };
 }
 
-function getRecentActionsForProvider() {
+function getRecentActionsForProvider(mode = "standard") {
+  const minimalMode = mode === "minimal";
+  const limit = minimalMode ? PROVIDER_MINIMAL_RECENT_ACTION_LIMIT : PROVIDER_RECENT_ACTION_LIMIT;
   return (Array.isArray(state.recentActions) ? state.recentActions : [])
-    .slice(0, PROVIDER_RECENT_ACTION_LIMIT)
+    .slice(0, limit)
     .map((entry) => ({
       action_id: entry.action_id || "",
       action_type: entry.action_type || "",
       status: entry.status || "",
-      log_message: entry.log_message || "",
+      log_message: String(entry.log_message || "").slice(0, minimalMode ? 160 : 500),
       target_verified: Boolean(entry.target_verified),
       page_changed: Boolean(entry.page_changed),
       createdAt: entry.createdAt || "",
-      artifact: entry.artifact || null
+      artifact: compactRecentActionArtifactForProvider(entry.artifact, mode)
     }));
+}
+
+function compactRecentActionArtifactForProvider(artifact, mode = "standard") {
+  if (!artifact || typeof artifact !== "object" || mode !== "minimal") {
+    return artifact || null;
+  }
+
+  if (artifact.kind === "web_search") {
+    return {
+      kind: "web_search",
+      query: String(artifact.query || "").slice(0, 180),
+      resultCount: artifact.resultCount || (Array.isArray(artifact.results) ? artifact.results.length : 0),
+      results: compactWebSearchResultsForProvider(artifact.results, 3, mode)
+    };
+  }
+
+  if (artifact.kind === "page_observation") {
+    return {
+      kind: "page_observation",
+      url: artifact.url || "",
+      title: String(artifact.title || "").slice(0, 120),
+      capturedAt: artifact.capturedAt || "",
+      visibleTextLength: artifact.visibleTextLength || 0,
+      counts: artifact.counts || null,
+      structured_items: Array.isArray(artifact.structured_items)
+        ? artifact.structured_items.slice(0, 2).map((item) => ({
+            title: String(item.title || item.label || "").slice(0, 100),
+            metadata: String(item.metadata || "").slice(0, 120),
+            destination_url: item.destination_url || item.href || ""
+          }))
+        : []
+    };
+  }
+
+  if (artifact.kind === "tab_opened") {
+    return {
+      kind: "tab_opened",
+      url: artifact.url || "",
+      title: String(artifact.title || "").slice(0, 120),
+      tabId: artifact.tabId || null,
+      accessStatus: artifact.accessStatus || ""
+    };
+  }
+
+  if (artifact.kind === "http_response") {
+    return {
+      kind: "http_response",
+      url: artifact.finalUrl || artifact.url || "",
+      statusCode: artifact.statusCode || null
+    };
+  }
+
+  return {
+    kind: artifact.kind || "",
+    url: artifact.url || "",
+    title: String(artifact.title || "").slice(0, 120)
+  };
 }
 
 function normalizeTaskMemory(memory) {
@@ -5174,10 +5322,24 @@ function rememberTaskMemoryFinding(text, source = "assistant") {
   touchTaskMemory();
 }
 
-function getTaskMemoryForProvider(currentGoal) {
+function getTaskMemoryForProvider(currentGoal, mode = "standard") {
   const memory = normalizeTaskMemory(state.taskMemory);
   if (!memory.rootGoal && !memory.currentGoal && !memory.goals.length && !memory.explored.length && !memory.findings.length && !memory.deadEnds.length) {
     return null;
+  }
+
+  if (mode === "minimal") {
+    return {
+      rootGoal: String(memory.rootGoal || normalizeTaskMemoryText(currentGoal || "")).slice(0, 300),
+      currentGoal: String(normalizeTaskMemoryText(currentGoal || memory.currentGoal || "")).slice(0, 300),
+      brief: buildTaskMemoryBrief(memory).slice(0, 900),
+      constraints: memory.constraints.slice(0, 4).map((item) => String(item || "").slice(0, 180)),
+      explored: memory.explored.slice(0, 4).map((entry) => compactTaskMemoryEntryForProvider(entry, mode)),
+      findings: memory.findings.slice(0, 3).map((entry) => compactTaskMemoryEntryForProvider(entry, mode)),
+      deadEnds: [],
+      nextSteps: memory.nextSteps.slice(0, 3).map((entry) => compactTaskMemoryEntryForProvider(entry, mode)),
+      updatedAt: memory.updatedAt || ""
+    };
   }
 
   return {
@@ -5191,6 +5353,25 @@ function getTaskMemoryForProvider(currentGoal) {
     deadEnds: memory.deadEnds.slice(0, TASK_MEMORY_DEAD_END_LIMIT),
     nextSteps: memory.nextSteps.slice(0, TASK_MEMORY_NEXT_STEP_LIMIT),
     updatedAt: memory.updatedAt || ""
+  };
+}
+
+function compactTaskMemoryEntryForProvider(entry = {}, mode = "standard") {
+  if (mode !== "minimal") {
+    return entry;
+  }
+
+  return {
+    kind: entry.kind || "note",
+    label: String(entry.label || "").slice(0, 180),
+    query: String(entry.query || "").slice(0, 160),
+    url: String(entry.url || "").slice(0, 260),
+    title: String(entry.title || "").slice(0, 160),
+    results: compactWebSearchResultsForProvider(entry.results, 2, mode),
+    status: String(entry.status || "").slice(0, 80),
+    reason: String(entry.reason || "").slice(0, 120),
+    source: String(entry.source || "").slice(0, 80),
+    at: String(entry.at || "")
   };
 }
 
@@ -5229,20 +5410,21 @@ function formatTaskMemoryBriefEntry(entry) {
   return parts.join(": ").slice(0, TASK_MEMORY_TEXT_LIMIT);
 }
 
-async function getAccessibleTabsForProvider() {
+async function getAccessibleTabsForProvider(mode = "standard") {
   await refreshAccessibleTabsState();
   const currentTab = await getCurrentActiveTab().catch(() => null);
   if (currentTab) {
     rememberActiveTab(currentTab);
   }
 
+  const minimalMode = mode === "minimal";
   return getRecentAccessibleTabs(currentTab?.id || null)
-    .slice(0, PROVIDER_RECENT_TAB_LIMIT)
+    .slice(0, minimalMode ? PROVIDER_MINIMAL_RECENT_TAB_LIMIT : PROVIDER_RECENT_TAB_LIMIT)
     .map((tab) => ({
       tabId: tab.tabId || null,
-      title: tab.title || "",
+      title: String(tab.title || "").slice(0, minimalMode ? 100 : 220),
       url: tab.url || "",
-      source: tab.source || "",
+      source: minimalMode ? "" : (tab.source || ""),
       isCurrent: Boolean(tab.isCurrent),
       accessStatus: tab.accessStatus || "unknown",
       lastObservedAt: tab.lastObservedAt || "",
@@ -5250,7 +5432,7 @@ async function getAccessibleTabsForProvider() {
       visibleTextLength: tab.visibleTextLength || 0,
       links: tab.links || 0,
       buttons: tab.buttons || 0,
-      lastActionLog: tab.lastActionLog || ""
+      lastActionLog: minimalMode ? "" : (tab.lastActionLog || "")
     }));
 }
 
@@ -5376,7 +5558,8 @@ function compactObservationForProvider(observation, context = {}, mode = "standa
   if (!observation) return null;
 
   const visibleText = String(observation.visible_text || "");
-  const compactMode = mode === "compact";
+  const minimalMode = mode === "minimal";
+  const compactMode = mode === "compact" || minimalMode;
   const useFullDump = !compactMode && shouldUseFullObservationDump(observation);
   const visibleTextExcerpt = useFullDump
     ? {
@@ -5387,10 +5570,10 @@ function compactObservationForProvider(observation, context = {}, mode = "standa
     : buildSegmentAwareVisibleTextExcerpt(observation, context);
   const elementLimit = useFullDump
     ? Number.MAX_SAFE_INTEGER
-    : (compactMode ? PROVIDER_COMPACT_ELEMENT_LIMIT : PROVIDER_ELEMENT_LIMIT);
+    : (minimalMode ? PROVIDER_MINIMAL_ELEMENT_LIMIT : (compactMode ? PROVIDER_COMPACT_ELEMENT_LIMIT : PROVIDER_ELEMENT_LIMIT));
   const formLimit = useFullDump
     ? Number.MAX_SAFE_INTEGER
-    : (compactMode ? PROVIDER_COMPACT_FORM_LIMIT : PROVIDER_FORM_LIMIT);
+    : (minimalMode ? PROVIDER_MINIMAL_FORM_LIMIT : (compactMode ? PROVIDER_COMPACT_FORM_LIMIT : PROVIDER_FORM_LIMIT));
   const counts = {
     headings: observation.headings?.length || 0,
     links: observation.links?.length || 0,
@@ -5402,21 +5585,22 @@ function compactObservationForProvider(observation, context = {}, mode = "standa
   };
   const pageOutline = compactPageOutlineForProvider(
     observation.page_outline,
-    useFullDump ? Number.MAX_SAFE_INTEGER : (compactMode ? 5 : PROVIDER_SECTION_LIMIT)
+    useFullDump ? Number.MAX_SAFE_INTEGER : (minimalMode ? 3 : (compactMode ? 5 : PROVIDER_SECTION_LIMIT))
   );
   const structuredItems = compactStructuredItemsForProvider(
     observation.structured_items,
     context,
     useFullDump
       ? Number.MAX_SAFE_INTEGER
-      : (compactMode ? PROVIDER_COMPACT_STRUCTURED_ITEM_LIMIT : PROVIDER_STRUCTURED_ITEM_LIMIT),
+      : (minimalMode ? PROVIDER_MINIMAL_STRUCTURED_ITEM_LIMIT : (compactMode ? PROVIDER_COMPACT_STRUCTURED_ITEM_LIMIT : PROVIDER_STRUCTURED_ITEM_LIMIT)),
     { mode }
   );
-  const focusedContext = buildFocusedContextForProvider(observation, context, useFullDump ? "full" : "compact");
+  const focusedContext = buildFocusedContextForProvider(observation, context, useFullDump ? "full" : mode);
   const contentBlocks = compactContentBlocksForProvider(
     observation.content_blocks,
     context,
-    useFullDump ? Number.MAX_SAFE_INTEGER : (compactMode ? PROVIDER_COMPACT_CONTENT_BLOCK_LIMIT : 16)
+    useFullDump ? Number.MAX_SAFE_INTEGER : (minimalMode ? PROVIDER_MINIMAL_CONTENT_BLOCK_LIMIT : (compactMode ? PROVIDER_COMPACT_CONTENT_BLOCK_LIMIT : 16)),
+    { mode }
   );
 
   return {
@@ -5425,14 +5609,14 @@ function compactObservationForProvider(observation, context = {}, mode = "standa
     viewport: observation.viewport || null,
     capturedAt: observation.capturedAt || "",
     visible_text: compactMode
-      ? String(visibleTextExcerpt.text || "").slice(0, PROVIDER_COMPACT_VISIBLE_TEXT_LIMIT)
+      ? String(visibleTextExcerpt.text || "").slice(0, minimalMode ? PROVIDER_MINIMAL_VISIBLE_TEXT_LIMIT : PROVIDER_COMPACT_VISIBLE_TEXT_LIMIT)
       : visibleTextExcerpt.text,
     visibleTextLength: visibleText.length,
     visibleTextTruncated: visibleTextExcerpt.truncated,
     visibleTextExcerptStrategy: visibleTextExcerpt.strategy,
-    headings: compactElementsForProvider(observation.headings, compactMode ? Math.min(6, elementLimit) : elementLimit, { mode }),
+    headings: compactElementsForProvider(observation.headings, compactMode ? Math.min(minimalMode ? 3 : 6, elementLimit) : elementLimit, { mode }),
     links: compactElementsForProvider(observation.links, elementLimit, { mode }),
-    buttons: compactElementsForProvider(observation.buttons, compactMode ? Math.min(6, elementLimit) : elementLimit, { mode }),
+    buttons: compactElementsForProvider(observation.buttons, compactMode ? Math.min(minimalMode ? 3 : 6, elementLimit) : elementLimit, { mode }),
     forms: compactFormsForProvider(observation.forms, formLimit, { mode }),
     interactive_elements: compactElementsForProvider(observation.interactive_elements, elementLimit, { mode }),
     counts,
@@ -5442,6 +5626,8 @@ function compactObservationForProvider(observation, context = {}, mode = "standa
     content_blocks: contentBlocks,
     note: useFullDump
       ? "Observation kept in full because the page is small enough for the local model context."
+      : minimalMode
+        ? "Observation minimized for final context-window retry."
       : compactMode
         ? "Observation compacted aggressively for provider retry/context-window safety."
       : "Observation compacted with page outline, structured items, and focused context."
@@ -5517,23 +5703,24 @@ function compactPageOutlineForProvider(pageOutline = null, limit = PROVIDER_SECT
 }
 
 function compactStructuredItemsForProvider(items = [], context = {}, limit = PROVIDER_STRUCTURED_ITEM_LIMIT, options = {}) {
-  const compactMode = options.mode === "compact";
+  const minimalMode = options.mode === "minimal";
+  const compactMode = options.mode === "compact" || minimalMode;
   const ranked = rankStructuredItems(items, context).slice(0, limit);
   return ranked.map((item) => ({
     item_id: item.item_id || "",
     agent_id: item.agent_id || "",
     role: item.role || "",
-    title: String(item.title || "").slice(0, compactMode ? 140 : 220),
-    label: String(item.label || "").slice(0, compactMode ? 140 : 220),
-    metadata: String(item.metadata || "").slice(0, compactMode ? 160 : 260),
-    text_preview: String(item.text_preview || "").slice(0, compactMode ? 180 : 320),
+    title: String(item.title || "").slice(0, minimalMode ? 100 : (compactMode ? 140 : 220)),
+    label: String(item.label || "").slice(0, minimalMode ? 100 : (compactMode ? 140 : 220)),
+    metadata: String(item.metadata || "").slice(0, minimalMode ? 120 : (compactMode ? 160 : 260)),
+    text_preview: String(item.text_preview || "").slice(0, minimalMode ? 120 : (compactMode ? 180 : 320)),
     destination_url: item.destination_url || item.href || "",
     link_candidates: Array.isArray(item.link_candidates)
-      ? item.link_candidates.slice(0, compactMode ? 2 : 6).map((candidate) => ({
+      ? item.link_candidates.slice(0, minimalMode ? 1 : (compactMode ? 2 : 6)).map((candidate) => ({
           href: candidate.href || "",
-          text: String(candidate.text || "").slice(0, compactMode ? 100 : 180),
-          aria_label: String(candidate.aria_label || "").slice(0, compactMode ? 80 : 120),
-          title: String(candidate.title || "").slice(0, compactMode ? 80 : 120)
+          text: String(candidate.text || "").slice(0, minimalMode ? 80 : (compactMode ? 100 : 180)),
+          aria_label: String(candidate.aria_label || "").slice(0, minimalMode ? 60 : (compactMode ? 80 : 120)),
+          title: String(candidate.title || "").slice(0, minimalMode ? 60 : (compactMode ? 80 : 120))
         }))
       : [],
     href: item.href || "",
@@ -5546,7 +5733,9 @@ function compactStructuredItemsForProvider(items = [], context = {}, limit = PRO
   }));
 }
 
-function compactContentBlocksForProvider(blocks = [], context = {}, limit = 16) {
+function compactContentBlocksForProvider(blocks = [], context = {}, limit = 16, options = {}) {
+  const minimalMode = options.mode === "minimal";
+  const compactMode = options.mode === "compact" || minimalMode;
   const ranked = rankContentBlocks(blocks, context).slice(0, limit);
   return ranked.map((block) => ({
     block_id: block.block_id || "",
@@ -5554,8 +5743,8 @@ function compactContentBlocksForProvider(blocks = [], context = {}, limit = 16) 
     section_id: block.section_id || "",
     section_title: block.section_title || "",
     item_id: block.item_id || "",
-    title: String(block.title || "").slice(0, 200),
-    text: String(block.text || "").slice(0, 320),
+    title: String(block.title || "").slice(0, minimalMode ? 100 : 200),
+    text: String(block.text || "").slice(0, minimalMode ? 140 : (compactMode ? 220 : 320)),
     destination_url: block.destination_url || ""
   }));
 }
@@ -5570,8 +5759,10 @@ function buildFocusedContextForProvider(observation, context = {}, mode = "full"
     ...block,
     __rank_index: index
   }));
-  const limit = mode === "compact" ? PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_LIMIT;
-  const textBudget = mode === "compact" ? PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT;
+  const minimalMode = mode === "minimal";
+  const compactMode = mode === "compact" || minimalMode;
+  const limit = minimalMode ? PROVIDER_MINIMAL_FOCUSED_CONTEXT_LIMIT : (compactMode ? PROVIDER_FOCUSED_CONTEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_LIMIT);
+  const textBudget = minimalMode ? PROVIDER_MINIMAL_FOCUSED_CONTEXT_TEXT_LIMIT : (compactMode ? PROVIDER_FOCUSED_CONTEXT_TEXT_COMPACT_LIMIT : PROVIDER_FOCUSED_CONTEXT_TEXT_LIMIT);
   const selected = [];
   let used = 0;
 
@@ -5584,14 +5775,14 @@ function buildFocusedContextForProvider(observation, context = {}, mode = "full"
       break;
     }
 
-    const slice = text.slice(0, Math.max(120, textBudget - used));
+    const slice = text.slice(0, Math.max(minimalMode ? 80 : 120, textBudget - used));
     selected.push({
       block_id: block.block_id || "",
       kind: block.kind || "section",
       section_id: block.section_id || "",
       section_title: block.section_title || "",
       item_id: block.item_id || "",
-      title: String(block.title || "").slice(0, 200),
+      title: String(block.title || "").slice(0, minimalMode ? 100 : 200),
       text: slice,
       destination_url: block.destination_url || "",
       bbox: block.bbox || null,
@@ -5606,7 +5797,7 @@ function buildFocusedContextForProvider(observation, context = {}, mode = "full"
     section_id: block.section_id || "",
     section_title: block.section_title || "",
     item_id: block.item_id || "",
-    title: String(block.title || "").slice(0, 200),
+    title: String(block.title || "").slice(0, minimalMode ? 100 : 200),
     text: String(block.text || ""),
     destination_url: block.destination_url || ""
   }));
@@ -5850,16 +6041,17 @@ function compactTabForProvider(tab) {
 }
 
 function compactElementsForProvider(elements, limit, options = {}) {
-  const compactMode = options.mode === "compact";
+  const minimalMode = options.mode === "minimal";
+  const compactMode = options.mode === "compact" || minimalMode;
   return (Array.isArray(elements) ? elements : []).slice(0, limit).map((element) => {
     const base = {
       agent_id: element.agent_id || "",
       role: element.role || "",
       tag: element.tag || "",
       type: element.type || "",
-      name: String(element.name || element.text || "").slice(0, compactMode ? 140 : 260),
-      text: String(element.text || "").slice(0, compactMode ? 140 : 260),
-      nearby_text: String(element.nearby_text || "").slice(0, compactMode ? 120 : 220),
+      name: String(element.name || element.text || "").slice(0, minimalMode ? 90 : (compactMode ? 140 : 260)),
+      text: String(element.text || "").slice(0, minimalMode ? 90 : (compactMode ? 140 : 260)),
+      nearby_text: String(element.nearby_text || "").slice(0, minimalMode ? 80 : (compactMode ? 120 : 220)),
       href: element.href || "",
       destination_url: element.destination_url || "",
       expandable: Boolean(element.expandable),
@@ -5871,7 +6063,9 @@ function compactElementsForProvider(elements, limit, options = {}) {
     if (compactMode) {
       return {
         ...base,
-        controlled_region: element.controlled_region
+        controlled_region: minimalMode
+          ? null
+          : element.controlled_region
           ? {
               role: element.controlled_region.role || "",
               label: String(element.controlled_region.label || "").slice(0, 100),
@@ -5885,7 +6079,7 @@ function compactElementsForProvider(elements, limit, options = {}) {
         link_candidates: Array.isArray(element.link_candidates)
           ? element.link_candidates.slice(0, 1).map((candidate) => ({
               href: candidate.href || "",
-              text: String(candidate.text || "").slice(0, 100)
+              text: String(candidate.text || "").slice(0, minimalMode ? 70 : 100)
             }))
           : []
       };
@@ -5929,29 +6123,32 @@ function compactElementsForProvider(elements, limit, options = {}) {
 }
 
 function compactFormsForProvider(forms, limit = PROVIDER_FORM_LIMIT, options = {}) {
-  const compactMode = options.mode === "compact";
+  const minimalMode = options.mode === "minimal";
+  const compactMode = options.mode === "compact" || minimalMode;
   return (Array.isArray(forms) ? forms : []).slice(0, limit).map((form) => ({
     agent_id: form.agent_id || "",
-    title: String(form.title || "").slice(0, compactMode ? 140 : 260),
+    title: String(form.title || "").slice(0, minimalMode ? 100 : (compactMode ? 140 : 260)),
     bbox: compactMode ? null : form.bbox || null,
     fields: (Array.isArray(form.fields) ? form.fields : [])
-      .slice(0, compactMode ? PROVIDER_COMPACT_FIELD_LIMIT : PROVIDER_FIELD_LIMIT)
+      .slice(0, minimalMode ? PROVIDER_MINIMAL_FIELD_LIMIT : (compactMode ? PROVIDER_COMPACT_FIELD_LIMIT : PROVIDER_FIELD_LIMIT))
       .map((field) => ({
       agent_id: field.agent_id || "",
       role: field.role || "",
       tag: field.tag || "",
       type: field.type || "",
-      name: String(field.name || "").slice(0, compactMode ? 120 : 220),
-      value: String(field.value || "").slice(0, compactMode ? 80 : 180),
+      name: String(field.name || "").slice(0, minimalMode ? 80 : (compactMode ? 120 : 220)),
+      value: String(field.value || "").slice(0, minimalMode ? 60 : (compactMode ? 80 : 180)),
       disabled: Boolean(field.disabled),
       required: Boolean(field.required),
       expanded: typeof field.expanded === "boolean" ? field.expanded : null,
       popup_role: field.popup_role || "",
-      nearby_text: String(field.nearby_text || "").slice(0, compactMode ? 100 : 220),
+      nearby_text: String(field.nearby_text || "").slice(0, minimalMode ? 70 : (compactMode ? 100 : 220)),
       bbox: compactMode ? null : field.bbox || null,
       selector_candidates: compactMode ? [] : compactSelectorsForProvider(field.selector_candidates),
-      options: Array.isArray(field.options) ? field.options.slice(0, compactMode ? 6 : 12) : [],
-      controlled_region: field.controlled_region
+      options: Array.isArray(field.options) ? field.options.slice(0, minimalMode ? 3 : (compactMode ? 6 : 12)) : [],
+      controlled_region: minimalMode
+        ? null
+        : field.controlled_region
         ? {
             role: field.controlled_region.role || "",
             label: String(field.controlled_region.label || "").slice(0, compactMode ? 100 : 180),
@@ -7222,6 +7419,7 @@ async function continueAfterActionBatch(plan, results, options = {}, steeredQueu
   const followUpResult = await getAgentResult(goal, {
     continuationDepth,
     compactProviderContext: Boolean(recovery.compactProviderContext),
+    minimalProviderContext: Boolean(recovery.minimalProviderContext || options.minimalProviderContext),
     omitAttachmentsForProvider: Boolean(recovery.omitAttachmentsForProvider),
     loopRecoveryAttempted: Boolean(recovery.loopRecoveryAttempted || options.loopRecoveryAttempted),
     continuationReason: appendSteeredContinuationReason(
@@ -8083,13 +8281,14 @@ function summarizeRecentActionArtifact(artifact, options = {}) {
   };
 }
 
-function compactWebSearchResultsForProvider(results, limit = 8) {
+function compactWebSearchResultsForProvider(results, limit = 8, mode = "standard") {
+  const minimalMode = mode === "minimal";
   return (Array.isArray(results) ? results : [])
     .slice(0, limit)
     .map((result) => ({
-      title: compact(result?.title || "").slice(0, 180),
-      url: String(result?.url || "").slice(0, 600),
-      snippet: compact(result?.snippet || "").slice(0, 280)
+      title: compact(result?.title || "").slice(0, minimalMode ? 100 : 180),
+      url: String(result?.url || "").slice(0, minimalMode ? 260 : 600),
+      snippet: compact(result?.snippet || "").slice(0, minimalMode ? 120 : 280)
     }))
     .filter((result) => result.url || result.title || result.snippet);
 }
