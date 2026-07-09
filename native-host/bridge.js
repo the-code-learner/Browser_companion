@@ -2629,8 +2629,8 @@ function runHttpProviderSynthesisRequest(provider, payload = {}, options = {}) {
         error
       }));
       return {
-        type: "natural_response",
-        text: error.message || "HTTP provider synthesis failed.",
+        type: "agent_error",
+        message: error.message || "HTTP provider synthesis failed.",
         thinking: error?.partialThinking || ""
       };
     });
@@ -2682,7 +2682,9 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
 
     if (!extracted.ok && extracted.retryable) {
       requestBody.max_tokens = retryMaxTokens;
-      requestBody.messages[0].content += "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning if needed, but emit the final answer in assistant content before stopping.";
+      requestBody.messages[0].content += wantsJson
+        ? "\n\nPrevious attempt ended before final assistant content. Continue through hidden reasoning only if absolutely necessary, but emit the final JSON object in assistant content before stopping."
+        : "\n\nPrevious attempt spent too many tokens in hidden reasoning and ended before final assistant content. Stop planning now. Emit the concise final user-facing answer in assistant content immediately. Use 3-6 bullets if helpful. Do not continue hidden self-correction.";
       json = await postHttpProviderCompletion(baseUrl, provider, requestBody, false, options);
       extracted = extractChatCompletionText(json);
     }
@@ -2694,7 +2696,10 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
       };
     }
 
-    throw new Error(extracted.message);
+    const completionError = new Error(extracted.message);
+    completionError.partialThinking = extracted.thinking || "";
+    completionError.finishReason = extracted.finishReason || "";
+    throw completionError;
   } catch (error) {
     if (error && typeof error === "object" && !error.httpProviderRequestBody) {
       error.httpProviderRequestBody = JSON.parse(JSON.stringify(requestBody));
@@ -3178,7 +3183,9 @@ function extractChatCompletionText(json) {
     return {
       ok: false,
       retryable: true,
-      message: "HTTP provider produced only hidden reasoning and hit the token limit before returning a usable answer. Browser Companion retried with more tokens, but the model still did not emit final assistant content."
+      thinking: reasoning,
+      finishReason,
+      message: "HTTP provider produced only hidden reasoning and hit the token limit before returning a usable answer. Browser Companion retried with stricter finalization instructions, but the model still did not emit final assistant content."
     };
   }
 
@@ -3186,6 +3193,8 @@ function extractChatCompletionText(json) {
     return {
       ok: false,
       retryable: false,
+      thinking: reasoning,
+      finishReason,
       message: "HTTP provider produced hidden reasoning but no user-facing answer. The model must emit final assistant content after thinking."
     };
   }
@@ -3193,6 +3202,8 @@ function extractChatCompletionText(json) {
   return {
     ok: false,
     retryable: finishReason === "length",
+    thinking: reasoning,
+    finishReason,
     message: `HTTP provider returned no assistant content. Finish reason: ${finishReason || "unknown"}.`
   };
 }

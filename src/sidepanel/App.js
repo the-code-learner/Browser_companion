@@ -6186,6 +6186,11 @@ async function handleAgentResult(result, options = {}) {
   }
 
   if (result?.type === "agent_unavailable" || result?.type === "agent_error") {
+    const recovered = await recoverFromAgentLoopError(result, options);
+    if (recovered) {
+      return;
+    }
+
     const provider = getSelectedProviderStatus();
     logProviderError("provider.error", result, `${provider?.label || "Selected provider"} error`);
     state.messages.push({
@@ -6565,10 +6570,70 @@ function isProviderErrorLikeResult(result) {
   return /\b(?:408|524)\b/.test(text)
     || /request timeout|timeout occurred|timed out|aborted due to timeout|etimedout|inactivity timeout/i.test(text)
     || /stream stalled|terminated/i.test(text)
+    || /hidden reasoning|no assistant content|final assistant content|token limit before returning/i.test(text)
     || /exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(text)
     || /upstream error page/i.test(text)
     || /HTTP provider returned \d+/i.test(text)
     || /<!doctype html>|<html\b|cloudflare/i.test(text);
+}
+
+function isHiddenReasoningLoopError(result) {
+  const text = `${result?.message || ""} ${result?.error || ""} ${result?.text || ""}`;
+  return /hidden reasoning|no assistant content|final assistant content|token limit before returning|stream stalled|stopped making real progress/i.test(text);
+}
+
+async function recoverFromAgentLoopError(result, options = {}) {
+  if (options.loopRecoveryAttempted || !isSelectedProviderConnected() || !isHiddenReasoningLoopError(result)) {
+    return false;
+  }
+
+  if ((options.continuationDepth || 0) >= MAX_ACTION_CONTINUATIONS) {
+    return false;
+  }
+
+  const goal = getLastUserMessageText();
+  if (!goal) {
+    return false;
+  }
+
+  const continuationDepth = (options.continuationDepth || 0) + 1;
+  const planContext = getLatestPlanContext(options.planContext);
+  const recoveryReason = [
+    "Loop recovery controller:",
+    "The previous provider attempt spent its budget in hidden reasoning or returned no final assistant content.",
+    "Do not continue the same chain of thought. Internally rewrite the user's request as one precise next step and answer with the normal Browser Companion control-flow JSON.",
+    "Prefer a concrete non-duplicate agent_plan using current observations, link references, search results, task memory, or accessible tabs. If the evidence is already enough, return natural_response. If not, ask_user with one exact missing blocker.",
+    "Keep the final assistant content short and complete. Do not leave the plan only in hidden reasoning."
+  ].join("\n");
+
+  state.activity.unshift("Provider reasoning stalled; retrying with loop-recovery instructions.");
+  addDebugLog("agent.loop_recovery.agent_error.start", {
+    goal,
+    error: result
+  }, "Retrying an agent error caused by hidden-reasoning/no-content finalization.");
+  render();
+
+  const recovered = await getAgentResult(goal, {
+    ...options,
+    continuationDepth,
+    compactProviderContext: true,
+    omitAttachmentsForProvider: true,
+    loopRecoveryAttempted: true,
+    continuationReason: compact(`${options.continuationReason || ""}\n${recoveryReason}`),
+    planContext
+  });
+
+  addDebugLog("agent.loop_recovery.agent_error.end", {
+    goal,
+    result: recovered
+  }, recovered?.type || "unknown recovery result");
+  await handleAgentResult(recovered, {
+    ...options,
+    continuationDepth,
+    planContext,
+    loopRecoveryAttempted: true
+  });
+  return true;
 }
 
 function isProviderQuotaExhaustedResult(result) {
@@ -6686,6 +6751,10 @@ function formatProviderAgentErrorMessage(result) {
 
   if (/stream stalled/i.test(raw) || /^terminated$/i.test(raw)) {
     return "The HTTP provider started streaming thinking, but then stopped making real progress before producing a final answer.";
+  }
+
+  if (/hidden reasoning|no assistant content|final assistant content|token limit before returning/i.test(raw)) {
+    return "The HTTP provider kept reasoning but did not produce a final answer. Browser Companion tried a stricter recovery pass; the model still needs a shorter or more specific next step.";
   }
 
   if (/exceeds the available context size|exceed_context_size_error|context window|supplied context/i.test(raw)) {
@@ -7008,37 +7077,30 @@ async function executeActionPlan(plan, options = {}) {
     }
   }
 
+  if (shouldContinueWithoutSynthesis(normalizedPlan, completionResults, options)) {
+    await continueAfterActionBatch(normalizedPlan, completionResults, options, steeredQueueItem, "", {
+      activity: "Continuing directly from search/action results.",
+      logSummary: "Continuing before synthesis because the action results are intermediate evidence for an operational goal.",
+      compactProviderContext: true
+    });
+    return;
+  }
+
   const synthesized = await maybeSynthesizeResults(plan, completionResults);
   if (synthesized.error) {
+    const recovered = await recoverAfterPostActionSynthesisError(synthesized.error, normalizedPlan, completionResults, {
+      ...options,
+      steeredQueueItem
+    });
+    if (recovered) {
+      return;
+    }
     pushPostActionSynthesisError(synthesized.error);
     await refreshPageAfterAction();
     return;
   }
   if (steeredQueueItem || shouldContinueAfterActionPlan(normalizedPlan, completionResults, synthesized.text, options)) {
-    const goal = buildSteeredContinuationGoal(normalizedPlan.goal || getLastUserMessageText() || "", steeredQueueItem);
-    const continuationDepth = (options.continuationDepth || 0) + 1;
-    const planContext = getLatestPlanContext(options.planContext);
-    state.activity.unshift("Continuing with the latest action results.");
-    addDebugLog("agent.auto_continue_after_actions", {
-      goal,
-      continuationDepth,
-      actions,
-      results: completionResults,
-      synthesized: synthesized.text
-    }, "Continuing after browser actions because the current context is not sufficient yet.");
-    render();
-    const followUpResult = await getAgentResult(goal, {
-      continuationDepth,
-      continuationReason: appendSteeredContinuationReason(
-        buildPostActionContinuationReason(normalizedPlan, completionResults, synthesized.text),
-        steeredQueueItem
-      ),
-      planContext
-    });
-    await handleAgentResult(followUpResult, {
-      continuationDepth,
-      planContext
-    });
+    await continueAfterActionBatch(normalizedPlan, completionResults, options, steeredQueueItem, synthesized.text);
     return;
   }
   const answerText = synthesized.text || getExecutionSummary(completionResults);
@@ -7101,6 +7163,117 @@ function isSuccessfulReadOnlyContextRun(plan, results) {
   return !hasExternalArtifact && actions.every((action) => READ_ONLY_CONTEXT_ACTION_TYPES.has(action?.type));
 }
 
+function shouldContinueWithoutSynthesis(plan, results, options = {}) {
+  if ((options.continuationDepth || 0) >= MAX_ACTION_CONTINUATIONS) {
+    return false;
+  }
+
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  if (!actions.length || !Array.isArray(results) || !results.length || results.some((result) => result.status !== "success")) {
+    return false;
+  }
+
+  const hasSearchResults = results.some((result) => result.artifact?.kind === "web_search"
+    && Array.isArray(result.artifact.results)
+    && result.artifact.results.length > 0);
+  if (!hasSearchResults) {
+    return false;
+  }
+
+  return isOperationalContinuationGoal(plan, results);
+}
+
+function isOperationalContinuationGoal(plan, results = []) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const text = [
+    plan?.goal || "",
+    plan?.summary_for_user || "",
+    plan?.text || "",
+    actions.map((action) => [
+      action?.type || "",
+      action?.value || "",
+      action?.target?.name || "",
+      action?.reason || ""
+    ].join(" ")).join(" "),
+    results.map((result) => [
+      result?.log_message || "",
+      result?.artifact?.query || ""
+    ].join(" ")).join(" ")
+  ].join(" ");
+
+  return /\b(apri|open|tab|schede?|application|candidatur|apply|offerte?|lavor[oi]|jobs?|careers?|ruoli|posizioni|societ|aziend[ae]|companies|almeno\s+\d+|at least\s+\d+)\b/i.test(text);
+}
+
+async function continueAfterActionBatch(plan, results, options = {}, steeredQueueItem = null, synthesizedText = "", recovery = {}) {
+  const goal = buildSteeredContinuationGoal(plan.goal || getLastUserMessageText() || "", steeredQueueItem);
+  const continuationDepth = (options.continuationDepth || 0) + 1;
+  const planContext = getLatestPlanContext(options.planContext);
+  state.activity.unshift(recovery.activity || "Continuing with the latest action results.");
+  addDebugLog("agent.auto_continue_after_actions", {
+    goal,
+    continuationDepth,
+    actions: plan.actions || [],
+    results,
+    synthesized: synthesizedText,
+    recovery
+  }, recovery.logSummary || "Continuing after browser actions because the current context is not sufficient yet.");
+  render();
+
+  const followUpResult = await getAgentResult(goal, {
+    continuationDepth,
+    compactProviderContext: Boolean(recovery.compactProviderContext),
+    omitAttachmentsForProvider: Boolean(recovery.omitAttachmentsForProvider),
+    loopRecoveryAttempted: Boolean(recovery.loopRecoveryAttempted || options.loopRecoveryAttempted),
+    continuationReason: appendSteeredContinuationReason(
+      recovery.continuationReason || buildPostActionContinuationReason(plan, results, synthesizedText),
+      steeredQueueItem
+    ),
+    planContext
+  });
+  await handleAgentResult(followUpResult, {
+    continuationDepth,
+    planContext,
+    loopRecoveryAttempted: Boolean(recovery.loopRecoveryAttempted || options.loopRecoveryAttempted)
+  });
+}
+
+async function recoverAfterPostActionSynthesisError(error, plan, results, options = {}) {
+  if (options.loopRecoveryAttempted || !isSelectedProviderConnected()) {
+    return false;
+  }
+
+  if (!isProviderErrorLikeResult(error) && !isHiddenReasoningLoopError(error)) {
+    return false;
+  }
+
+  if ((options.continuationDepth || 0) >= MAX_ACTION_CONTINUATIONS) {
+    return false;
+  }
+
+  const recoveryReason = [
+    "Loop recovery controller:",
+    "The post-action synthesis pass failed or stalled before producing a useful answer. Do not retry free-form synthesis.",
+    "Internally rewrite the user's request into the smallest precise next step using the completed action results below.",
+    "Return exactly one Browser Companion JSON object: either a concrete agent_plan using available URLs/artifacts, a concise natural_response if the evidence is sufficient, or ask_user with one specific missing blocker.",
+    "If web_search results include URLs, use them directly for http_request or open_url_new_tab. Do not repeat the same search just to recover links already present.",
+    buildPostActionContinuationReason(plan, results, "")
+  ].filter(Boolean).join("\n");
+
+  await continueAfterActionBatch(plan, results, options, options.steeredQueueItem || null, "", {
+    activity: "Synthesis stalled; retrying with loop-recovery instructions.",
+    logSummary: "Recovering from post-action synthesis failure with a stricter action continuation.",
+    compactProviderContext: true,
+    omitAttachmentsForProvider: true,
+    loopRecoveryAttempted: true,
+    continuationReason: recoveryReason,
+    error: {
+      message: error.message || "",
+      thinking: String(error.thinking || "").slice(0, 240)
+    }
+  });
+  return true;
+}
+
 async function finalizeReadOnlyRequest(plan, results, options = {}) {
   await refreshPageAfterAction();
 
@@ -7151,9 +7324,17 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
   });
 
   if (followUpResult?.type === "agent_plan" && isReadOnlyContextPlan(followUpResult)) {
+    const recovered = await recoverFromReadOnlyLoop(goal, plan, completionResults, followUpResult, {
+      ...options,
+      planContext
+    });
+    if (recovered) {
+      return true;
+    }
+
     const fallbackText = responseLanguage === "it"
-      ? "Ho raccolto il contesto disponibile dalla pagina, ma l'agente continua a chiedere altre azioni di sola lettura invece di rispondere. Mi fermo qui per evitare un loop. Se torni nella sezione giusta o fai un nuovo Observe, posso riprendere da li'."
-      : "I gathered the available page context, but the agent kept asking for more read-only actions instead of answering. I stopped here to avoid a loop. If you return to the right section or run Observe again, I can continue from there.";
+      ? "Ho raccolto il contesto disponibile e ho provato una recovery del loop, ma il modello ha continuato a chiedere la stessa lettura. Per proseguire senza girare a vuoto mi serve un vincolo più preciso: quale pagina, tab o fonte devo usare come prossimo punto di partenza?"
+      : "I gathered the available context and tried a loop recovery pass, but the model kept asking for the same read-only step. To continue without spinning, I need one precise constraint: which page, tab, or source should I use as the next starting point?";
     state.messages.push({
       role: "assistant",
       text: fallbackText,
@@ -7173,6 +7354,63 @@ async function finalizeReadOnlyRequest(plan, results, options = {}) {
     planContext
   });
   return true;
+}
+
+async function recoverFromReadOnlyLoop(goal, originalPlan, results, repeatedResult, options = {}) {
+  if (options.loopRecoveryAttempted || !isSelectedProviderConnected()) {
+    return false;
+  }
+
+  const planContext = getLatestPlanContext(options.planContext);
+  const recoveryReason = buildReadOnlyLoopRecoveryReason(originalPlan, results, repeatedResult);
+  state.activity.unshift("Read-only loop detected; retrying with a stricter recovery prompt.");
+  addDebugLog("agent.loop_recovery.start", {
+    goal,
+    originalPlan,
+    repeatedResult,
+    results
+  }, "Asking the provider to rewrite the next step instead of repeating read-only actions.");
+  render();
+
+  const recovered = await getAgentResult(goal, {
+    continuationDepth: options.continuationDepth || 0,
+    compactProviderContext: true,
+    omitAttachmentsForProvider: true,
+    loopRecoveryAttempted: true,
+    continuationReason: appendSteeredContinuationReason(recoveryReason, options.steeredQueueItem),
+    planContext
+  });
+
+  addDebugLog("agent.loop_recovery.end", {
+    goal,
+    result: recovered
+  }, recovered?.type || "unknown recovery result");
+
+  if (recovered?.type === "agent_plan" && isReadOnlyContextPlan(recovered)) {
+    return false;
+  }
+
+  await handleAgentResult(recovered, {
+    continuationDepth: options.continuationDepth || 0,
+    planContext,
+    loopRecoveryAttempted: true
+  });
+  return true;
+}
+
+function buildReadOnlyLoopRecoveryReason(originalPlan, results, repeatedResult) {
+  const repeatedActions = (repeatedResult?.actions || [])
+    .map((action) => `${action?.id || action?.type || "action"}:${action?.type || ""}:${action?.target?.name || action?.value || ""}`)
+    .join(" | ");
+  return [
+    "Loop recovery controller:",
+    "The previous attempt repeated a read-only context action after successful context gathering. Analyze the loop and internally rewrite the user's request into one precise next step.",
+    "Do not return observe_page, observe_known_tab, get_visible_text, get_links, get_buttons, get_forms, get_dom_snapshot, capture_viewport, capture_numbered_overlay, scroll_by, scroll_to_element, or wait_for_page_change for the same page/query.",
+    "Use the evidence already present in recent action results, page observations, link references, search results, and task memory.",
+    "Return exactly one Browser Companion JSON object: a concrete non-read-only agent_plan, a natural_response based on current evidence, or ask_user with the single missing fact that blocks progress.",
+    repeatedActions ? `Repeated read-only actions to avoid: ${repeatedActions}.` : "",
+    buildPostActionContinuationReason(originalPlan, results, "")
+  ].filter(Boolean).join("\n");
 }
 
 function appendCurrentObservationArtifact(results) {
@@ -7333,6 +7571,7 @@ function isActionOnlyCompletionText(text) {
     || compactText === "scrolled the page."
     || compactText === "observed the active tab."
     || compactText === "action completed."
+    || /\b(?:cercher|continuer|proseguir|sto cercando|sto aprendo|i will search|i will open|i'll search|i'll open|next i will)\b/i.test(compactText)
     || compactText.length < 40;
 }
 
