@@ -2,7 +2,7 @@
 
 ## Human authority for browser actions
 
-The model proposes; the user makes the final decision for actions that change page state. Low-risk observation/research steps may run automatically. State-changing plans require a fresh user confirmation; high-risk and sensitive actions also require typing a phrase. A worker-issued, single-use grant is bound to the exact plan for up to 60 seconds. Session-wide reuse of action approvals is disabled.
+The model proposes; the user makes the final decision for actions that change page state. Read-only observation/research steps may run automatically. All browser-interaction plans (including navigation, scrolling, highlighting and clicks) require a fresh user confirmation; high-risk and sensitive actions also require typing a phrase. A worker-issued, single-use grant is bound to the exact plan for up to 60 seconds. Session-wide reuse of action approvals is disabled.
 
 Automation of CAPTCHA/OTP/bypass flows is not supported; the user can carry out these steps personally on the page. Granting site access is not authorization to execute another plan. If a tab changes, re-observe before proceeding.
 
