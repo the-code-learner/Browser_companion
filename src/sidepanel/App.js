@@ -16,11 +16,13 @@ import {
 
 const HTTP_PROVIDER_DEFAULT_MAX_TOKENS = 24576;
 const HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS = 49152;
-const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
+const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 120000;
 const HTTP_PROVIDER_DEFAULT_PLANNER_ENABLED = false;
 const HTTP_PROVIDER_LEGACY_TIMEOUT_MS = 360000;
 const HTTP_PROVIDER_KIND_OPENAI = "openai-compatible";
 const HTTP_PROVIDER_KIND_CLOUDFLARE = "cloudflare-workers-ai";
+const HTTP_PROVIDER_KIND_GEMINI = "google-gemini-api";
+const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
 const GEMINI_CLI_PROVIDER_ID = "google-gemini-cli";
 const GEMINI_NANO_PROVIDER_ID = "chrome-gemini-nano";
 const GEMINI_NANO_MODEL_ID = "gemini-nano";
@@ -831,6 +833,7 @@ function renderConnectorSettings() {
 
 function renderHttpProviderSettings() {
   const isCloudflare = isCloudflareHttpProviderDraft(state.httpProviderDraft);
+  const isGemini = state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_GEMINI;
   const computedBaseUrl = isCloudflare
     ? computeCloudflareWorkersAiBaseUrl(state.httpProviderDraft.accountId || "")
     : "";
@@ -845,6 +848,7 @@ function renderHttpProviderSettings() {
             <select id="http-provider-kind">
               <option value="${HTTP_PROVIDER_KIND_OPENAI}" ${state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_OPENAI ? "selected" : ""}>Generic OpenAI-compatible</option>
               <option value="${HTTP_PROVIDER_KIND_CLOUDFLARE}" ${isCloudflare ? "selected" : ""}>Cloudflare Workers AI</option>
+              <option value="${HTTP_PROVIDER_KIND_GEMINI}" ${isGemini ? "selected" : ""}>Google Gemini API (free tier supported)</option>
             </select>
           </label>
           <label class="field-stack compact-field">
@@ -868,7 +872,8 @@ function renderHttpProviderSettings() {
             <input id="http-provider-base-url" type="url" readonly value="${escapeHtml(computedBaseUrl)}" placeholder="Generated from your Cloudflare Account ID">
           </label>
         ` : `
-          <input id="http-provider-base-url" type="url" placeholder="Base URL, e.g. http://192.168.0.10:8080" value="${escapeHtml(state.httpProviderDraft.baseUrl)}">
+          ${isGemini ? `<p>Google AI Studio API key required. Free tier models and quotas vary. Google may use free-tier data to improve products; Antigravity IDE limits are separate.</p>` : ""}
+          <input id="http-provider-base-url" type="url" ${isGemini ? "readonly" : ""} placeholder="Base URL, e.g. http://192.168.0.10:8080" value="${escapeHtml(isGemini ? GEMINI_API_BASE_URL : state.httpProviderDraft.baseUrl)}">
           <label class="field-stack compact-field">
             <span>Authentication</span>
             <select id="http-provider-auth-type">
@@ -902,6 +907,10 @@ function renderHttpProviderSettings() {
           <input id="http-provider-planner-enabled" type="checkbox" ${state.httpProviderDraft.plannerEnabled ? "checked" : ""}>
           <span>Use planner mode for this provider</span>
         </label>
+        <label class="toggle-row">
+          <input id="http-provider-detailed-debug" type="checkbox" ${state.httpProviderDraft.detailedDebug ? "checked" : ""}>
+          <span>Detailed HTTP debug (opt-in; may save full prompts locally)</span>
+        </label>
         <div class="button-row">
           <button id="test-http-provider" type="button">Refresh Models</button>
           <button type="submit">${state.httpProviderDraft.id ? "Save Changes" : "Save HTTP Provider"}</button>
@@ -926,7 +935,7 @@ function renderHttpProviderAuthFields() {
   }
 
   if (state.httpProviderDraft.authType === "bearer") {
-    return `<input id="http-provider-token" type="password" placeholder="Bearer token" value="${escapeHtml(state.httpProviderDraft.token || "")}">`;
+    return `<input id="http-provider-token" type="password" placeholder="${state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_GEMINI ? "Google AI Studio API key" : "Bearer token"}" value="${escapeHtml(state.httpProviderDraft.token || "")}">`;
   }
 
   return "";
@@ -953,7 +962,8 @@ function renderHttpProviderModelControl() {
 
 function renderHttpProviderItem(provider) {
   const extras = [
-    provider.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : "OpenAI-compatible",
+    provider.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : provider.providerKind === HTTP_PROVIDER_KIND_GEMINI ? "Google Gemini API" : "OpenAI-compatible",
+    provider.detailedDebug ? "detailed diagnostics ON" : "",
     provider.useStreaming ? "streaming on" : "",
     provider.plannerEnabled ? "planner on" : "",
     provider.maxTokens ? `max ${provider.maxTokens}` : "",
@@ -989,7 +999,8 @@ function makeDefaultHttpProviderDraft() {
     plannerEnabled: HTTP_PROVIDER_DEFAULT_PLANNER_ENABLED,
     maxTokens: HTTP_PROVIDER_DEFAULT_MAX_TOKENS,
     retryMaxTokens: HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS,
-    timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS
+    timeoutMs: HTTP_PROVIDER_DEFAULT_TIMEOUT_MS,
+    detailedDebug: false
   };
 }
 
@@ -1014,7 +1025,7 @@ function sanitizeTimeoutMs(value, fallback, defaultValue = HTTP_PROVIDER_DEFAULT
 }
 
 function normalizeHttpProviderKind(value) {
-  return value === HTTP_PROVIDER_KIND_CLOUDFLARE ? HTTP_PROVIDER_KIND_CLOUDFLARE : HTTP_PROVIDER_KIND_OPENAI;
+  return [HTTP_PROVIDER_KIND_CLOUDFLARE, HTTP_PROVIDER_KIND_GEMINI].includes(value) ? value : HTTP_PROVIDER_KIND_OPENAI;
 }
 
 function normalizeHttpProviderAuthType(value) {
@@ -1404,7 +1415,7 @@ function updateConfirmButtonState() {
   const selectedPlan = getSelectedPendingPlan();
   const selectedPolicy = getSelectedPendingPolicy();
   const highestRisk = getHighestRisk(selectedPolicy);
-  const needsTypedConfirmation = highestRisk === "sensitive";
+  const needsTypedConfirmation = ["sensitive", "high"].includes(highestRisk);
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, selectedPlan);
   const disabled = !selectedPlan?.actions?.length || !selectedPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
   button.disabled = disabled;
@@ -1678,7 +1689,7 @@ function renderActionPreview() {
   const highestRisk = getHighestRisk(policy);
   const riskClass = getPreviewRiskClass(highestRisk, policy);
   const confirmation = getConfirmationLabel(highestRisk, policy);
-  const needsTypedConfirmation = highestRisk === "sensitive";
+  const needsTypedConfirmation = ["sensitive", "high"].includes(highestRisk);
   const canApproveSession = canOfferSessionApproval(selectedPlan, policy, state.pendingPlanContext);
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, selectedPlan);
   const confirmDisabled = !selectedActions || blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
@@ -3290,16 +3301,16 @@ function readHttpProviderDraft() {
   const providerKind = normalizeHttpProviderKind(
     document.getElementById("http-provider-kind")?.value || state.httpProviderDraft.providerKind || HTTP_PROVIDER_KIND_OPENAI
   );
-  const defaultName = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : "Local LLM";
+  const defaultName = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "Cloudflare Workers AI" : providerKind === HTTP_PROVIDER_KIND_GEMINI ? "Google Gemini API" : "Local LLM";
   const name = document.getElementById("http-provider-name")?.value.trim() || defaultName;
   const accountId = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
     ? (document.getElementById("http-provider-account-id")?.value.trim() || state.httpProviderDraft.accountId || "")
     : (state.httpProviderDraft.accountId || "");
-  const baseUrl = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+  const baseUrl = providerKind === HTTP_PROVIDER_KIND_GEMINI ? GEMINI_API_BASE_URL : providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
     ? computeCloudflareWorkersAiBaseUrl(accountId)
     : (document.getElementById("http-provider-base-url")?.value.trim().replace(/\/+$/, "") || "");
   const requestedAuthType = document.getElementById("http-provider-auth-type")?.value || state.httpProviderDraft.authType || "none";
-  const authType = providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE ? "bearer" : normalizeHttpProviderAuthType(requestedAuthType);
+  const authType = [HTTP_PROVIDER_KIND_CLOUDFLARE, HTTP_PROVIDER_KIND_GEMINI].includes(providerKind) ? "bearer" : normalizeHttpProviderAuthType(requestedAuthType);
   const username = authType === "basic"
     ? (document.getElementById("http-provider-username")?.value.trim() || "")
     : (state.httpProviderDraft.username || "");
@@ -3316,6 +3327,7 @@ function readHttpProviderDraft() {
   const model = document.getElementById("http-provider-model")?.value.trim() || state.httpProviderDraft.model || "";
   const useStreaming = Boolean(document.getElementById("http-provider-use-streaming")?.checked);
   const plannerEnabled = Boolean(document.getElementById("http-provider-planner-enabled")?.checked);
+  const detailedDebug = Boolean(document.getElementById("http-provider-detailed-debug")?.checked);
   const maxTokens = sanitizePositiveInteger(
     document.getElementById("http-provider-max-tokens")?.value,
     state.httpProviderDraft.maxTokens,
@@ -3345,6 +3357,7 @@ function readHttpProviderDraft() {
     model,
     useStreaming,
     plannerEnabled,
+    detailedDebug,
     maxTokens,
     retryMaxTokens,
     timeoutMs,
@@ -3383,8 +3396,11 @@ function validateHttpProviderDraft(provider) {
 
 function handleHttpProviderKindChange() {
   state.httpProviderDraft = readHttpProviderDraft();
-  if (state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE) {
-    state.httpProviderDraft.authType = "bearer";
+  if ([HTTP_PROVIDER_KIND_CLOUDFLARE, HTTP_PROVIDER_KIND_GEMINI].includes(state.httpProviderDraft.providerKind)) state.httpProviderDraft.authType = "bearer";
+  if (state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_GEMINI) {
+    state.httpProviderDraft.baseUrl = GEMINI_API_BASE_URL;
+    state.httpProviderDraft.name ||= "Google Gemini API";
+    state.httpProviderDraft.model ||= "gemini-2.5-flash";
   }
   render();
 }
@@ -11356,11 +11372,12 @@ async function restoreProviderSettings() {
         ),
         useStreaming: Boolean(provider.useStreaming),
         plannerEnabled: Boolean(provider.plannerEnabled),
+        detailedDebug: Boolean(provider.detailedDebug),
         maxTokens: sanitizePositiveInteger(provider.maxTokens, HTTP_PROVIDER_DEFAULT_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_MAX_TOKENS),
         retryMaxTokens: sanitizePositiveInteger(provider.retryMaxTokens, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS, HTTP_PROVIDER_DEFAULT_RETRY_MAX_TOKENS),
         timeoutMs: normalizeStoredTimeoutMs(provider),
         timeoutConfigured: normalizeStoredTimeoutMs(provider) > 0,
-        baseUrl: providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
+        baseUrl: providerKind === HTTP_PROVIDER_KIND_GEMINI ? GEMINI_API_BASE_URL : providerKind === HTTP_PROVIDER_KIND_CLOUDFLARE
           ? computeCloudflareWorkersAiBaseUrl(accountId)
           : provider.baseUrl
       };
@@ -11614,8 +11631,8 @@ function getActionPreviewNote(risk, policy, plan, totalActions = 0) {
   if (risk === "blocked") {
     return {
       tone: "blocked",
-      title: "Review carefully before confirming",
-      body: `One or more selected actions fall into a high-attention category. You can still approve them, but review the notes below carefully before continuing with ${actionLabel}.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
+      title: "Manual action required",
+      body: `Some steps cannot be automated. Complete them yourself or unselect them to proceed with the remaining ${actionLabel}.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
     };
   }
 
@@ -11630,8 +11647,8 @@ function getActionPreviewNote(risk, policy, plan, totalActions = 0) {
   if (plan?.will_submit || risk === "high") {
     return {
       tone: "high",
-      title: "Final acceptance step",
-      body: `Confirm will continue with ${actionLabel} and may accept or submit on the site. Review the target fields before proceeding.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
+      title: "Irreversible action — additional disclaimer",
+      body: `This may submit, publish, purchase, delete or accept something. You have the final decision. Type ${getRequiredConfirmationPhrase(risk, plan)} after reviewing the target. Confirm continues with ${actionLabel}.${skippedCount ? ` ${skippedCount} action${skippedCount === 1 ? " is" : "s are"} currently skipped.` : ""}`
     };
   }
 
@@ -11647,7 +11664,7 @@ function getConfirmDisabledReason(risk, policy, plan) {
     return "Select at least one action to continue.";
   }
 
-  if (risk === "sensitive") {
+  if (risk === "sensitive" || risk === "high") {
     return `Confirm unlocks after you type ${getRequiredConfirmationPhrase(risk, plan)} exactly.`;
   }
 
@@ -11725,7 +11742,7 @@ function getSelectedPendingPolicy() {
 
 function getRequiredConfirmationPhrase(risk, plan) {
   if (risk === "sensitive") return "CONFIRM SENSITIVE";
-  if (plan?.will_submit || risk === "high") return "";
+  if (plan?.will_submit || risk === "high") return "CONFIRM FINAL";
   return "CONFIRM";
 }
 
