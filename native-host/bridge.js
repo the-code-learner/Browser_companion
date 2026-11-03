@@ -2682,7 +2682,7 @@ function runHttpProviderSynthesisRequest(provider, payload = {}, options = {}) {
       thinking
     }))
     .catch((error) => {
-      saveHttpProviderDebugError(createHttpProviderErrorArtifact({
+      if (provider.detailedDebug === true) saveHttpProviderDebugError(createHttpProviderErrorArtifact({
         requestId: options.requestId || "",
         baseUrl: normalizeHttpProviderBaseUrl(provider.baseUrl),
         provider,
