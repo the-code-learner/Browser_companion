@@ -7439,6 +7439,8 @@ async function confirmPendingPlan(options = {}) {
   const planContext = state.pendingPlanContext;
   const pendingPolicy = getSelectedPendingPolicy();
   if (!pendingPolicy?.allowed) return;
+  const highestRisk = getHighestRisk(pendingPolicy);
+  if (["sensitive", "high"].includes(highestRisk) && state.confirmationText !== getRequiredConfirmationPhrase(highestRisk, plan)) return;
 
   state.pendingPlan = null;
   state.pendingPlanContext = null;
@@ -8885,7 +8887,7 @@ async function grantPendingPermissionRequest() {
   state.pendingPermissionRequest = null;
   state.activity.unshift(`Granted site access for ${pending.origins.join(", ")}.`);
   render();
-  await executeActionPlan(plan, { planContext });
+  await executeActionPlan(plan, { planContext, userApproved: true });
 }
 
 function cancelPendingPermissionRequest() {
