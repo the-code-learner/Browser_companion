@@ -7438,9 +7438,7 @@ async function confirmPendingPlan(options = {}) {
 
   const planContext = state.pendingPlanContext;
   const pendingPolicy = getSelectedPendingPolicy();
-  if (options.approvalScope === "session") {
-    addSessionApprovalForPlan(plan, pendingPolicy, planContext);
-  }
+  if (!pendingPolicy?.allowed) return;
 
   state.pendingPlan = null;
   state.pendingPlanContext = null;
@@ -7449,7 +7447,7 @@ async function confirmPendingPlan(options = {}) {
   state.confirmationText = "";
 
   try {
-    await executeActionPlan(plan, { planContext });
+    await executeActionPlan(plan, { planContext, userApproved: true });
   } catch (error) {
     state.messages.push({
       role: "assistant",
@@ -7541,7 +7539,19 @@ async function executeActionPlan(plan, options = {}) {
   addDebugLog("action.execute.start", { plan: normalizedPlan }, `${actions.length} action(s).`);
   render();
 
+  let approvalToken = "";
+  if (options.userApproved) {
+    const grant = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.APPROVE_ACTION_PLAN, { plan: normalizedPlan }));
+    if (!grant.ok || !grant.token) {
+      state.activity.unshift(`Action approval failed: ${grant.error || "Unknown error"}`);
+      render();
+      return;
+    }
+    approvalToken = grant.token;
+  }
+
   const response = await sendRuntimeMessage(makeEnvelope(MESSAGE_TYPES.EXECUTE_ACTION_PLAN, {
+    approvalToken,
     plan: normalizedPlan,
     executionContext: getLatestPlanContext(options.planContext)
   }));
@@ -9028,10 +9038,11 @@ function canOfferSessionApproval(plan, policy, planContext) {
     return false;
   }
 
-  return buildSessionApprovalEntries(plan, policy, planContext).length > 0;
+  return false; // A fresh user decision is required for every state-changing plan.
 }
 
 function hasSessionApprovalForPlan(plan, policy, planContext) {
+  return false;
   const entries = buildSessionApprovalEntries(plan, policy, planContext);
   if (!entries.length) {
     return false;
