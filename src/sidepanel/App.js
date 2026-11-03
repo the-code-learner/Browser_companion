@@ -3395,7 +3395,16 @@ function validateHttpProviderDraft(provider) {
 }
 
 function handleHttpProviderKindChange() {
+  const previousKind = state.httpProviderDraft.providerKind;
   state.httpProviderDraft = readHttpProviderDraft();
+  if (previousKind !== state.httpProviderDraft.providerKind) {
+    // Never carry an API credential or model selection into another provider.
+    state.httpProviderDraft.token = "";
+    state.httpProviderDraft.password = "";
+    state.httpProviderDraft.username = "";
+    state.httpProviderDraft.model = "";
+    state.httpProviderDraft.models = [];
+  }
   if ([HTTP_PROVIDER_KIND_CLOUDFLARE, HTTP_PROVIDER_KIND_GEMINI].includes(state.httpProviderDraft.providerKind)) state.httpProviderDraft.authType = "bearer";
   if (state.httpProviderDraft.providerKind === HTTP_PROVIDER_KIND_GEMINI) {
     state.httpProviderDraft.baseUrl = GEMINI_API_BASE_URL;
