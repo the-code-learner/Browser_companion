@@ -101,8 +101,8 @@ export function validateActionPlan(plan) {
       index,
       actionType: action?.type || "unknown",
       risk,
-      allowed: true,
-      requiresConfirmation: risk !== RISK_LEVELS.LOW,
+      allowed: risk !== RISK_LEVELS.BLOCKED,
+      requiresConfirmation: risk !== RISK_LEVELS.LOW && risk !== RISK_LEVELS.BLOCKED,
       reason: action?.type === ACTION_TYPES.UPLOAD_FILE_TO_FIELD
         ? "File upload fields must be completed by the user through the browser file picker."
         : getPolicyReason(risk)
@@ -134,5 +134,5 @@ function getPolicyReason(risk) {
     return "The action touches sensitive personal, financial, legal, or security data.";
   }
 
-  return "The action needs especially careful human review before continuing.";
+  return "This operation is not automated. The user can complete it manually on the site.";
 }
