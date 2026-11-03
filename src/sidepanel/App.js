@@ -1415,7 +1415,7 @@ function updateConfirmButtonState() {
   const selectedPlan = getSelectedPendingPlan();
   const selectedPolicy = getSelectedPendingPolicy();
   const highestRisk = getHighestRisk(selectedPolicy);
-  const needsTypedConfirmation = ["sensitive", "high"].includes(highestRisk);
+  const needsTypedConfirmation = ["sensitive", "high"].includes(highestRisk) || Boolean(selectedPlan?.will_submit);
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, selectedPlan);
   const disabled = !selectedPlan?.actions?.length || !selectedPolicy?.allowed || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
   button.disabled = disabled;
@@ -1689,7 +1689,7 @@ function renderActionPreview() {
   const highestRisk = getHighestRisk(policy);
   const riskClass = getPreviewRiskClass(highestRisk, policy);
   const confirmation = getConfirmationLabel(highestRisk, policy);
-  const needsTypedConfirmation = ["sensitive", "high"].includes(highestRisk);
+  const needsTypedConfirmation = ["sensitive", "high"].includes(highestRisk) || Boolean(selectedPlan?.will_submit);
   const canApproveSession = canOfferSessionApproval(selectedPlan, policy, state.pendingPlanContext);
   const requiredPhrase = getRequiredConfirmationPhrase(highestRisk, selectedPlan);
   const confirmDisabled = !selectedActions || blocked || (needsTypedConfirmation && state.confirmationText !== requiredPhrase);
@@ -7440,7 +7440,7 @@ async function confirmPendingPlan(options = {}) {
   const pendingPolicy = getSelectedPendingPolicy();
   if (!pendingPolicy?.allowed) return;
   const highestRisk = getHighestRisk(pendingPolicy);
-  if (["sensitive", "high"].includes(highestRisk) && state.confirmationText !== getRequiredConfirmationPhrase(highestRisk, plan)) return;
+  if ((["sensitive", "high"].includes(highestRisk) || plan.will_submit) && state.confirmationText !== getRequiredConfirmationPhrase(highestRisk, plan)) return;
 
   state.pendingPlan = null;
   state.pendingPlanContext = null;
