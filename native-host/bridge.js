@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 import crypto from "node:crypto";
+import dns from "node:dns/promises";
 
 let inputBuffer = Buffer.alloc(0);
 const bridgeDir = path.dirname(fileURLToPath(import.meta.url));
@@ -23,10 +24,13 @@ const geminiQuotaCache = {
   value: null,
   pending: null
 };
-const httpProviderDebugRequestPath = path.join(projectRoot, "tmp-http-provider-request.json");
-const httpProviderDebugErrorPath = path.join(projectRoot, "tmp-http-provider-error.json");
+const debugDirectory = path.join(os.homedir(), ".browser-companion", "debug");
+const httpProviderDebugRequestPath = path.join(debugDirectory, "http-provider-request.json");
+const httpProviderDebugErrorPath = path.join(debugDirectory, "http-provider-error.json");
 const activeRequestControllers = new Map();
-const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 0;
+const HTTP_PROVIDER_DEFAULT_TIMEOUT_MS = 120000;
+const NATIVE_MAX_INPUT_BYTES = 1024 * 1024;
+const HTTP_REQUEST_MAX_REDIRECTS = 5;
 const CLI_PROVIDER_INACTIVITY_TIMEOUT_MS = 300000;
 const GEMINI_QUOTA_CACHE_TTL_MS = 30000;
 const COMMAND_MAX_BUFFER_BYTES = 1024 * 1024 * 12;
@@ -41,14 +45,23 @@ function readMessages() {
   while (inputBuffer.length >= 4) {
     const messageLength = inputBuffer.readUInt32LE(0);
 
-    if (inputBuffer.length < messageLength + 4) {
+    if (!messageLength || messageLength > NATIVE_MAX_INPUT_BYTES) {
+      process.stderr.write("Invalid native message length.\n");
+      process.exitCode = 1;
+      process.stdin.pause();
       return;
     }
+    if (inputBuffer.length < messageLength + 4) return;
 
     const rawMessage = inputBuffer.subarray(4, 4 + messageLength).toString("utf8");
     inputBuffer = inputBuffer.subarray(4 + messageLength);
-
-    handleMessage(JSON.parse(rawMessage));
+    try {
+      const message = JSON.parse(rawMessage);
+      if (!message || typeof message !== "object" || typeof message.type !== "string") throw new Error("Invalid message envelope");
+      handleMessage(message);
+    } catch (error) {
+      process.stderr.write(`Rejected malformed native message: ${error.message}\n`);
+    }
   }
 }
 
@@ -489,12 +502,29 @@ async function runHttpRequest(payload = {}) {
   const timeout = setTimeout(() => controller.abort(), 20000);
 
   try {
-    const response = await fetch(url, {
-      method,
-      redirect: "follow",
-      signal: controller.signal,
-      headers: sanitizeHeaders(payload.headers || {})
-    });
+    const headersForRequest = sanitizeHeaders(payload.headers || {});
+    let currentUrl = url;
+    let response;
+    for (let hop = 0; hop <= HTTP_REQUEST_MAX_REDIRECTS; hop++) {
+      await assertPublicHttpTarget(currentUrl);
+      response = await fetch(currentUrl, {
+        method,
+        redirect: "manual",
+        signal: controller.signal,
+        headers: headersForRequest
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      if (!location || hop === HTTP_REQUEST_MAX_REDIRECTS) throw new Error("HTTP redirect limit reached.");
+      const nextUrl = new URL(location, currentUrl).href;
+      await assertPublicHttpTarget(nextUrl);
+      // Never forward custom headers across origins.
+      if (new URL(nextUrl).origin !== new URL(currentUrl).origin) {
+        for (const key of Object.keys(headersForRequest)) if (key.toLowerCase() !== "user-agent") delete headersForRequest[key];
+      }
+      await response.body?.cancel().catch(() => {});
+      currentUrl = nextUrl;
+    }
     const headers = Object.fromEntries(response.headers.entries());
     const contentType = response.headers.get("content-type") || "";
     const bodyText = method === "HEAD" ? "" : await readLimitedResponseText(response, 200000);
@@ -748,6 +778,37 @@ function normalizeHttpUrl(value) {
   }
 
   return url.href;
+}
+
+function isPublicAddress(address) {
+  const value = String(address || "").toLowerCase();
+  if (!value) return false;
+  if (value.includes(":")) {
+    // Default-deny IPv6 for the public fetch tool; local LLM providers are separate.
+    return false;
+  }
+  const parts = value.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b, c] = parts;
+  return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+    (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && c === 0) || (a === 192 && b === 0 && c === 2) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
+}
+
+async function assertPublicHttpTarget(value) {
+  const url = new URL(normalizeHttpUrl(value));
+  if (url.username || url.password) throw new Error("Credentials in public request URLs are forbidden.");
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    throw new Error("Private network destinations are not permitted in public research requests.");
+  }
+  const addresses = await dns.lookup(host, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) {
+    throw new Error("Public research request resolved to a private or unsupported address.");
+  }
 }
 
 function sanitizeHeaders(headers) {
@@ -2566,7 +2627,7 @@ function runHttpProviderAgentRequest(provider, payload = {}, options = {}) {
       return parsed;
     })
     .catch((error) => {
-      saveHttpProviderDebugError(createHttpProviderErrorArtifact({
+      if (provider.detailedDebug === true) saveHttpProviderDebugError(createHttpProviderErrorArtifact({
         requestId: options.requestId || "",
         baseUrl: normalizeHttpProviderBaseUrl(provider.baseUrl),
         provider,
@@ -2663,7 +2724,7 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
     requestBody.response_format = { type: "json_object" };
   }
 
-  saveHttpProviderDebugRequest({
+  if (provider.detailedDebug === true) saveHttpProviderDebugRequest({
     savedAt: new Date().toISOString(),
     baseUrl,
     wantsJson,
@@ -2710,7 +2771,8 @@ async function runHttpProviderCompletion(provider, prompt, wantsJson, options = 
 
 function saveHttpProviderDebugRequest(payload) {
   try {
-    fs.writeFileSync(httpProviderDebugRequestPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    fs.mkdirSync(debugDirectory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(httpProviderDebugRequestPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   } catch {
     // Best-effort debug artifact only.
   }
@@ -2718,7 +2780,8 @@ function saveHttpProviderDebugRequest(payload) {
 
 function saveHttpProviderDebugError(payload) {
   try {
-    fs.writeFileSync(httpProviderDebugErrorPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    fs.mkdirSync(debugDirectory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(httpProviderDebugErrorPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   } catch {
     // Best-effort debug artifact only.
   }
@@ -3220,6 +3283,9 @@ function buildHttpProviderApiUrl(baseUrl, routePath) {
   const normalizedBaseUrl = normalizeHttpProviderBaseUrl(baseUrl);
   const normalizedRoutePath = `/${String(routePath || "").trim().replace(/^\/+/, "")}`;
 
+  if (/\/v1beta\/openai$/i.test(normalizedBaseUrl) && /^\/v1\//i.test(normalizedRoutePath)) {
+    return `${normalizedBaseUrl}${normalizedRoutePath.replace(/^\/v1/i, "")}`;
+  }
   if (/\/v1$/i.test(normalizedBaseUrl) && /^\/v1(\/|$)/i.test(normalizedRoutePath)) {
     return `${normalizedBaseUrl}${normalizedRoutePath.replace(/^\/v1/i, "") || ""}`;
   }
