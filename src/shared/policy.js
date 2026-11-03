@@ -23,6 +23,17 @@ const LOW_RISK_ACTIONS = new Set([
   ACTION_TYPES.STOP_FOR_HUMAN
 ]);
 
+// Observations/research are read-only; any browser interaction needs a fresh user decision.
+const READ_ONLY_ACTIONS = new Set([
+  ACTION_TYPES.OBSERVE_PAGE, ACTION_TYPES.OBSERVE_KNOWN_TAB,
+  ACTION_TYPES.GET_VISIBLE_TEXT, ACTION_TYPES.GET_DOM_SNAPSHOT,
+  ACTION_TYPES.GET_FORMS, ACTION_TYPES.GET_LINKS, ACTION_TYPES.GET_BUTTONS,
+  ACTION_TYPES.CAPTURE_VIEWPORT, ACTION_TYPES.CAPTURE_NUMBERED_OVERLAY,
+  ACTION_TYPES.WEB_SEARCH, ACTION_TYPES.HTTP_REQUEST,
+  ACTION_TYPES.WAIT_FOR_PAGE_CHANGE, ACTION_TYPES.ASK_USER,
+  ACTION_TYPES.STOP_FOR_HUMAN
+]);
+
 const MEDIUM_RISK_ACTIONS = new Set([
   ACTION_TYPES.FOCUS_ELEMENT,
   ACTION_TYPES.GO_BACK,
@@ -102,7 +113,7 @@ export function validateActionPlan(plan) {
       actionType: action?.type || "unknown",
       risk,
       allowed: risk !== RISK_LEVELS.BLOCKED,
-      requiresConfirmation: risk !== RISK_LEVELS.LOW && risk !== RISK_LEVELS.BLOCKED,
+      requiresConfirmation: risk !== RISK_LEVELS.BLOCKED && !READ_ONLY_ACTIONS.has(action?.type),
       reason: action?.type === ACTION_TYPES.UPLOAD_FILE_TO_FIELD
         ? "File upload fields must be completed by the user through the browser file picker."
         : getPolicyReason(risk)
