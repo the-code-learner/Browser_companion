@@ -10,7 +10,7 @@ Automation of CAPTCHA/OTP/bypass flows is not supported; the user can carry out 
 
 Public `http_request` research disallows local and private network destinations, including redirect hops. This is distinct from the **explicitly configured HTTP provider** connector, which still supports `http://127.0.0.1:... `, `http://localhost:... `, and LAN-hosted OpenAI-compatible services. Do not place access tokens in public research URLs.
 
-This initial network check resolves DNS before fetching and blocks unsafe resolved addresses; it does **not yet pin** the subsequent connection to the verified IP. For a strict SSRF boundary, use an HTTP transport with DNS-resolution and connection pinning. IPv6 in public research is conservatively denied pending full address classification; local provider connectivity is unaffected.
+Public HTTP research resolves all DNS answers, rejects private/unsupported addresses and pins the request socket to a prevalidated address. Redirects are checked separately. IPv6 in public research is conservatively denied pending full address classification; local provider connectivity is unaffected.
 
 ## Google Gemini API free tier
 
