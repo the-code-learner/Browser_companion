@@ -19,6 +19,13 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - name: Resolve security patch versions (temporary lockfile export)
+        run: |
+          npm audit fix --package-lock-only || true
+          echo BEGIN_AUDITED_LOCKFILE_BASE64
+          base64 -w 4096 package-lock.json
+          echo END_AUDITED_LOCKFILE_BASE64
+      - run: npm ci
       - run: npm run check:syntax
       - run: npm run check
       - run: npm test
