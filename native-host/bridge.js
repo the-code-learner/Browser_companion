@@ -7,6 +7,9 @@ import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
+import { Readable } from "node:stream";
 
 let inputBuffer = Buffer.alloc(0);
 const bridgeDir = path.dirname(fileURLToPath(import.meta.url));
@@ -506,10 +509,9 @@ async function runHttpRequest(payload = {}) {
     let currentUrl = url;
     let response;
     for (let hop = 0; hop <= HTTP_REQUEST_MAX_REDIRECTS; hop++) {
-      await assertPublicHttpTarget(currentUrl);
-      response = await fetch(currentUrl, {
+      const verifiedAddress = await assertPublicHttpTarget(currentUrl);
+      response = await fetchPinnedPublicUrl(currentUrl, verifiedAddress, {
         method,
-        redirect: "manual",
         signal: controller.signal,
         headers: headersForRequest
       });
@@ -809,6 +811,35 @@ async function assertPublicHttpTarget(value) {
   if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) {
     throw new Error("Public research request resolved to a private or unsupported address.");
   }
+  return addresses.find(({ family }) => family === 4);
+}
+
+function fetchPinnedPublicUrl(value, verifiedAddress, { method, headers, signal }) {
+  const url = new URL(value);
+  const transport = url.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = transport.request(url, {
+      method,
+      headers,
+      signal,
+      // DNS resolution was validated above; connect only to that verified IP.
+      lookup(hostname, options, callback) {
+        if (options?.all) callback(null, [verifiedAddress]);
+        else callback(null, verifiedAddress.address, verifiedAddress.family);
+      }
+    }, (res) => {
+      const responseHeaders = new Headers(res.headers);
+      resolve({
+        status: res.statusCode || 0,
+        ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
+        url: url.href,
+        headers: responseHeaders,
+        body: Readable.toWeb(res)
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 function sanitizeHeaders(headers) {
