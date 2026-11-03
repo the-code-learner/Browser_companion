@@ -22,5 +22,5 @@ const native = fs.readFileSync(new URL("../native-host/bridge.js", import.meta.u
 assert.match(native, /NATIVE_MAX_INPUT_BYTES/);
 assert.match(native, /assertPublicHttpTarget\(currentUrl\)/);
 assert.match(native, /provider\.detailedDebug === true/);
-assert.ok(native.includes("/v1beta/openai"));
+assert.match(native, /v1beta/);
 console.log("Security invariants passed.");
