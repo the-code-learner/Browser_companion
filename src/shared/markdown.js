@@ -251,11 +251,11 @@ function splitTableRow(line) {
 }
 
 function renderMermaidBlock(source) {
-  const diagram = encodeURIComponent(String(source || "").trim());
+  const diagram = escapeHtml(String(source || "").trim());
   return `
     <figure class="mermaid-block">
-      <img alt="Mermaid diagram" src="https://mermaid.ink/svg/${diagram}">
-      <figcaption>Mermaid diagram</figcaption>
+      <figcaption>Mermaid source (local-only preview)</figcaption>
+      <pre><code data-language="mermaid">${diagram}</code></pre>
     </figure>
   `;
 }

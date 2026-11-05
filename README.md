@@ -14,6 +14,7 @@ The project is intentionally plain JavaScript and can be loaded directly as an u
 
 ## Technical Reports
 
+- [Security, user consent and Gemini API setup](docs/security-and-providers.md): manual approval boundaries, local LLM network access, optional detailed HTTP diagnostics, and Google AI Studio free-tier integration.
 - [Context synthesis architecture](docs/context-synthesis-architecture.md): reusable patterns for compacting large browser/research context with synthesis agents, link refs, task memory, compact/minimal retries, resume checkpoints, and future grep-style external retrieval.
 
 ## What It Does
@@ -81,6 +82,7 @@ Browser Companion does **not** let the model execute arbitrary code in the page.
 
 Instead:
 
+- the user retains final control of browser interactions and grants each plan explicit approval; high-risk actions include an extra disclaimer and typed confirmation
 - the model returns structured action plans
 - the extension validates those plans against local policy
 - the content executor resolves targets using constrained logic

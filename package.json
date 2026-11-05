@@ -7,9 +7,10 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/check-extension.mjs",
-    "test": "node scripts/test-policy.mjs && node scripts/test-deep-search.mjs && node scripts/test-markdown.mjs",
+    "test": "node scripts/test-policy.mjs && node scripts/test-deep-search.mjs && node scripts/test-markdown.mjs && node scripts/test-hardening.mjs",
     "test:attachments": "node scripts/test-attachment-extraction.mjs",
-    "test:memory": "node scripts/test-user-memory.mjs"
+    "test:memory": "node scripts/test-user-memory.mjs",
+    "check:syntax": "node --check native-host/bridge.js && node --check src/background/service-worker.js && node --check src/sidepanel/App.js && node --check src/deep-search/App.js"
   },
   "engines": {
     "node": ">=20"

@@ -33,6 +33,7 @@ export const MESSAGE_TYPES = Object.freeze({
   VALIDATE_ACTION_PLAN: "validate_action_plan",
   POLICY_RESULT: "policy_result",
   DEV_WATCH_STATUS: "dev_watch_status",
+  APPROVE_ACTION_PLAN: "approve_action_plan",
   EXECUTE_ACTION_PLAN: "execute_action_plan",
   EXECUTION_RESULT: "execution_result"
 });

@@ -9,6 +9,8 @@ chrome.runtime.onInstalled.addListener(() => {
 let nativePort = null;
 let nativePortSequence = 1;
 const nativePortPending = new Map();
+const pendingActionApprovals = new Map();
+const ACTION_APPROVAL_LIFETIME_MS = 60000;
 let activeNativeRequestId = null;
 const AUTO_OBSERVE_OPENED_TAB_LIMIT = 3;
 
@@ -33,7 +35,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-async function handleMessage(message) {
+async function handleMessage(message, sender) {
   if (message?.type === MESSAGE_TYPES.OBSERVE_ACTIVE_TAB) {
     return observeActiveTab(message.payload);
   }
@@ -133,8 +135,19 @@ async function handleMessage(message) {
     return requestDevWatchStatus();
   }
 
+  if (message?.type === MESSAGE_TYPES.APPROVE_ACTION_PLAN) {
+    if (!isSidepanelSender(sender)) return { ok: false, error: "Action approval must originate from the side panel." };
+    const plan = message.payload?.plan;
+    const policy = validateActionPlan(plan);
+    if (!policy.allowed || !Array.isArray(plan?.actions) || !plan.actions.length) return { ok: false, error: "Action plan cannot be approved." };
+    const token = crypto.randomUUID();
+    pendingActionApprovals.set(token, { planDigest: JSON.stringify(plan), expiresAt: Date.now() + ACTION_APPROVAL_LIFETIME_MS });
+    return { ok: true, token };
+  }
+
   if (message?.type === MESSAGE_TYPES.EXECUTE_ACTION_PLAN) {
-    return executeActionPlan(message.payload?.plan, message.payload?.executionContext || null);
+    if (!isSidepanelSender(sender)) return { ok: false, error: "Action execution must originate from the side panel." };
+    return executeActionPlan(message.payload?.plan, message.payload?.executionContext || null, message.payload?.approvalToken);
   }
 
   return {
@@ -593,7 +606,11 @@ async function requestDevWatchStatus() {
   }
 }
 
-async function executeActionPlan(plan, executionContext = null) {
+function isSidepanelSender(sender) {
+  return sender?.id === chrome.runtime.id && sender?.url === chrome.runtime.getURL("src/sidepanel/index.html");
+}
+
+async function executeActionPlan(plan, executionContext = null, approvalToken = "") {
   const policy = validateActionPlan(plan);
 
   if (!policy.allowed) {
@@ -602,6 +619,14 @@ async function executeActionPlan(plan, executionContext = null) {
       error: "The action plan was blocked by Browser Companion policy.",
       policy
     };
+  }
+
+  if (policy.requiresConfirmation) {
+    const approved = pendingActionApprovals.get(approvalToken);
+    pendingActionApprovals.delete(approvalToken);
+    if (!approved || approved.expiresAt < Date.now() || approved.planDigest !== JSON.stringify(plan)) {
+      return { ok: false, error: "An explicit, current user approval is required for this action plan." };
+    }
   }
 
   const tab = await resolveExecutionContextTab(executionContext);

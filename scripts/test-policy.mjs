@@ -111,9 +111,9 @@ const blockedPlan = {
   ]
 };
 
-assert.equal(validateActionPlan(lowRiskPlan).requiresConfirmation, false);
-assert.equal(validateActionPlan(linkClickPlan).requiresConfirmation, false);
-assert.equal(validateActionPlan(openUrlPlan).requiresConfirmation, false);
+assert.equal(validateActionPlan(lowRiskPlan).requiresConfirmation, true);
+assert.equal(validateActionPlan(linkClickPlan).requiresConfirmation, true);
+assert.equal(validateActionPlan(openUrlPlan).requiresConfirmation, true);
 assert.equal(validateActionPlan(httpRequestPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(webSearchPlan).requiresConfirmation, false);
 assert.equal(validateActionPlan(fillPlan).requiresConfirmation, true);
@@ -135,8 +135,8 @@ const captchaPlan = {
   ]
 };
 
-assert.equal(validateActionPlan(captchaPlan).allowed, true);
+assert.equal(validateActionPlan(captchaPlan).allowed, false);
 assert.equal(validateActionPlan(captchaPlan).results[0].risk, "blocked");
-assert.equal(validateActionPlan(captchaPlan).results[0].requiresConfirmation, true);
+assert.equal(validateActionPlan(captchaPlan).results[0].requiresConfirmation, false);
 
 console.log("Policy tests passed.");
